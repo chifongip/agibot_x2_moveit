@@ -1,0 +1,13 @@
+repositories:
+  agibot_x2_moveit:
+    type: git
+    url: https://github.com/chifongip/agibot_x2_moveit.git
+    version: main
+  x2_description:
+    type: git
+    url: https://github.com/chifongip/x2_description.git
+    version: main
+  aimdk_msgs:
+    type: git
+    url: https://github.com/chifongip/aimdk_msgs.git
+    version: main

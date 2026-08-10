@@ -1,0 +1,15 @@
+# ROS 2 and colcon products
+/build/
+/install/
+/log/
+
+# Python products
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor and test-tool state
+.vscode/
+.idea/
+Testing/
+test_results/

@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<library path="agibot_x2_ros2_control">
+  <class
+    name="agibot_x2_ros2_control/X2SystemHardware"
+    type="agibot_x2_ros2_control::X2SystemHardware"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>Real-hardware interface for the AgiBot X2 HAL topics and RoboJuDo ZMQ bridge.</description>
+  </class>
+</library>

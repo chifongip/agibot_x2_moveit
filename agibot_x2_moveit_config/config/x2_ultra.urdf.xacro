@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="x2_ultra">
+    <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
+    <xacro:arg name="ros2_control_gains_file" default="x2_ros2_control_gains.yaml" />
+    <xacro:arg name="use_fake_hardware" default="true" />
+    <xacro:arg name="command_transport" default="ros_topic" />
+    <xacro:arg name="zmq_endpoint" default="tcp://*:8559" />
+
+    <!-- Import x2_ultra urdf file -->
+    <xacro:include filename="$(find x2_description)/urdf/x2_ultra.urdf" />
+
+    <!-- Import control_xacro -->
+    <xacro:include filename="x2_ultra.ros2_control.xacro" />
+
+
+    <xacro:x2_ultra_ros2_control
+        name="X2System"
+        initial_positions_file="$(arg initial_positions_file)"
+        gains_file="$(arg ros2_control_gains_file)"
+        use_fake_hardware="$(arg use_fake_hardware)"
+        command_transport="$(arg command_transport)"
+        zmq_endpoint="$(arg zmq_endpoint)"/>
+
+</robot>
