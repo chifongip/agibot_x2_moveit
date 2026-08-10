@@ -42,8 +42,8 @@
           <param name="head_state_topic">/aima/hal/joint/head/state</param>
           <param name="arm_command_topic">/aima/hal/joint/arm/command</param>
           <param name="zmq_endpoint">${zmq_endpoint}</param>
-          <param name="state_timeout_sec">0.1</param>
-          <param name="activation_timeout_sec">2.0</param>
+          <param name="state_timeout_sec">0.25</param>
+          <param name="activation_timeout_sec">10.0</param>
           <param name="fault_damping">5.0</param>
           <param name="fault_publish_duration_sec">0.2</param>
           <param name="zmq_publish_rate_hz">50.0</param>

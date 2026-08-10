@@ -1,7 +1,7 @@
 moveit_setup_assistant_config:
   urdf:
-    package: x2_description
-    relative_path: urdf/x2_ultra.urdf
+    package: agibot_x2_moveit_config
+    relative_path: config/x2_ultra.urdf.xacro
   srdf:
     relative_path: config/x2_ultra.srdf
   package_settings:

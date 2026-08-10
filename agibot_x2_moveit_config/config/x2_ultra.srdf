@@ -10,27 +10,23 @@
     <!--CHAINS: When a chain is specified, all the links along the chain (including endpoints) are included in the group. Additionally, all the joints that are parents to included links are also included. This means that joints along the chain and the parent joint of the base link are included in the group-->
     <!--SUBGROUPS: Groups can also be formed by referencing to already defined group names-->
     <group name="left_arm">
-        <joint name="left_shoulder_pitch_joint"/>
-        <joint name="left_shoulder_roll_joint"/>
-        <joint name="left_shoulder_yaw_joint"/>
-        <joint name="left_elbow_joint"/>
-        <joint name="left_wrist_yaw_joint"/>
-        <joint name="left_wrist_pitch_joint"/>
-        <joint name="left_wrist_roll_joint"/>
+        <chain base_link="torso_link" tip_link="left_hand_tcp_link"/>
     </group>
     <group name="right_arm">
-        <joint name="right_shoulder_pitch_joint"/>
-        <joint name="right_shoulder_roll_joint"/>
-        <joint name="right_shoulder_yaw_joint"/>
-        <joint name="right_elbow_joint"/>
-        <joint name="right_wrist_yaw_joint"/>
-        <joint name="right_wrist_pitch_joint"/>
-        <joint name="right_wrist_roll_joint"/>
+        <chain base_link="torso_link" tip_link="right_hand_tcp_link"/>
     </group>
     <group name="dual_arm">
         <group name="left_arm"/>
         <group name="right_arm"/>
     </group>
+    <group name="left_hand">
+        <link name="left_hand_pad_link"/><link name="left_hand_tcp_link"/>
+    </group>
+    <group name="right_hand">
+        <link name="right_hand_pad_link"/><link name="right_hand_tcp_link"/>
+    </group>
+    <end_effector name="left_hand" parent_link="left_wrist_roll_link" group="left_hand" parent_group="left_arm"/>
+    <end_effector name="right_hand" parent_link="right_wrist_roll_link" group="right_hand" parent_group="right_arm"/>
     <!--GROUP STATES: Purpose: Define a named state for a particular group, in terms of joint values. This is useful to define states like 'folded arms'-->
     <group_state name="zero" group="dual_arm">
         <joint name="left_elbow_joint" value="0"/>
@@ -49,6 +45,10 @@
         <joint name="right_wrist_yaw_joint" value="0"/>
     </group_state>
     <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
+    <disable_collisions link1="left_wrist_roll_link" link2="left_hand_pad_link" reason="Adjacent"/>
+    <disable_collisions link1="left_hand_pad_link" link2="left_hand_tcp_link" reason="Adjacent"/>
+    <disable_collisions link1="right_wrist_roll_link" link2="right_hand_pad_link" reason="Adjacent"/>
+    <disable_collisions link1="right_hand_pad_link" link2="right_hand_tcp_link" reason="Adjacent"/>
     <disable_collisions link1="head_pitch_link" link2="head_yaw_link" reason="Adjacent"/>
     <disable_collisions link1="head_pitch_link" link2="left_hip_pitch_link" reason="Never"/>
     <disable_collisions link1="head_pitch_link" link2="left_hip_roll_link" reason="Never"/>

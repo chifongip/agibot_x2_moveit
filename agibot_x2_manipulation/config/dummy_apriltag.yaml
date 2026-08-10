@@ -1,0 +1,14 @@
+dummy_apriltag:
+  ros__parameters:
+    parent_frame: base_link
+    tag_frame: tag0
+    detections_topic: /detections
+    family: tag36h11
+    tag_id: 0
+    decision_margin: 100.0
+    # Pose of the center of the tag on the top face of the test box [m, rad].
+    x: 0.35
+    y: 0.0
+    z: 0.45
+    yaw: 0.0
+    publish_rate: 30.0

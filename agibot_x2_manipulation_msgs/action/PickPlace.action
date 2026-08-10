@@ -1,0 +1,19 @@
+geometry_msgs/PoseStamped place_pose
+bool plan_only
+---
+uint16 SUCCESS=0
+uint16 BUSY=1
+uint16 NO_STABLE_BOX_POSE=2
+uint16 INVALID_GOAL=3
+uint16 PLANNING_FAILED=4
+uint16 EXECUTION_FAILED=5
+uint16 ATTACHMENT_FAILED=6
+uint16 SAFETY_ABORT=7
+bool success
+uint16 error_code
+string message
+geometry_msgs/PoseStamped achieved_pose
+---
+string stage
+geometry_msgs/PoseStamped box_pose
+float32 progress

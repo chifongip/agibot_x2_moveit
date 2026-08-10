@@ -1,0 +1,7 @@
+uint8 CONFIRM_EMPTY=0
+uint8 CONFIRM_HOLDING=1
+
+uint8 requested_state
+---
+bool success
+string message

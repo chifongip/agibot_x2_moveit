@@ -1,0 +1,46 @@
+box_localizer:
+  ros__parameters:
+    planning_frame: base_link
+    tag_frame: tag0
+    detections_topic: /detections
+    tag_id: 0
+    box_dimensions: [0.15, 0.35, 0.32]  # length X, width Y, height Z [m]
+    tag_to_box_yaw: 0.0
+    stable_sample_count: 10
+    maximum_pose_age: 1.5
+    maximum_position_spread: 0.005
+    maximum_angular_spread: 0.0523598776  # 3 degrees
+    maximum_box_tilt: 0.785398163         # 45 degrees from base +Z
+    minimum_decision_margin: 20.0
+
+pick_place_server:
+  ros__parameters:
+    planning_frame: base_link
+    box_pose_topic: /box_pose
+    planning_group: dual_arm
+    left_group: left_arm
+    right_group: right_arm
+    left_tcp: left_hand_tcp_link
+    right_tcp: right_hand_tcp_link
+    box_id: grasp_box
+    box_dimensions: [0.15, 0.35, 0.32]
+    pregrasp_distance: 0.08
+    contact_height_offset: 0.0
+    lift_height: 0.05
+    cartesian_step: 0.01
+    maximum_box_pose_age: 1.5
+    ik_timeout: 0.05
+    pregrasp_ik_attempts: 20
+    maximum_joint_step: 0.35
+    velocity_scaling: 0.10
+    acceleration_scaling: 0.10
+    # Simulation-tested pelvis-relative box pose used while the base navigates.
+    # Recalibrate this pose before real-robot navigation.
+    carry_box_pose: [0.35, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
+    recovery_position_tolerance: 0.04
+    recovery_angular_tolerance: 0.1745329252  # 10 degrees
+    initial_state: empty
+    post_place_named_target: zero
+    simulate_ideal_attachment: false
+    attach_service: /mujoco_grasp/attach
+    detach_service: /mujoco_grasp/detach

@@ -35,7 +35,7 @@ ros2 launch agibot_x2_moveit_config demo.launch.py
 ## Real-control launch
 
 The real launch starts `robot_state_publisher`, `ros2_control_node`, the joint
-state broadcaster, both arm controllers, `move_group`, and optionally RViz:
+state broadcaster, coordinated dual-arm controller, `move_group`, and optionally RViz:
 
 ```bash
 ros2 launch agibot_x2_moveit_config real_robot.launch.py \
@@ -118,7 +118,11 @@ emergency stop during every initial test.
 ## Main files
 
 - `config/x2_ultra.ros2_control.xacro`: fake/real hardware selection and hardware parameters.
-- `config/ros2_controllers.yaml`: 500 Hz controller manager and arm trajectory controllers.
+- `config/ros2_controllers.yaml`: 500 Hz controller manager and one coordinated 14-joint trajectory controller.
 - `config/moveit_controllers.yaml`: MoveIt action-controller mapping.
+- The URDF xacro adds passive `left/right_hand_pad_link` collision bodies and
+  `left/right_hand_tcp_link` planning frames. Their default wrist offsets are
+  placeholders and must be calibrated before physical grasping. The left
+  contact direction is TCP `-Y`; the right contact direction is TCP `+Y`.
 - `config/x2_ros2_control_gains.yaml`: direct HAL stiffness and damping.
 - `launch/real_robot.launch.py`: full real-control stack.

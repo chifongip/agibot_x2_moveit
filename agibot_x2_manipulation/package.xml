@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>agibot_x2_manipulation</name>
+  <version>0.1.0</version>
+  <description>AprilTag box localization and coordinated dual-arm pick/place for AgiBot X2.</description>
+  <maintainer email="oscar.ip@lscm.hk">oscar</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>agibot_x2_manipulation_msgs</depend>
+  <depend>apriltag_msgs</depend>
+  <depend>boost</depend>
+  <depend>eigen</depend>
+  <depend>geometry_msgs</depend>
+  <depend>moveit_core</depend>
+  <depend>moveit_msgs</depend>
+  <depend>moveit_ros_planning</depend>
+  <depend>moveit_ros_planning_interface</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>random_numbers</depend>
+  <depend>shape_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2_eigen</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tl_expected</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <exec_depend>agibot_x2_moveit_config</exec_depend>
+  <exec_depend>apriltag_ros</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>moveit_configs_utils</exec_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
