@@ -49,3 +49,19 @@ def test_zmq_transport_is_selected_exclusively():
     }
     assert parameters["command_transport"] == "zmq"
     assert parameters["zmq_endpoint"] == "tcp://*:8559"
+
+
+def test_arm_state_topic_can_be_isolated_for_hybrid_testing():
+    root = expand(
+        use_fake_hardware="false",
+        command_transport="zmq",
+        arm_state_topic="/x2_test/aima/hal/joint/arm/state",
+    )
+    parameters = {
+        item.get("name"): item.text
+        for item in root.findall("ros2_control/hardware/param")
+    }
+    assert parameters["leg_state_topic"] == "/aima/hal/joint/leg/state"
+    assert parameters["waist_state_topic"] == "/aima/hal/joint/waist/state"
+    assert parameters["arm_state_topic"] == "/x2_test/aima/hal/joint/arm/state"
+    assert parameters["head_state_topic"] == "/aima/hal/joint/head/state"

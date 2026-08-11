@@ -8,6 +8,7 @@ import time
 from numbers import Real
 
 import rclpy
+import yaml
 import zmq
 from aimdk_msgs.msg import JointState, JointStateArray
 from rclpy.node import Node
@@ -56,6 +57,18 @@ STATE_TOPICS = {
     "/aima/hal/joint/head/state": HEAD_JOINT_NAMES,
 }
 
+
+def state_topics(prefix=""):
+    """Return HAL feedback topics under an optional isolated namespace."""
+    normalized = prefix.strip("/")
+    if not normalized:
+        return STATE_TOPICS.copy()
+    return {
+        f"/{normalized}{topic}": names
+        for topic, names in STATE_TOPICS.items()
+    }
+
+
 LOCOMANIPULATION_POSITIONS = dict(
     zip(
         ALL_JOINT_NAMES,
@@ -93,10 +106,43 @@ def validate_positions(message):
     return decoded
 
 
+def load_initial_positions(path):
+    """Load one complete 31-joint snapshot from a YAML diagnostic file."""
+    try:
+        with open(path, encoding="utf-8") as stream:
+            document = yaml.safe_load(stream)
+    except (OSError, yaml.YAMLError) as exception:
+        raise ValueError(f"cannot read initial-state file '{path}': {exception}") from exception
+
+    if not isinstance(document, dict):
+        raise ValueError("initial-state file must contain a mapping")
+    positions = document.get("joint_positions")
+    if not isinstance(positions, dict):
+        raise ValueError("initial-state file must contain a joint_positions mapping")
+    missing = sorted(set(ALL_JOINT_NAMES) - set(positions))
+    unknown = sorted(set(positions) - set(ALL_JOINT_NAMES))
+    if missing or unknown:
+        raise ValueError(
+            f"initial-state joints must match X2 exactly (missing={missing}, unknown={unknown})"
+        )
+    decoded = {}
+    for name in ALL_JOINT_NAMES:
+        value = positions[name]
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"initial position for {name} must be numeric")
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f"initial position for {name} must be finite")
+        decoded[name] = value
+    return decoded
+
+
 class FakeZmqJointStates(Node):
     """Publish perfect X2 HAL state feedback for ZMQ arm commands."""
 
-    def __init__(self, endpoint, publish_rate, initial_pose):
+    def __init__(
+        self, endpoint, publish_rate, initial_pose, initial_state_file, state_topic_prefix=""
+    ):
         super().__init__("fake_x2_zmq_joint_states")
         if publish_rate <= 0.0 or not math.isfinite(publish_rate):
             raise ValueError("publish_rate must be finite and positive")
@@ -107,11 +153,14 @@ class FakeZmqJointStates(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
+        self.state_topics_ = state_topics(state_topic_prefix)
         self.publishers_ = {
             topic: self.create_publisher(JointStateArray, topic, sensor_qos)
-            for topic in STATE_TOPICS
+            for topic in self.state_topics_
         }
-        if initial_pose == "locomanipulation":
+        if initial_state_file:
+            self.positions_ = load_initial_positions(initial_state_file)
+        elif initial_pose == "locomanipulation":
             self.positions_ = LOCOMANIPULATION_POSITIONS.copy()
         else:
             self.positions_ = {name: 0.0 for name in ALL_JOINT_NAMES}
@@ -130,6 +179,10 @@ class FakeZmqJointStates(Node):
             f"Publishing perfect X2 state feedback at {publish_rate:g} Hz; "
             f"subscribed to {endpoint}"
         )
+        if initial_state_file:
+            self.get_logger().info(
+                f"Initialized all 31 joints from recorded state file: {initial_state_file}"
+            )
 
     def close(self):
         """Release ZMQ resources immediately."""
@@ -168,7 +221,7 @@ class FakeZmqJointStates(Node):
         """Receive targets and publish one coherent state snapshot."""
         self.receive_available()
         stamp = self.get_clock().now().to_msg()
-        for topic, names in STATE_TOPICS.items():
+        for topic, names in self.state_topics_.items():
             message = JointStateArray()
             message.header.stamp = stamp
             message.header.meas_stamp = stamp
@@ -193,6 +246,11 @@ def parse_arguments(argv):
         description="Publish perfect X2 HAL state feedback from MoveIt's ZMQ arm targets."
     )
     parser.add_argument(
+        "--state-topic-prefix",
+        default="",
+        help="Prefix prepended to all /aima/hal/joint/*/state topics.",
+    )
+    parser.add_argument(
         "--endpoint",
         default="tcp://127.0.0.1:8559",
         help="ZMQ PUB endpoint to connect to (default: %(default)s)",
@@ -209,6 +267,14 @@ def parse_arguments(argv):
         default="locomanipulation",
         help="State used before the first ZMQ target (default: %(default)s)",
     )
+    parser.add_argument(
+        "--initial-state-file",
+        default="",
+        help=(
+            "YAML file with a complete joint_positions mapping. When set, this "
+            "overrides --initial-pose."
+        ),
+    )
     return parser.parse_args(remove_ros_args(args=argv)[1:])
 
 
@@ -221,6 +287,8 @@ def main(argv=None):
         endpoint=arguments.endpoint,
         publish_rate=arguments.publish_rate,
         initial_pose=arguments.initial_pose,
+        initial_state_file=arguments.initial_state_file,
+        state_topic_prefix=arguments.state_topic_prefix,
     )
     try:
         rclpy.spin(node)
