@@ -1,0 +1,34 @@
+# Static 31-joint snapshot from debug_captures/planning_failure_20260811.
+# Values are radians in the X2 URDF joint-name convention.
+joint_positions:
+  left_hip_pitch_joint: -0.17841863632202148
+  left_hip_roll_joint: -0.014860153198242188
+  left_hip_yaw_joint: -0.02770709991455078
+  left_knee_joint: 0.0921335220336914
+  left_ankle_pitch_joint: 0.03058338165283203
+  left_ankle_roll_joint: 0.0016298294067382812
+  right_hip_pitch_joint: -0.16844749450683594
+  right_hip_roll_joint: -0.0018215179443359375
+  right_hip_yaw_joint: -0.0050811767578125
+  right_knee_joint: 0.12990713119506836
+  right_ankle_pitch_joint: -0.0762186050415039
+  right_ankle_roll_joint: 0.010258197784423828
+  waist_yaw_joint: -0.1398777961730957
+  waist_pitch_joint: 0.3491
+  waist_roll_joint: -0.015399747889154877
+  left_shoulder_pitch_joint: 0.35
+  left_shoulder_roll_joint: 0.1
+  left_shoulder_yaw_joint: 0.0
+  left_elbow_joint: -0.87
+  left_wrist_yaw_joint: 0.0
+  left_wrist_pitch_joint: 0.0
+  left_wrist_roll_joint: 0.0
+  right_shoulder_pitch_joint: 0.35
+  right_shoulder_roll_joint: -0.1
+  right_shoulder_yaw_joint: 0.0
+  right_elbow_joint: -0.87
+  right_wrist_yaw_joint: 0.0
+  right_wrist_pitch_joint: 0.0
+  right_wrist_roll_joint: 0.0
+  head_yaw_joint: 0.0005273818969726562
+  head_pitch_joint: 0.0

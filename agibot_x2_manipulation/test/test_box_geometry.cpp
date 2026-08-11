@@ -97,5 +97,81 @@ TEST(BoxGeometry, PelvisRelativeDummyPoseProducesExpectedGrasps)
   EXPECT_NEAR(grasp.right_pregrasp.translation().z(), 0.29, 1e-12);
 }
 
+TEST(BoxGeometry, CandidateSearchStartsWithUnmodifiedCoordinatedGrasp)
+{
+  Eigen::Isometry3d box = Eigen::Isometry3d::Identity();
+  box.translation() = Eigen::Vector3d(0.3, 0.0, 0.2);
+  GraspCandidateOptions options;
+  options.maximum_candidates = 64;
+  const auto candidates = generateGraspCandidates(box, {0.15, 0.35, 0.32}, 0.08, 0.0, options);
+
+  ASSERT_FALSE(candidates.empty());
+  EXPECT_NEAR(candidates.front().correction_cost, 0.0, 1e-12);
+  EXPECT_NEAR(candidates.front().tilt_correction, 0.0, 1e-12);
+  EXPECT_NEAR(candidates.front().contact_height_offset, 0.0, 1e-12);
+  EXPECT_NEAR(candidates.front().tangent_offset, 0.0, 1e-12);
+  EXPECT_NEAR(candidates.front().wrist_rotation, 0.0, 1e-12);
+  EXPECT_NEAR(candidates.front().pregrasp_distance, 0.08, 1e-12);
+}
+
+TEST(BoxGeometry, TiltCorrectionKeepsMeasuredTopCenterFixed)
+{
+  Eigen::Isometry3d box = Eigen::Isometry3d::Identity();
+  box.translation() = Eigen::Vector3d(0.32, 0.01, 0.12);
+  box.linear() = Eigen::AngleAxisd(0.15, Eigen::Vector3d::UnitY()).toRotationMatrix();
+  const BoxDimensions dimensions{0.15, 0.35, 0.32};
+  GraspCandidateOptions options;
+  options.position_tolerance = 0.0;
+  options.orientation_tolerance = 0.0872664626;
+  options.pregrasp_distance_tolerance = 0.0;
+  options.maximum_candidates = 500;
+  const auto candidates = generateGraspCandidates(box, dimensions, 0.08, 0.0, options);
+  const Eigen::Vector3d measured_top =
+    box.translation() + box.linear() * Eigen::Vector3d(0.0, 0.0, dimensions.height / 2.0);
+
+  ASSERT_GE(candidates.size(), 3U);
+  bool found_maximum_correction = false;
+  for (const auto & candidate : candidates) {
+    const Eigen::Vector3d candidate_top = candidate.planning_box_pose.translation() +
+      candidate.planning_box_pose.linear() *
+      Eigen::Vector3d(0.0, 0.0, dimensions.height / 2.0);
+    EXPECT_LT((candidate_top - measured_top).norm(), 1e-10);
+    if (std::abs(candidate.tilt_correction - options.orientation_tolerance) < 1e-10) {
+      found_maximum_correction = true;
+    }
+  }
+  EXPECT_TRUE(found_maximum_correction);
+}
+
+TEST(BoxGeometry, CandidateOffsetsRemainCoordinatedAndBounded)
+{
+  GraspCandidateOptions options;
+  options.maximum_candidates = 64;
+  const auto candidates = generateGraspCandidates(
+    Eigen::Isometry3d::Identity(), {0.15, 0.35, 0.32}, 0.08, 0.0, options);
+
+  ASSERT_EQ(candidates.size(), options.maximum_candidates);
+  for (const auto & candidate : candidates) {
+    EXPECT_LE(std::abs(candidate.contact_height_offset), options.position_tolerance + 1e-12);
+    EXPECT_LE(std::abs(candidate.tangent_offset), options.position_tolerance + 1e-12);
+    EXPECT_LE(std::abs(candidate.wrist_rotation), options.orientation_tolerance + 1e-12);
+    EXPECT_LE(
+      std::abs(candidate.pregrasp_distance - 0.08),
+      options.pregrasp_distance_tolerance + 1e-12);
+    const Eigen::Vector3d left_inward =
+      candidate.grasp.left_contact.linear() * -Eigen::Vector3d::UnitY();
+    const Eigen::Vector3d right_inward =
+      candidate.grasp.right_contact.linear() * Eigen::Vector3d::UnitY();
+    EXPECT_LT(left_inward.dot(candidate.grasp.left_outward_normal), -0.999);
+    EXPECT_LT(right_inward.dot(candidate.grasp.right_outward_normal), -0.999);
+    EXPECT_LT(
+      (candidate.box_to_left_contact.matrix() - candidate.grasp.left_contact.matrix()).norm(),
+      1e-10);
+    EXPECT_LT(
+      (candidate.box_to_right_contact.matrix() - candidate.grasp.right_contact.matrix()).norm(),
+      1e-10);
+  }
+}
+
 }  // namespace
 }  // namespace agibot_x2_manipulation

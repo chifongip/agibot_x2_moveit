@@ -7,8 +7,8 @@ dummy_apriltag:
     tag_id: 0
     decision_margin: 100.0
     # Pose of the center of the tag on the top face of the test box [m, rad].
-    x: 0.35
+    x: 0.3
     y: 0.0
-    z: 0.45
+    z: 0.3
     yaw: 0.0
     publish_rate: 30.0

@@ -1,0 +1,17 @@
+bool confirm_empty
+---
+uint16 SUCCESS=0
+uint16 CONFIRMATION_REQUIRED=1
+uint16 PREEMPTION_TIMEOUT=2
+uint16 CLEANUP_FAILED=3
+uint16 STATE_UNAVAILABLE=4
+uint16 PLANNING_FAILED=5
+uint16 EXECUTION_FAILED=6
+uint16 VERIFICATION_FAILED=7
+uint16 CANCELED=8
+bool success
+uint16 error_code
+string message
+---
+string stage
+float32 progress

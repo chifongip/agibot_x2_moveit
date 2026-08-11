@@ -1,3 +1,5 @@
+#include "agibot_x2_manipulation/box_geometry.hpp"
+
 #include <apriltag_msgs/msg/april_tag_detection.hpp>
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -10,6 +12,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace agibot_x2_manipulation
 {
@@ -30,6 +33,11 @@ public:
     y_ = declare_parameter("y", 0.0);
     z_ = declare_parameter("z", 0.85);
     yaw_ = declare_parameter("yaw", 0.0);
+    const auto replay_box_pose = declare_parameter<std::vector<double>>(
+      "replay_box_pose", std::vector<double>{});
+    const auto replay_box_dimensions = declare_parameter<std::vector<double>>(
+      "replay_box_dimensions", std::vector<double>{});
+    const double replay_tag_to_box_yaw = declare_parameter("replay_tag_to_box_yaw", 0.0);
     const double publish_rate = declare_parameter("publish_rate", 30.0);
 
     if (parent_frame_.empty() || tag_frame_.empty() || detections_topic_.empty()) {
@@ -44,6 +52,48 @@ public:
     {
       throw std::invalid_argument("dummy AprilTag parameters must be finite and valid");
     }
+    if (replay_box_pose.empty() != replay_box_dimensions.empty()) {
+      throw std::invalid_argument(
+              "replay_box_pose and replay_box_dimensions must be supplied together");
+    }
+    if (!replay_box_pose.empty()) {
+      if (replay_box_pose.size() != 7U || replay_box_dimensions.size() != 3U ||
+        !std::isfinite(replay_tag_to_box_yaw))
+      {
+        throw std::invalid_argument(
+                "recorded box replay requires pose [x,y,z,qx,qy,qz,qw], dimensions [x,y,z], "
+                "and a finite tag yaw");
+      }
+      const BoxDimensions dimensions{
+        replay_box_dimensions[0], replay_box_dimensions[1], replay_box_dimensions[2]};
+      if (dimensions.length <= 0.0 || dimensions.width <= 0.0 || dimensions.height <= 0.0) {
+        throw std::invalid_argument("recorded box replay dimensions must be positive");
+      }
+      Eigen::Quaterniond box_rotation(
+        replay_box_pose[6], replay_box_pose[3], replay_box_pose[4], replay_box_pose[5]);
+      if (!box_rotation.coeffs().allFinite() || box_rotation.norm() < 1e-9 ||
+        !std::isfinite(replay_box_pose[0]) || !std::isfinite(replay_box_pose[1]) ||
+        !std::isfinite(replay_box_pose[2]))
+      {
+        throw std::invalid_argument("recorded box replay pose must be finite with a valid quaternion");
+      }
+      Eigen::Isometry3d box_pose = Eigen::Isometry3d::Identity();
+      box_pose.translation() = Eigen::Vector3d(
+        replay_box_pose[0], replay_box_pose[1], replay_box_pose[2]);
+      box_pose.linear() = box_rotation.normalized().toRotationMatrix();
+      Eigen::Isometry3d tag_to_box = Eigen::Isometry3d::Identity();
+      tag_to_box.linear() = Eigen::AngleAxisd(
+        replay_tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      tag_to_box.translation() = Eigen::Vector3d(0.0, 0.0, -dimensions.height / 2.0);
+      const Eigen::Isometry3d tag_pose = box_pose * tag_to_box.inverse();
+      x_ = tag_pose.translation().x();
+      y_ = tag_pose.translation().y();
+      z_ = tag_pose.translation().z();
+      orientation_ = Eigen::Quaterniond(tag_pose.linear()).normalized();
+    } else {
+      orientation_ = Eigen::Quaterniond(
+        Eigen::AngleAxisd(yaw_, Eigen::Vector3d::UnitZ()));
+    }
 
     detections_pub_ = create_publisher<apriltag_msgs::msg::AprilTagDetectionArray>(
       detections_topic_, rclcpp::SensorDataQoS());
@@ -54,8 +104,8 @@ public:
 
     RCLCPP_WARN(
       get_logger(),
-      "Publishing TEST-ONLY tag %d as %s -> %s at [%.3f, %.3f, %.3f], yaw %.3f rad",
-      tag_id_, parent_frame_.c_str(), tag_frame_.c_str(), x_, y_, z_, yaw_);
+      "Publishing TEST-ONLY tag %d as %s -> %s at [%.3f, %.3f, %.3f]",
+      tag_id_, parent_frame_.c_str(), tag_frame_.c_str(), x_, y_, z_);
   }
 
 private:
@@ -70,8 +120,10 @@ private:
     transform.transform.translation.x = x_;
     transform.transform.translation.y = y_;
     transform.transform.translation.z = z_;
-    transform.transform.rotation.z = std::sin(yaw_ / 2.0);
-    transform.transform.rotation.w = std::cos(yaw_ / 2.0);
+    transform.transform.rotation.x = orientation_.x();
+    transform.transform.rotation.y = orientation_.y();
+    transform.transform.rotation.z = orientation_.z();
+    transform.transform.rotation.w = orientation_.w();
     tf_broadcaster_->sendTransform(transform);
 
     apriltag_msgs::msg::AprilTagDetection detection;
@@ -98,6 +150,7 @@ private:
   double y_;
   double z_;
   double yaw_;
+  Eigen::Quaterniond orientation_{Eigen::Quaterniond::Identity()};
   rclcpp::Publisher<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::TimerBase::SharedPtr timer_;

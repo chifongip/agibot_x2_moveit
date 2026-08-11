@@ -1,290 +1,271 @@
 # AgiBot X2 box manipulation
 
-This package localizes one upright box from an AprilTag centered on its top
-face and executes a coordinated dual-arm pick/place task. The box can have any
-yaw. The face pair most closely aligned with robot-left/right (`base_link
-+/-Y`) is selected automatically.
+`agibot_x2_manipulation` localizes one approximately upright box from an AprilTag on the
+center of its top face, creates the corresponding MoveIt collision object, and
+plans coordinated dual-arm pick and place motions. `base_link` is attached to
+the pelvis: all example box and place poses are pelvis-relative, not
+floor-relative. Treat the supplied values as simulation starting points and
+calibrate them before hardware execution.
 
-## Pick, navigate, and place workflow
+## Build and safety
 
-Use the split actions when the mobile base must navigate while carrying the
-box. An external application or behavior tree owns the sequence:
-
-1. Send `/pick_box` and wait for a successful result with `object_held: true`.
-2. Confirm that `/manipulation_state` is `HOLDING` (`state: 2`).
-3. Navigate with Nav2 while the dual-arm controller holds its last carry
-   position.
-4. After navigation and TF localization are stable, send `/place_box`.
-
-After releasing the box, Place first performs the Cartesian hand retreat and
-then plans both arms to the SRDF named state configured by
-`post_place_named_target` (`zero` by default). The action reports success only
-after this collision-checked return motion finishes. If it fails, the result
-states that the box was already placed and `/manipulation_state` remains
-`EMPTY`.
-
-The manipulation package does not command the mobile base. Pick moves the box
-to the `carry_box_pose` configured in `config/box_manipulation.yaml`; this pose
-is relative to the pelvis-mounted `base_link`. The supplied pose is a
-simulation-tested starting point, not a real-robot calibration.
-
-Test the two phases independently before allowing execution:
+Build from the workspace root after changing source or configuration:
 
 ```bash
-ros2 action send_goal /pick_box \
-  agibot_x2_manipulation_msgs/action/Pick \
-  "{plan_only: true}" --feedback
-
-# After an executing Pick and navigation:
-ros2 action send_goal /place_box \
-  agibot_x2_manipulation_msgs/action/Place \
-  "{place_pose: {header: {frame_id: base_link}, pose: {position: {x: 0.35, y: 0.0, z: 0.29}, orientation: {w: 1.0}}}, plan_only: true}" \
-  --feedback
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/x2_ws
+colcon build --symlink-install --packages-select agibot_x2_manipulation agibot_x2_manipulation_msgs
+source install/setup.bash
 ```
 
-`place_pose` may use another TF-connected frame such as `map`; it is resolved
-when Place starts, so send Place only after navigation finishes. The legacy
-`/pick_place` action remains available and executes Pick followed immediately
-by Place without navigation.
+`box_pick_place.launch.py` includes the real-robot MoveIt and `ros2_control`
+launch, activates `dual_arm_controller`, and is therefore motion-enabling.
+Before a real execution, verify the 31 fresh HAL joint states, controller and
+command-transport ownership, TF, the collision scene, and a `plan_only: true`
+goal. Do not run a second controller manager or another controller that claims
+the 14 arm joints. Use `command_transport:=ros_topic` only when this process is
+intended to publish `/aima/hal/joint/*/command`; use the configured ZMQ endpoint
+for the ZMQ transport.
 
-The latched `/manipulation_state` reports `UNKNOWN=0`, `EMPTY=1`, `HOLDING=2`,
-or `RECOVERY_REQUIRED=3`. Any failure after attachment keeps the box attached;
-never navigate after a failed Pick even when its result says `object_held:
-true`. Either inspect the robot and issue Place, or recover explicitly:
+## Box and grasp calibration
 
-```bash
-# Operator has verified that the robot holds no box.
-ros2 service call /recover_manipulation_state \
-  agibot_x2_manipulation_msgs/srv/RecoverManipulationState \
-  "{requested_state: 0}"
+`config/box_manipulation.yaml` defines the box dimensions as
+`[length_x, width_y, height_z]` in metres, in the aligned box frame. Its origin
+is the box center; +Z is up. The localizer converts the top-tag pose into that
+frame, and `tag_to_box_yaw` describes their fixed yaw offset. Keep the
+`box_dimensions` values for `box_localizer` and `pick_place_server` identical.
 
-# Operator has verified that the box is held at the configured carry pose.
-ros2 service call /recover_manipulation_state \
-  agibot_x2_manipulation_msgs/srv/RecoverManipulationState \
-  "{requested_state: 1}"
-```
+The grasp convention is deliberately asymmetric: the right TCP +Y axis and the
+left TCP -Y axis pass through their contact surfaces. Both TCP +X axes point
+up along the box. Calibrate `left_hand_pad_origin` and `right_hand_pad_origin`
+in the MoveIt configuration from the physical wrist to each contact surface;
+the defaults are not hardware calibration values.
 
-Holding state is persisted under `$ROS_HOME`, or `~/.ros` when `ROS_HOME` is
-unset. Restarting after a recorded hold intentionally produces `UNKNOWN` and
-requires one of the recovery calls. Confirming `HOLDING` succeeds only when
-both measured TCP poses match the configured carry geometry within the
-recovery tolerances. `initial_state` controls first-run behavior when no state
-record exists.
+Planning searches coordinated dual-arm hypotheses around the measured pose;
+it never applies independent left/right TCP tolerances. By default it may move
+both contacts up/down or along the face by 15 mm, rotate the mirrored wrists by
+5 degrees, vary clearance by 15 mm, and correct up to 5 degrees of perceived
+box tilt while keeping the measured tag top-center and yaw fixed. Near a box
+diagonal, it can also try the other face pair. The selected rigid box-to-TCP
+geometry is retained through approach, carry, split Pick/Place, and retreat.
+Tune `grasp_*_tolerance`, `maximum_grasp_candidates`, and the search/planning
+timeouts in `config/box_manipulation.yaml`; keep tolerances conservative on
+hardware. These parameters improve geometric feasibility but do not provide
+force compliance—contact robustness still requires compliant pads or
+force/tactile feedback.
 
-## RViz current and query states
+Configure tag family, size, ID, and frame in `config/apriltag.yaml`. A box pose
+is published only after the detector, TF, decision-margin, freshness, spread,
+and tilt checks pass (`maximum_box_tilt` is 20 degrees by default). Inspect
+`/detections`, `/box_pose`, `/box_markers`, and
+`/grasp_markers` before planning.
 
-The MotionPlanning display's **Query Goal State** is an RViz-local interactive
-planning target. It does not follow external MoveIt action goals or
-`/joint_states`, so leaving it visible after `/pick_box`, `/place_box`, or
-`/pick_place` can show a stale second robot. The supplied `moveit.rviz`
-therefore disables both query-state overlays and displays **Scene Robot** at
-full opacity; Scene Robot follows `monitored_planning_scene` and the measured
-joint state.
+## Camera and AprilTag workflows
 
-When planning manually from RViz, re-enable **MotionPlanning > Planning
-Request > Query Goal State** and set the goal through the MotionPlanning panel.
-Disable it again when validating task actions. There is no standard ROS topic
-that updates this RViz-private query target from an external action server.
+The launch creates an internal AprilTag node when `use_apriltag:=true`. Its
+`camera_image` and `camera_info` arguments are remapped correctly for the
+selected image namespace. Do not manually remap `/camera_info`: for an image
+topic `/x2/rgb_image_decompressed`, `apriltag_ros` subscribes to
+`/x2/camera_info`, which the launch maps to the supplied camera-info topic.
 
-## Geometry and calibration
+### Remote computer over LAN
 
-Edit `config/box_manipulation.yaml` and keep the same `box_dimensions` in the
-localizer and task server. Dimensions are `[length_x, width_y, height_z]` in
-metres. The box frame is at its geometric center. `tag_to_box_yaw` describes
-the fixed rotation from the detected tag frame to the aligned box frame.
-
-The default pad offsets in the MoveIt xacro are placeholders. Measure the
-physical transform from each `wrist_roll_link` to its contact surface and set
-`left_hand_pad_origin` and `right_hand_pad_origin` before robot execution.
-The configured contact convention is left TCP `-Y` inward and right TCP `+Y`
-inward; both TCP `+X` axes follow the upright box axis.
-
-Configure the tag family, ID, frame, and size in `config/apriltag.yaml`. The
-localizer consumes `/detections` for quality/freshness gating and reads the
-tag pose from TF (`tag0` by default).
-
-## Perception-only testing from a remote computer
-
-Do not launch `box_pick_place.launch.py` when only validating perception. That
-launch includes `real_robot.launch.py`, starts `ros2_control`, and activates the
-dual-arm controller. Instead, run the image transport and AprilTag nodes by
-themselves. Neither node publishes robot commands.
-
-The X2 publishes the bandwidth-friendly RGB stream as
-`sensor_msgs/msg/CompressedImage` on:
+The robot publishes compressed RGB on:
 
 ```text
 /aima/hal/sensor/rgbd_head_front/rgb_image/compressed
 ```
 
-`apriltag_ros` requires `sensor_msgs/msg/Image`, so decompress the stream on
-the remote computer with the standard image transport republisher:
+For a remote host, use the integrated latest-frame decoder and detector:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/ubuntu/x2_ws/install/setup.bash
+unset RMW_IMPLEMENTATION
 
-ros2 run image_transport republish compressed raw --ros-args \
-  -r in/compressed:=/aima/hal/sensor/rgbd_head_front/rgb_image/compressed \
-  -r out:=/x2/rgb_image_decompressed
+ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
+  command_transport:=zmq \
+  use_apriltag:=true \
+  use_image_decompressor:=true \
+  camera_image:=/x2/rgb_image_decompressed \
+  camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
 ```
 
-Check that the local output is active before starting the detector:
+The decoder runs with Cyclone DDS only (`image_decompress_rmw` defaults to
+`rmw_cyclonedds_cpp`). AprilTag, MoveIt, `ros2_control`, action clients, and
+action servers retain the launch process's default Fast DDS. Do **not** export
+`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` globally: doing so can make the action
+server fail when it receives incompatible DDS data.
+
+The decoder keeps only the newest compressed frame, decodes it in a worker, and
+publishes `/x2/rgb_image_decompressed` as a raw `sensor_msgs/msg/Image`. Its
+default reliable input handles fragmented JPEG samples; use
+`image_decompress_input_reliability:=best_effort` only if reliable delivery
+itself overloads the network. `image_decompress_max_rate` defaults to 10 Hz.
+Avoid running `image_transport republish compressed raw` beside this decoder.
+
+`Corrupt JPEG data: premature end of data segment` is emitted for malformed
+camera payloads. The decoder appends a missing JPEG end marker and may still
+decode such frames, but the camera publisher or firmware should be corrected
+for production use.
+
+### Robot onboard computer
+
+Onboard, the detector can use the native raw RGB stream directly; no decoder is
+needed:
 
 ```bash
-ros2 topic info /x2/rgb_image_decompressed
-ros2 topic hz /x2/rgb_image_decompressed
+ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
+  command_transport:=zmq \
+  use_apriltag:=true \
+  use_image_decompressor:=false \
+  camera_image:=/aima/hal/sensor/rgbd_head_front/rgb_image \
+  camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
 ```
 
-The output type must be `sensor_msgs/msg/Image`. Start AprilTag in a second
-terminal:
+### Hybrid real camera with simulated arms
+
+Use the real leg, waist, and head states so the camera-to-`base_link` TF remains
+consistent with the physical robot, but redirect the 14 arm states to an
+isolated topic. Stop any existing MoveIt/controller-manager launch first.
+
+Terminal 1 starts perfect simulated arm feedback. All four outputs are remapped
+away from the robot HAL topics; only the arm output is consumed:
+
+```bash
+ros2 run agibot_x2_ros2_control fake_zmq_joint_states \
+  --endpoint tcp://127.0.0.1:8659 --initial-pose locomanipulation \
+  --state-topic-prefix /x2_test
+```
+
+Terminal 2 uses real camera and non-arm states, simulated arm states, and a
+loopback-only ZMQ command channel:
+
+```bash
+ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
+  command_transport:=zmq \
+  zmq_endpoint:=tcp://127.0.0.1:8659 \
+  arm_state_topic:=/x2_test/aima/hal/joint/arm/state \
+  use_apriltag:=true \
+  use_image_decompressor:=true \
+  camera_image:=/x2/rgb_image_decompressed \
+  camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info \
+  perception_3d_source:=none
+```
+
+The loopback endpoint prevents ZMQ commands from reaching the robot. Do not use
+`command_transport:=ros_topic` for this test. Keep 3D occupancy disabled unless
+the physical and simulated arm poses match: otherwise real arm points cannot be
+removed correctly using the simulated robot model.
+
+The bent-arm `locomanipulation` pose is the recommended planning start state.
+Use `--initial-pose zero` only when deliberately testing recovery from the
+straight-arm pose; it can make coordinated dual-arm OMPL planning much harder.
+
+### Perception-only and external detector
+
+Do not launch `box_pick_place.launch.py` merely to check perception: it starts
+the controller manager. Run the decoder and detector separately instead.
+
+On a remote computer, run the decoder in its own terminal with Cyclone DDS:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/ubuntu/x2_ws/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 run agibot_x2_manipulation best_effort_image_decompressor --ros-args \
+  -p max_rate_hz:=10.0
+```
 
+In a second terminal, use the default RMW for AprilTag:
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ubuntu/x2_ws/install/setup.bash
+unset RMW_IMPLEMENTATION
 ros2 run apriltag_ros apriltag_node --ros-args \
   --params-file /home/ubuntu/x2_ws/install/agibot_x2_manipulation/share/agibot_x2_manipulation/config/apriltag.yaml \
   -r /image_rect:=/x2/rgb_image_decompressed \
   -r /x2/camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
 ```
 
-The camera-info remap above is intentionally sourced from `/x2/camera_info`.
-After the image is remapped into the `/x2` namespace, the
-`image_transport::CameraSubscriber` derives that sibling camera-info topic.
-Remapping `/camera_info` or `/camera/camera_info` does not match it.
+For an onboard external detector, replace the two remaps with:
 
-Verify the resolved subscriptions and detector output:
+```text
+/image_rect:=/aima/hal/sensor/rgbd_head_front/rgb_image
+/aima/hal/sensor/rgbd_head_front/camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
+```
+
+Verify the actual names rather than inferring them:
 
 ```bash
 ros2 node info /apriltag
+ros2 topic info /x2/rgb_image_decompressed
 ros2 topic hz /detections
 ros2 topic echo --once /detections
 ros2 run tf2_ros tf2_echo rgbd_head_front tag0
 ```
 
-For the configured tag, a valid result has ID `0`, `hamming: 0`, a comfortably
-positive decision margin, and a stable `rgbd_head_front -> tag0` transform.
-The detector publishes an empty detection array when no configured tag is
-visible, so `/detections` having a rate does not by itself prove a detection.
+An empty `/detections` array still proves the detector is processing images;
+it does not prove a tag was found. For a calibrated grasp, rectify a distorted
+RGB image and use synchronized, matching `CameraInfo`. To run only
+`box_localizer_node`, also provide a valid `base_link -> camera` transform
+(for example, `robot_state_publisher` driven by a passive joint-state bridge).
 
-Decompression does not rectify lens distortion. It is adequate for testing
-tag recognition, but calibrated box poses and grasp points require a local
-rectification stage before AprilTag. The rectified image and its matching
-`CameraInfo` must retain synchronized timestamps.
+To use an external detector with the full stack, keep it running and launch
+with `use_apriltag:=false use_image_decompressor:=false`. Never leave both the
+internal and external detector running: they would duplicate `/detections` and
+the `tag0` TF publisher.
 
-`box_localizer_node` can also be run without MoveIt or `ros2_control`, but it
-will publish `/box_pose` and `/box_markers` only when the complete
-`base_link -> rgbd_head_front -> tag0` TF chain is available. On the real
-robot, provide the first part with `robot_state_publisher` driven by a passive
-HAL-to-`sensor_msgs/JointState` bridge; do not start the controller manager
-solely to obtain TF.
+## 3D obstacle perception
 
-## Perception on the robot onboard computer
-
-The onboard computer can consume the uncompressed RGB topic directly, so an
-`image_transport republish` process is not required. Start AprilTag with:
+Select `perception_3d_source:=none|depth|lidar|both`; the default is `none`.
+The selected MoveIt occupancy updater uses a 3 cm OctoMap in `base_link` and
+the standard shape filter, which excludes robot collision geometry and an
+attached grasp box from anonymous sensor obstacles. Before attachment, the
+target remains a separate world collision object; confirm in RViz that sensor
+occupancy does not create an inflated duplicate around it.
 
 ```bash
-source /opt/ros/humble/setup.bash
-source /home/ubuntu/x2_ws/install/setup.bash
-
-ros2 run apriltag_ros apriltag_node --ros-args \
-  --params-file /home/ubuntu/x2_ws/install/agibot_x2_manipulation/share/agibot_x2_manipulation/config/apriltag.yaml \
-  -r /image_rect:=/aima/hal/sensor/rgbd_head_front/rgb_image \
-  -r /aima/hal/sensor/rgbd_head_front/camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
-```
-
-The source of the second remap is intentionally
-`/aima/hal/sensor/rgbd_head_front/camera_info`. After remapping the image,
-`image_transport::CameraSubscriber` derives that sibling name even though the
-robot publishes the calibration as `rgb_camera_info`.
-
-Verify the resolved subscriptions and output before starting any controller:
-
-```bash
-ros2 node info /apriltag
-ros2 topic echo --once /detections
-ros2 run tf2_ros tf2_echo rgbd_head_front tag0
-```
-
-To use this external detector with the complete manipulation stack, keep it
-running and follow the shared external-detector procedure below.
-
-Inspect the `distortion_model` and `d` fields in the matching `CameraInfo`.
-If distortion is nonzero, direct input is suitable for initial detection
-testing only; add an `image_proc` rectification stage before relying on tag
-poses for real grasp execution.
-
-## Use an external detector with the manipulation launch
-
-Keep the separately launched AprilTag node running. When operating remotely,
-also keep the image republisher running. After `/detections` and the
-`rgbd_head_front -> tag0` transform have been verified, start the manipulation
-stack in another terminal with its internal detector disabled:
-
-```bash
-source /opt/ros/humble/setup.bash
-source /home/ubuntu/x2_ws/install/setup.bash
-
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   command_transport:=zmq \
-  use_apriltag:=false
+  perception_3d_source:=both \
+  depth_image_topic:=/aima/hal/sensor/rgbd_head_front/depth_image \
+  depth_camera_info_topic:=/aima/hal/sensor/rgbd_head_front/depth_camera_info \
+  lidar_pointcloud_topic:=/aima/hal/sensor/lidar_chest_front/lidar_pointcloud
 ```
 
-The external detector publishes `/detections` and `tag0`, which
-`box_localizer_node` consumes automatically. The `camera_image` and
-`camera_info` launch arguments are unused when `use_apriltag:=false`; do not
-pass them in this arrangement. Do not leave another AprilTag node running,
-because duplicate detectors would publish the same `/detections` topic and
-`tag0` transform.
+Depth uses `sensor_msgs/msg/Image`; lidar uses `sensor_msgs/msg/PointCloud2`.
+Before each Pick or Place planning pass, the server clears the OctoMap and
+requires fresh filtered data from every selected source. A missing topic,
+timestamp mismatch, camera calibration, or sensor-to-`base_link` TF aborts the
+action with `SAFETY_ABORT`. Check the topics and TF continuously, synchronize
+the robot and planning-host clocks, and use `plan_only` first.
 
-This manipulation command is not perception-only. It includes
-`real_robot.launch.py`, starts MoveIt and `ros2_control`, and activates the
-dual-arm controller. Treat it as motion-enabling even when the image pipeline
-runs separately and `command_transport` is `zmq`.
+## Manipulation actions
 
-## Dummy AprilTag for planning tests
+Use separate actions when the robot must navigate while holding the box:
 
-Use the dummy detector when testing the localization and planning pipeline
-without a camera or physical tag. It publishes a fresh synthetic `/detections`
-message and a `base_link -> tag0` transform. The normal `box_localizer_node`
-still applies its sample-count, decision-margin, tilt, spread, and freshness
-checks before publishing `/box_pose`.
-
-Configure the synthetic top-tag pose in `config/dummy_apriltag.yaml`. The
-default pose is `(0.35, 0.0, 0.45)` metres with zero yaw in `base_link`. Since
-the current configured box height is `0.32` m, the resulting box center is at
-`(0.35, 0.0, 0.29)` m. `base_link` is attached to the pelvis, so these values
-are pelvis-relative rather than floor-relative. Update both `box_dimensions`
-entries together if the test box size changes.
-
-To test perception only, run these commands in separate terminals:
+1. Send `/pick_box`; wait for `success: true` and `object_held: true`.
+2. Confirm `/manipulation_state` reports `HOLDING` (`state: 2`), then navigate.
+3. Once navigation and TF are stable, send `/place_box` with the desired box
+   center pose. A `map`-frame pose is resolved at Place start.
 
 ```bash
-ros2 run agibot_x2_manipulation dummy_apriltag_node --ros-args \
-  --params-file /home/ubuntu/x2_ws/install/agibot_x2_manipulation/share/agibot_x2_manipulation/config/dummy_apriltag.yaml
+ros2 action send_goal /pick_box agibot_x2_manipulation_msgs/action/Pick \
+  "{plan_only: true}" --feedback
+
+ros2 action send_goal /place_box agibot_x2_manipulation_msgs/action/Place \
+  "{place_pose: {header: {frame_id: base_link}, pose: {position: {x: 0.35, y: 0.0, z: 0.29}, orientation: {w: 1.0}}}, plan_only: true}" \
+  --feedback
 ```
 
-```bash
-ros2 run agibot_x2_manipulation box_localizer_node --ros-args \
-  --params-file /home/ubuntu/x2_ws/install/agibot_x2_manipulation/share/agibot_x2_manipulation/config/box_manipulation.yaml
-```
+`/pick_place` (`PickPlace`) remains available for the immediate Pick-then-Place
+workflow. After a successful Place, the arms retreat and return to
+`post_place_named_target` (`zero` by default). The package never commands the
+mobile base.
 
-Verify that the stable pose is available:
-
-```bash
-ros2 topic echo --once /detections
-ros2 run tf2_ros tf2_echo base_link tag0
-ros2 topic hz /box_pose
-ros2 topic echo --once /box_pose
-```
-
-The current `[0.15, 0.35, 0.32]` m box produces contact points at
-`y = +/-0.175` m and pregrasp points at `y = +/-0.255` m. The default `0.05` m
-lift was verified against this pelvis-relative test pose; larger lifts must be
-checked against the real arm workspace. A first planning test should keep the
-desired box center at its detected pose:
+Test the complete sequence without executing motion:
 
 ```bash
 ros2 action send_goal /pick_place \
@@ -293,129 +274,152 @@ ros2 action send_goal /pick_place \
   --feedback
 ```
 
-For a planning-only test with the complete stack, use:
+Pregrasp planning first tests up to `maximum_planning_candidates` candidates
+for `planning_time_per_candidate` seconds each. If none succeeds, the best
+`maximum_retry_candidates` OMPL failures share the time remaining in the
+global `pregrasp_planning_timeout` budget (30 seconds by default). Unused retry
+time carries forward. The action result reports initial and retry failures,
+Cartesian approach failures, and MoveIt error codes.
+
+A candidate is accepted only if it has at least
+`minimum_grasp_joint_margin` (0.02 rad by default) and its entire closed-chain
+continuation is feasible. The closed-chain search perturbs one rigid box pose
+within `closed_chain_position_tolerance` and
+`closed_chain_orientation_tolerance`; it never moves the TCPs independently.
+Plan-only checking moves the box collision body with every candidate waypoint.
+If a waypoint fails, the server reports its segment, index, box position, and
+whether IK, bounds, joint continuity, or collision was responsible, then tries
+the next grasp candidate.
+
+`/pick_box` searches for an achievable carry pose around `carry_box_pose` and
+tests direct, translate-then-rotate, and rotate-then-translate routes. The
+default pelvis-relative envelope is X +/-5 cm, Y +/-3 cm, Z -12/+3 cm, and
+orientation within 10 degrees. `/place_box` and plan-only `/pick_place` may
+adjust the requested place by X/Y +/-15 mm, Z +/-5 mm, and yaw +/-5 degrees.
+The action's `achieved_pose` reports the selected adaptive pose. Treat these as
+calibration/error allowances, not permission to bypass workspace or collision
+limits.
+
+IK candidates are normalized and revalidated against the `dual_arm` bounds and
+planning scene before assignment. Only the 14 planning-group values are sent
+to `MoveGroupInterface`; real leg, waist, and head states remain part of the
+start state but cannot cause a pregrasp goal-target rejection.
+
+An `Unable to transform object from frame 'tag0'` warning identifies a
+collision-object publisher outside the pick/place server: `grasp_box` is
+always inserted in `base_link` with a zero timestamp. The server now logs the
+offending object ID and input topic. Run once with `use_rviz:=false`; if the
+warning disappears, inspect RViz's PlanningScene publishing settings. Do not
+delete or ignore an external object until its publisher and safety role are
+known.
+
+`/manipulation_state` is transient-local and reports `UNKNOWN=0`, `EMPTY=1`,
+`HOLDING=2`, or `RECOVERY_REQUIRED=3`. If a restart follows a recorded hold,
+the state becomes `UNKNOWN` until an operator explicitly recovers it:
 
 ```bash
-ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
-  command_transport:=zmq \
-  use_apriltag:=false \
-  use_dummy_apriltag:=true
+# Verify that no object is held.
+ros2 service call /recover_manipulation_state \
+  agibot_x2_manipulation_msgs/srv/RecoverManipulationState \
+  "{requested_state: 0}"
+
+# Verify that the box is held at the last persisted grasp/carry geometry.
+ros2 service call /recover_manipulation_state \
+  agibot_x2_manipulation_msgs/srv/RecoverManipulationState \
+  "{requested_state: 1}"
 ```
 
-Enabling `use_dummy_apriltag` prevents the launch file from starting its real
-camera detector even if `use_apriltag` was left true. It cannot prevent a
-separately launched AprilTag process from publishing the same `/detections`
-and `tag0`; stop external detectors first.
+The state file records the last adaptive box pose and both rigid box-to-TCP
+transforms. On restart, `CONFIRM_HOLDING` independently reconstructs the box
+pose from the measured left and right TCP transforms and requires the two
+estimates to agree within `recovery_position_tolerance` and
+`recovery_angular_tolerance`. Legacy state files fall back to the configured
+carry pose. These tolerances do not check the tag pose or compare raw joint
+values directly.
 
-The complete-stack command activates `ros2_control` and is motion-enabling.
-Use the dummy detector only with `plan_only: true`. Never execute a real-robot
-trajectory from a synthetic object pose.
-
-## Launch
-
-Build and source the workspace after changing configuration or source code:
+For a fault recovery after the operator has stopped the base, made the path
+clear, and removed any box, reset the planning scene and move the dual arms to
+the configured `reset_named_target` (`zero` by default):
 
 ```bash
-cd /home/ubuntu/x2_ws
-colcon build --symlink-install
-source /opt/ros/humble/setup.bash
-source /home/ubuntu/x2_ws/install/setup.bash
+ros2 action send_goal /reset_manipulation \
+  agibot_x2_manipulation_msgs/action/ResetManipulation \
+  "{confirm_empty: true}" --feedback
 ```
 
-For a MuJoCo/ZMQ planning test, first start the perfect-feedback bridge. It
-publishes all 31 HAL joint states and assumes that the simulated robot follows
-each received ZMQ arm command exactly:
+Reset is an application-level arm operation: it does not clear hardware
+e-stops, controller/firmware faults, or command legs, waist, or head. A failed
+reset keeps manipulation locked in `RECOVERY_REQUIRED`; resolve the physical
+fault before retrying.
+
+## Simulation test
+
+For MuJoCo/ZMQ planning, start the fake feedback utility first; it publishes
+all 31 HAL joint states and assumes the simulator exactly follows received ZMQ
+arm commands:
 
 ```bash
 ros2 run agibot_x2_ros2_control fake_zmq_joint_states
-```
-
-Then launch with the synthetic tag. This is the configuration used for the
-verified plan-only test in this workspace:
-
-```bash
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
-  command_transport:=zmq \
-  use_apriltag:=false \
-  use_dummy_apriltag:=true
+  command_transport:=zmq use_apriltag:=false use_dummy_apriltag:=true
 ```
 
-On a remote computer using the decompressed robot image, either use the
-separately launched detector described above with `use_apriltag:=false`, or let
-this launch start its internal detector:
+The dummy tag publishes `base_link -> tag0` and `/detections`. Its default
+top-tag pose is configured in `config/dummy_apriltag.yaml`. Use only
+`plan_only: true` with any synthetic pose on real hardware.
+
+To reproduce the 2026-08-11 planning-failure snapshot, launch the isolated
+recorded-state simulation. It initializes all 31 fake HAL joints from the
+capture and derives the complete tag TF (including roll and pitch) from the
+recorded box pose:
 
 ```bash
-ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
-  command_transport:=zmq \
-  camera_image:=/x2/rgb_image_decompressed \
-  camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
+ROS_DOMAIN_ID=99 ros2 launch agibot_x2_manipulation \
+  recorded_planning_failure.launch.py use_rviz:=true
 ```
 
-The `image_transport republish` process must remain running when using
-`/x2/rgb_image_decompressed`.
+This isolated replay launch defaults `allow_execution:=true`, so it accepts
+non-plan-only Pick, Place, PickPlace, and reset actions for full workflow
+testing. Pass `allow_execution:=false` to restrict it to planning. The launch
+does not replay the raw bag or connect to real-robot topics. The simulated arm
+state follows ZMQ commands after the snapshot is initialized. Each replay
+process uses a fresh recovery-state file under `/tmp`, so an interrupted test
+cannot leave the next clean launch latched in `HOLDING` or `UNKNOWN`.
+`simulate_ideal_attachment` is false by default; enabling it requires working
+`/mujoco_grasp/attach` and `/mujoco_grasp/detach` services that change the
+MuJoCo weld/physics, not just acknowledge the request.
 
-On the robot onboard computer, the internal detector can consume the native
-uncompressed stream directly:
-
-```bash
-ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
-  command_transport:=zmq \
-  camera_image:=/aima/hal/sensor/rgbd_head_front/rgb_image \
-  camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
-```
-
-Use `command_transport:=ros_topic` instead when the robot is to receive HAL
-commands on `/aima/hal/joint/*/command`. Do not run another controller manager
-or another controller that claims the same 14 arm joints. For an existing
-AprilTag pipeline, pass `use_apriltag:=false` to avoid duplicate `/detections`
-and `tag0` publishers.
-
-Every complete-stack command above starts `ros2_control`, activates the
-`dual_arm_controller`, and is therefore motion-enabling. Confirm that all 31
-HAL joint-state entries are fresh, inspect `/box_markers` and
-`/grasp_markers` in RViz, and send a plan-only goal first.
-
-Send a planning-only goal whose pose is the desired **box-center** pose:
+The recorded full-workflow regression uses a reachable downward place from the
+adaptive carry pose:
 
 ```bash
-ros2 action send_goal /pick_place \
+ROS_DOMAIN_ID=99 ros2 action send_goal /pick_place \
   agibot_x2_manipulation_msgs/action/PickPlace \
-  "{place_pose: {header: {frame_id: base_link}, pose: {position: {x: 0.35, y: 0.0, z: 0.29}, orientation: {w: 1.0}}}, plan_only: true}" \
+  "{place_pose: {header: {frame_id: base_link}, pose: {position: {x: 0.35, y: 0.0, z: 0.17}, orientation: {z: -0.0871557427, w: 0.9961946981}}}, plan_only: false}" \
   --feedback
 ```
 
-The dummy configuration above should return `success: true` and
-`complete pick/place path is feasible`. Set `plan_only: false` only after
-plan-only and RViz validation, and never execute from a synthetic tag pose on
-real hardware.
+The complete PickPlace continuation is checked before the first trajectory is
+executed. Its selected grasp and adaptive carry pose must also admit the place
+route; execution does not independently select an incompatible carry branch.
 
-## MuJoCo attachment contract
+The normal launch defaults `allow_execution:=false`; non-plan-only Pick, Place,
+PickPlace, and reset goals served by `pick_place_server` are rejected at
+admission. This parameter does not disable MoveIt or the active controller for
+other clients. Using these manipulation actions for real or MuJoCo motion
+requires `allow_execution:=true`; only the isolated recorded-state replay
+defaults it on. Before enabling real motion,
+resolve the robot's missing acceleration-limit warning from measured hardware
+calibration data. The planner does not invent acceleration limits. Closed-chain
+results are published on `/pick_place/planned_box_path`,
+with per-route failure classification and budget data on
+`/pick_place/planning_diagnostics`.
 
-The current default is `simulate_ideal_attachment: false`, so the task server
-does not call a simulator attachment service. This is sufficient for
-plan-only validation, but an executed MuJoCo pick will not make the simulated
-box follow the hands.
+## To do
 
-Set `simulate_ideal_attachment: true` only after the MuJoCo integration
-provides these services:
-
-- `/mujoco_grasp/attach` (`std_srvs/srv/Trigger`)
-- `/mujoco_grasp/detach` (`std_srvs/srv/Trigger`)
-
-The process that owns the MuJoCo `MjModel`/`MjData` must enable or disable an
-actual weld between the box and the carrier body. Returning success without
-changing MuJoCo physics will not move the box. The task server handles the
-corresponding MoveIt planning-scene attachment after the attach service
-succeeds.
-
-## Safety limitations
-
-- Only upright, rigid boxes are supported. Roll/pitch rejection should be
-  tightened after camera calibration.
-- The pad meshes and TCP offsets must be physically calibrated.
-- Executed MuJoCo transport requires the optional attachment-service adapter;
-  it is disabled by default.
-- Real grasp execution requires validated effort feedback, compliant closure,
-  squeeze limits, and an independent emergency stop.
-- Separate arm trajectory controllers must not claim joints while the
-  14-joint `dual_arm_controller` is active.
+- Extend Place beyond its current local X/Y/Z/yaw correction window with a
+  runtime placement-region search. Given a detected support surface and an
+  allowed placement region, it should sample and rank collision-free,
+  closed-chain-feasible box poses instead of requiring a hard-coded target.
+  Endpoint diagnostics must separately report the number of candidates rejected
+  by left/right IK, joint bounds, collision, and precheck-budget exhaustion.

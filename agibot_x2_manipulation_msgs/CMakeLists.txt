@@ -9,6 +9,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/Pick.action"
   "action/Place.action"
   "action/PickPlace.action"
+  "action/ResetManipulation.action"
   "msg/ManipulationState.msg"
   "srv/RecoverManipulationState.srv"
   DEPENDENCIES geometry_msgs)

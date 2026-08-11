@@ -6,11 +6,11 @@ box_localizer:
     tag_id: 0
     box_dimensions: [0.15, 0.35, 0.32]  # length X, width Y, height Z [m]
     tag_to_box_yaw: 0.0
-    stable_sample_count: 10
+    stable_sample_count: 3
     maximum_pose_age: 1.5
     maximum_position_spread: 0.005
     maximum_angular_spread: 0.0523598776  # 3 degrees
-    maximum_box_tilt: 0.785398163         # 45 degrees from base +Z
+    maximum_box_tilt: 0.3490658504        # 20 degrees from base +Z
     minimum_decision_margin: 20.0
 
 pick_place_server:
@@ -30,7 +30,42 @@ pick_place_server:
     cartesian_step: 0.01
     maximum_box_pose_age: 1.5
     ik_timeout: 0.05
-    pregrasp_ik_attempts: 20
+    # Coordinated dual-arm search. These are shared grasp hypotheses, not
+    # independent per-hand pose tolerances.
+    grasp_position_tolerance: 0.020
+    grasp_orientation_tolerance: 0.13962634  # 8 degrees
+    pregrasp_distance_tolerance: 0.020
+    alternate_face_alignment_tolerance: 0.261799388  # 15 degrees from best face pair
+    maximum_grasp_candidates: 128
+    grasp_search_timeout: 4.0
+    ik_attempts_per_candidate: 8
+    maximum_planning_candidates: 5
+    planning_time_per_candidate: 2.0
+    pregrasp_planning_timeout: 30.0
+    maximum_retry_candidates: 3
+    minimum_grasp_joint_margin: 0.02  # rad; avoid grasps that cannot move away from a limit
+    closed_chain_position_tolerance: 0.010
+    closed_chain_orientation_tolerance: 0.0523598776  # 3 degrees
+    closed_chain_position_step: 0.005
+    closed_chain_orientation_step: 0.0261799388  # 1.5 degrees
+    closed_chain_ik_attempts: 4
+    closed_chain_ik_timeout: 0.10
+    closed_chain_beam_width: 8
+    closed_chain_solutions_per_branch: 2
+    closed_chain_projection_limit: 32
+    closed_chain_validation_position_step: 0.005
+    closed_chain_validation_orientation_step: 0.0174533
+    closed_chain_contact_position_error: 0.002
+    closed_chain_contact_orientation_error: 0.0174533
+    carry_search_timeout: 8.0
+    maximum_carry_candidates: 96
+    carry_search_x_range: 0.05
+    carry_search_y_range: 0.03
+    carry_search_z_lower: 0.12
+    carry_search_z_upper: 0.03
+    carry_search_orientation_tolerance: 0.1745329252  # 10 degrees
+    adaptive_place_position_tolerance: [0.015, 0.015, 0.005]
+    adaptive_place_yaw_tolerance: 0.0872664626  # 5 degrees
     maximum_joint_step: 0.35
     velocity_scaling: 0.10
     acceleration_scaling: 0.10
@@ -41,6 +76,20 @@ pick_place_server:
     recovery_angular_tolerance: 0.1745329252  # 10 degrees
     initial_state: empty
     post_place_named_target: zero
+    reset_named_target: zero
+    reset_preemption_timeout: 15.0
+    reset_state_timeout: 2.0
+    reset_joint_tolerance: 0.02
     simulate_ideal_attachment: false
     attach_service: /mujoco_grasp/attach
     detach_service: /mujoco_grasp/detach
+    # Source selection is supplied by box_pick_place.launch.py. Do not define it
+    # in this node-scoped YAML: exact-node parameters override launch wildcards.
+    depth_filtered_cloud_topic: /x2/moveit/depth_filtered_cloud
+    lidar_filtered_cloud_topic: /x2/moveit/lidar_filtered_cloud
+    octomap_clear_service: /clear_octomap
+    octomap_refill_timeout: 3.0
+    octomap_post_clear_samples: 2
+    maximum_filtered_cloud_age: 1.0
+    maximum_filtered_cloud_future_skew: 0.10
+    octomap_processing_delay: 0.10

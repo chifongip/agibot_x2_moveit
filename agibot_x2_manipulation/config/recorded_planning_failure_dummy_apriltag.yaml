@@ -1,0 +1,21 @@
+# Box pose sampled from debug_captures/planning_failure_20260811.
+# The dummy node derives the tag transform from this top-tag box geometry.
+dummy_apriltag:
+  ros__parameters:
+    parent_frame: base_link
+    tag_frame: tag0
+    detections_topic: /detections
+    family: tag36h11
+    tag_id: 0
+    decision_margin: 117.41532897949219
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    yaw: 0.0
+    replay_box_pose:
+      [0.3546769389911068, -0.06910584908498742, 0.1321217964298253,
+       -0.005919075771573838, -0.07557904680850822, -0.09569783757802637,
+       0.9925193681276034]
+    replay_box_dimensions: [0.15, 0.35, 0.32]
+    replay_tag_to_box_yaw: 0.0
+    publish_rate: 30.0

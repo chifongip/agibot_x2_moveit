@@ -3,6 +3,8 @@
 #include <Eigen/Geometry>
 
 #include <array>
+#include <cstddef>
+#include <vector>
 
 namespace agibot_x2_manipulation
 {
@@ -25,6 +27,29 @@ struct GraspGeometry
   char selected_axis{'y'};
 };
 
+struct GraspCandidateOptions
+{
+  double position_tolerance{0.015};
+  double orientation_tolerance{0.0872664626};
+  double pregrasp_distance_tolerance{0.015};
+  double alternate_face_alignment_tolerance{0.261799388};
+  std::size_t maximum_candidates{64};
+};
+
+struct GraspCandidate
+{
+  GraspGeometry grasp;
+  Eigen::Isometry3d planning_box_pose{Eigen::Isometry3d::Identity()};
+  Eigen::Isometry3d box_to_left_contact{Eigen::Isometry3d::Identity()};
+  Eigen::Isometry3d box_to_right_contact{Eigen::Isometry3d::Identity()};
+  double correction_cost{0.0};
+  double tilt_correction{0.0};
+  double contact_height_offset{0.0};
+  double tangent_offset{0.0};
+  double wrist_rotation{0.0};
+  double pregrasp_distance{0.0};
+};
+
 /// Convert a centered, aligned top-tag pose into the box-center pose.
 Eigen::Isometry3d boxPoseFromTopTag(
   const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
@@ -34,6 +59,14 @@ Eigen::Isometry3d boxPoseFromTopTag(
 GraspGeometry computeGraspGeometry(
   const Eigen::Isometry3d & box_pose, const BoxDimensions & dimensions,
   double pregrasp_distance, double contact_height_offset = 0.0);
+
+/// Generate coordinated dual-arm grasp hypotheses around a measured box pose.
+/// The measured top-center point and yaw are retained while bounded roll/pitch,
+/// contact, wrist, clearance, and (near a diagonal) face-pair alternatives are searched.
+std::vector<GraspCandidate> generateGraspCandidates(
+  const Eigen::Isometry3d & measured_box_pose, const BoxDimensions & dimensions,
+  double nominal_pregrasp_distance, double nominal_contact_height_offset,
+  const GraspCandidateOptions & options);
 
 /// Interpolate a rigid object pose using linear translation and quaternion slerp.
 Eigen::Isometry3d interpolatePose(
