@@ -1,0 +1,16 @@
+octomap_frame: base_link
+octomap_resolution: 0.03
+sensors: [depth]
+depth:
+  sensor_plugin: occupancy_map_monitor/DepthImageOctomapUpdater
+  image_topic: /x2/moveit/depth_image
+  queue_size: 5
+  near_clipping_plane_distance: 0.2
+  far_clipping_plane_distance: 3.0
+  shadow_threshold: 0.2
+  padding_scale: 1.0
+  padding_offset: 0.03
+  max_update_rate: 3.0
+  skip_vertical_pixels: 2
+  skip_horizontal_pixels: 2
+  filtered_cloud_topic: /x2/moveit/depth_filtered_cloud

@@ -5,6 +5,10 @@
     <xacro:arg name="use_fake_hardware" default="true" />
     <xacro:arg name="command_transport" default="ros_topic" />
     <xacro:arg name="zmq_endpoint" default="tcp://*:8559" />
+    <xacro:arg name="leg_state_topic" default="/aima/hal/joint/leg/state" />
+    <xacro:arg name="waist_state_topic" default="/aima/hal/joint/waist/state" />
+    <xacro:arg name="arm_state_topic" default="/aima/hal/joint/arm/state" />
+    <xacro:arg name="head_state_topic" default="/aima/hal/joint/head/state" />
     <xacro:arg name="left_hand_pad_origin" default="0 0 -0.13" />
     <xacro:arg name="right_hand_pad_origin" default="0 0 -0.13" />
     <xacro:property name="hand_pad_thickness" value="0.012" />
@@ -51,6 +55,10 @@
         gains_file="$(arg ros2_control_gains_file)"
         use_fake_hardware="$(arg use_fake_hardware)"
         command_transport="$(arg command_transport)"
-        zmq_endpoint="$(arg zmq_endpoint)"/>
+        zmq_endpoint="$(arg zmq_endpoint)"
+        leg_state_topic="$(arg leg_state_topic)"
+        waist_state_topic="$(arg waist_state_topic)"
+        arm_state_topic="$(arg arm_state_topic)"
+        head_state_topic="$(arg head_state_topic)"/>
 
 </robot>

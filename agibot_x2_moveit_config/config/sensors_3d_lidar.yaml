@@ -1,0 +1,12 @@
+octomap_frame: base_link
+octomap_resolution: 0.03
+sensors: [lidar]
+lidar:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /x2/moveit/lidar_pointcloud
+  max_range: 4.0
+  point_subsample: 2
+  padding_scale: 1.0
+  padding_offset: 0.03
+  max_update_rate: 5.0
+  filtered_cloud_topic: /x2/moveit/lidar_filtered_cloud

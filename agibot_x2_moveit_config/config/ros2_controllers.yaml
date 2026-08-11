@@ -33,3 +33,8 @@ dual_arm_controller:
       - position
       - velocity
     allow_partial_joints_goal: false
+
+joint_state_broadcaster:
+  ros__parameters:
+    # MoveIt does not need joint states at the hardware control-loop rate.
+    update_rate: 50

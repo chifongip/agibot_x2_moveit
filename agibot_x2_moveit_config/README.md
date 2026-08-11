@@ -72,6 +72,34 @@ ros2 launch agibot_x2_moveit_config real_robot.launch.py \
   ros2_control_gains_file:=/absolute/path/to/gains.yaml
 ```
 
+## Optional 3D occupancy map
+
+`real_robot.launch.py` can load a MoveIt depth updater, lidar point-cloud
+updater, or both:
+
+```bash
+ros2 launch agibot_x2_moveit_config real_robot.launch.py \
+  command_transport:=ros_topic \
+  perception_3d_source:=depth
+```
+
+`perception_3d_source` accepts `none` (default), `depth`, `lidar`, or `both`.
+The default HAL inputs are:
+
+- Depth image: `/aima/hal/sensor/rgbd_head_front/depth_image`
+- Depth calibration: `/aima/hal/sensor/rgbd_head_front/depth_camera_info`
+- Lidar cloud: `/aima/hal/sensor/lidar_chest_front/lidar_pointcloud`
+
+Override them with `depth_image_topic`, `depth_camera_info_topic`, and
+`lidar_pointcloud_topic`. Configuration is in `config/sensors_3d_*.yaml`; all
+modes produce a 3 cm OctoMap in `base_link`. Filtered diagnostic outputs are
+published under `/x2/moveit/*_filtered_cloud` (`Image` for depth and
+`PointCloud2` for lidar). MoveIt's updater masks robot
+collision bodies and planning-scene world/attached objects. Ensure every
+sensor message has a valid timestamp and a TF-connected frame before selecting
+it. The integrated manipulation launch additionally clears and verifies map
+refill before each planning phase.
+
 ## ZMQ with RoboJuDo and MuJoCo
 
 The ZMQ backend publishes the documented JSON envelope on every update:

@@ -24,7 +24,8 @@
   </xacro:macro>
 
   <xacro:macro name="x2_ultra_ros2_control"
-    params="name initial_positions_file gains_file use_fake_hardware command_transport zmq_endpoint">
+    params="name initial_positions_file gains_file use_fake_hardware command_transport zmq_endpoint
+      leg_state_topic waist_state_topic arm_state_topic head_state_topic">
     <xacro:property name="initial_positions" value="${xacro.load_yaml(initial_positions_file)['initial_positions']}"/>
     <xacro:property name="gains" value="${xacro.load_yaml(gains_file)['gains']}"/>
 
@@ -36,10 +37,10 @@
         <xacro:unless value="${use_fake_hardware}">
           <plugin>agibot_x2_ros2_control/X2SystemHardware</plugin>
           <param name="command_transport">${command_transport}</param>
-          <param name="leg_state_topic">/aima/hal/joint/leg/state</param>
-          <param name="waist_state_topic">/aima/hal/joint/waist/state</param>
-          <param name="arm_state_topic">/aima/hal/joint/arm/state</param>
-          <param name="head_state_topic">/aima/hal/joint/head/state</param>
+          <param name="leg_state_topic">${leg_state_topic}</param>
+          <param name="waist_state_topic">${waist_state_topic}</param>
+          <param name="arm_state_topic">${arm_state_topic}</param>
+          <param name="head_state_topic">${head_state_topic}</param>
           <param name="arm_command_topic">/aima/hal/joint/arm/command</param>
           <param name="zmq_endpoint">${zmq_endpoint}</param>
           <param name="state_timeout_sec">0.25</param>
