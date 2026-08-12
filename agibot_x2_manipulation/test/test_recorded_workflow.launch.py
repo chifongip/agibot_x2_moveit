@@ -55,7 +55,11 @@ class TestRecordedWorkflow(unittest.TestCase):
         rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=timeout)
         self.assertTrue(result_future.done())
         wrapped = result_future.result()
-        self.assertEqual(wrapped.status, GoalStatus.STATUS_SUCCEEDED)
+        self.assertEqual(
+            wrapped.status,
+            GoalStatus.STATUS_SUCCEEDED,
+            wrapped.result.message if wrapped.result else "action returned no result",
+        )
         self.assertTrue(wrapped.result.success, wrapped.result.message)
         client.destroy()
         return wrapped.result

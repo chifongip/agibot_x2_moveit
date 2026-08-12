@@ -8,6 +8,7 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>agibot_x2_manipulation_msgs</depend>
+  <depend>aimdk_msgs</depend>
   <depend>apriltag_msgs</depend>
   <depend>boost</depend>
   <depend>diagnostic_msgs</depend>

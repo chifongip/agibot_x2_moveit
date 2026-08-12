@@ -8,6 +8,7 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 
 find_package(ament_cmake REQUIRED)
 find_package(agibot_x2_manipulation_msgs REQUIRED)
+find_package(aimdk_msgs REQUIRED)
 find_package(apriltag_msgs REQUIRED)
 find_package(Boost REQUIRED COMPONENTS random)
 find_package(Eigen3 REQUIRED)
@@ -87,7 +88,7 @@ add_executable(pick_place_server src/pick_place_server.cpp)
 target_link_libraries(pick_place_server
   box_geometry closed_chain_path_planner perception_readiness planning_budget reset_coordinator reset_utils)
 ament_target_dependencies(pick_place_server
-  agibot_x2_manipulation_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
+  agibot_x2_manipulation_msgs aimdk_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
   moveit_ros_planning_interface nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs std_srvs tf2_eigen
   tf2_geometry_msgs trajectory_msgs visualization_msgs)
 
@@ -120,6 +121,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_reset_utils reset_utils)
   ament_add_gtest(test_reset_coordinator test/test_reset_coordinator.cpp)
   target_link_libraries(test_reset_coordinator reset_coordinator)
+  ament_add_gtest(test_execution_feedback test/test_execution_feedback.cpp)
+  target_include_directories(test_execution_feedback PRIVATE include)
   ament_add_pytest_test(test_manipulation_config test/test_manipulation_config.py)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
 endif()

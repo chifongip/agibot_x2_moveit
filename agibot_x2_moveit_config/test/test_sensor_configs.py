@@ -43,3 +43,18 @@ def test_configs_share_map_and_filtered_topic_contract():
                 assert sensor["filtered_cloud_topic"] == (
                     "/x2/moveit/lidar_filtered_cloud"
                 )
+
+
+def test_dual_arm_controller_requires_measured_endpoint_convergence():
+    with (CONFIG_DIR / "ros2_controllers.yaml").open(encoding="utf-8") as stream:
+        controller = yaml.safe_load(stream)["dual_arm_controller"]["ros__parameters"]
+
+    constraints = controller["constraints"]
+    assert controller["allow_nonzero_velocity_at_trajectory_end"] is False
+    assert constraints["goal_time"] > 0.0
+    assert constraints["stopped_velocity_tolerance"] > 0.0
+    assert set(controller["joints"]) == {
+        name for name, values in constraints.items()
+        if isinstance(values, dict) and "goal" in values
+    }
+    assert all(constraints[joint]["goal"] > 0.0 for joint in controller["joints"])

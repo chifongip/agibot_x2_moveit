@@ -33,6 +33,27 @@ dual_arm_controller:
       - position
       - velocity
     allow_partial_joints_goal: false
+    # A trajectory result must reflect measured endpoint convergence. Values
+    # mirror the manipulation server's execution gate and must be calibrated
+    # from real arm tracking data before real-robot deployment.
+    allow_nonzero_velocity_at_trajectory_end: false
+    constraints:
+      stopped_velocity_tolerance: 0.01
+      goal_time: 2.0
+      left_shoulder_pitch_joint: {goal: 0.02}
+      left_shoulder_roll_joint: {goal: 0.02}
+      left_shoulder_yaw_joint: {goal: 0.02}
+      left_elbow_joint: {goal: 0.02}
+      left_wrist_yaw_joint: {goal: 0.02}
+      left_wrist_pitch_joint: {goal: 0.02}
+      left_wrist_roll_joint: {goal: 0.02}
+      right_shoulder_pitch_joint: {goal: 0.02}
+      right_shoulder_roll_joint: {goal: 0.02}
+      right_shoulder_yaw_joint: {goal: 0.02}
+      right_elbow_joint: {goal: 0.02}
+      right_wrist_yaw_joint: {goal: 0.02}
+      right_wrist_pitch_joint: {goal: 0.02}
+      right_wrist_roll_joint: {goal: 0.02}
 
 joint_state_broadcaster:
   ros__parameters:

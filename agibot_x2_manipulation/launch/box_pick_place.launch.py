@@ -301,6 +301,9 @@ def generate_launch_description():
                         "allow_execution": ParameterValue(
                             allow_execution, value_type=bool
                         ),
+                        # The execution gate consumes direct HAL measurements,
+                        # not the potentially cached joint-state broadcaster.
+                        "arm_state_topic": arm_state_topic,
                         "state_file": ParameterValue(
                             manipulation_state_file, value_type=str
                         ),

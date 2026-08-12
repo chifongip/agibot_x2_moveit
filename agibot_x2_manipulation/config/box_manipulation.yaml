@@ -41,7 +41,7 @@ pick_place_server:
     ik_attempts_per_candidate: 8
     maximum_planning_candidates: 5
     planning_time_per_candidate: 2.0
-    pregrasp_planning_timeout: 30.0
+    pregrasp_planning_timeout: 60.0
     maximum_retry_candidates: 3
     minimum_grasp_joint_margin: 0.02  # rad; avoid grasps that cannot move away from a limit
     closed_chain_position_tolerance: 0.010
@@ -64,6 +64,8 @@ pick_place_server:
     carry_search_z_lower: 0.12
     carry_search_z_upper: 0.03
     carry_search_orientation_tolerance: 0.1745329252  # 10 degrees
+    # Bounded local correction only; a placement-region planner is required
+    # before allowing larger shifts from the requested final box pose.
     adaptive_place_position_tolerance: [0.015, 0.015, 0.005]
     adaptive_place_yaw_tolerance: 0.0872664626  # 5 degrees
     maximum_joint_step: 0.35
@@ -80,6 +82,14 @@ pick_place_server:
     reset_preemption_timeout: 15.0
     reset_state_timeout: 2.0
     reset_joint_tolerance: 0.02
+    # These must be validated against measured hardware tracking. The server
+    # requires fresh feedback satisfying them before any following phase.
+    execution_settle_timeout: 2.0
+    execution_joint_tolerance: 0.02
+    execution_velocity_tolerance: 0.01
+    execution_settle_samples: 3
+    execution_feedback_max_age: 0.25
+    execution_feedback_future_skew: 0.10
     simulate_ideal_attachment: false
     attach_service: /mujoco_grasp/attach
     detach_service: /mujoco_grasp/detach

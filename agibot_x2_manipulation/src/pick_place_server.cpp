@@ -1,5 +1,6 @@
 #include "agibot_x2_manipulation/box_geometry.hpp"
 #include "agibot_x2_manipulation/closed_chain_path_planner.hpp"
+#include "agibot_x2_manipulation/execution_feedback.hpp"
 #include "agibot_x2_manipulation/perception_readiness.hpp"
 #include "agibot_x2_manipulation/planning_budget.hpp"
 #include "agibot_x2_manipulation/reset_coordinator.hpp"
@@ -11,6 +12,7 @@
 #include <agibot_x2_manipulation_msgs/action/reset_manipulation.hpp>
 #include <agibot_x2_manipulation_msgs/msg/manipulation_state.hpp>
 #include <agibot_x2_manipulation_msgs/srv/recover_manipulation_state.hpp>
+#include <aimdk_msgs/msg/joint_state_array.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
@@ -107,6 +109,16 @@ struct PlannedGrasp
   GraspCandidate candidate;
   double joint_limit_margin{0.0};
   double joint_distance{0.0};
+};
+
+// Endpoint acceptance is based on direct HAL measurements, not the
+// joint-state broadcaster. The latter may republish cached ros2_control state
+// after a physical feedback stream has stopped.
+struct HalArmFeedbackSnapshot
+{
+  std::map<std::string, JointFeedback> joints;
+  uint32_t measurement_sequence{0};
+  bool valid{false};
 };
 
 using CarryRoute = ClosedChainRoute;
@@ -344,11 +356,28 @@ public:
     reset_preemption_timeout_ = parameter<double>(node_, "reset_preemption_timeout", 15.0);
     reset_state_timeout_ = parameter<double>(node_, "reset_state_timeout", 2.0);
     reset_joint_tolerance_ = parameter<double>(node_, "reset_joint_tolerance", 0.02);
+    execution_settle_timeout_ = parameter<double>(
+      node_, "execution_settle_timeout", reset_state_timeout_);
+    execution_joint_tolerance_ = parameter<double>(
+      node_, "execution_joint_tolerance", reset_joint_tolerance_);
+    execution_velocity_tolerance_ = parameter<double>(
+      node_, "execution_velocity_tolerance", 0.01);
+    execution_settle_samples_ = parameter<int>(node_, "execution_settle_samples", 3);
+    execution_feedback_max_age_ = parameter<double>(
+      node_, "execution_feedback_max_age", 0.25);
+    execution_feedback_future_skew_ = parameter<double>(
+      node_, "execution_feedback_future_skew", 0.10);
+    arm_state_topic_ = parameter<std::string>(
+      node_, "arm_state_topic", "/aima/hal/joint/arm/state");
     if (reset_preemption_timeout_ <= 0.0 || reset_state_timeout_ <= 0.0 ||
-      reset_joint_tolerance_ < 0.0)
+      reset_joint_tolerance_ < 0.0 || execution_settle_timeout_ <= 0.0 ||
+      execution_joint_tolerance_ < 0.0 || execution_velocity_tolerance_ < 0.0 ||
+      execution_settle_samples_ < 1 || execution_feedback_max_age_ <= 0.0 ||
+      execution_feedback_future_skew_ < 0.0 || arm_state_topic_.empty())
     {
       throw std::runtime_error(
-              "reset timeouts must be positive and reset_joint_tolerance nonnegative");
+              "reset/execution timeouts and feedback age must be positive; tolerances must be "
+              "nonnegative; arm_state_topic must not be empty");
     }
     if (initial_state_ != "empty" && initial_state_ != "unknown") {
       throw std::runtime_error("initial_state must be 'empty' or 'unknown'");
@@ -481,6 +510,54 @@ public:
     }
     clear_octomap_client_ = node_->create_client<std_srvs::srv::Empty>(octomap_clear_service_);
 
+    hal_arm_state_sub_ = node_->create_subscription<aimdk_msgs::msg::JointStateArray>(
+      arm_state_topic_, rclcpp::SensorDataQoS(),
+      [this](const aimdk_msgs::msg::JointStateArray::SharedPtr message) {
+        const rclcpp::Time measurement_time(message->header.meas_stamp);
+        const double measurement_age = (node_->now() - measurement_time).seconds();
+        if (measurement_time.nanoseconds() <= 0 || !std::isfinite(measurement_age) ||
+          measurement_age > execution_feedback_max_age_ ||
+          measurement_age < -execution_feedback_future_skew_)
+        {
+          RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 5000,
+            "Ignoring stale HAL arm feedback from %s (measurement age %.6f s)",
+            arm_state_topic_.c_str(), measurement_age);
+          return;
+        }
+        std::map<std::string, JointFeedback> feedback;
+        for (const auto & joint : message->joints) {
+          if (!std::isfinite(joint.position) || !std::isfinite(joint.velocity)) {
+            RCLCPP_WARN_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 5000,
+              "Ignoring HAL arm feedback with a non-finite state for %s", joint.name.c_str());
+            return;
+          }
+          feedback[joint.name] = JointFeedback{joint.position, joint.velocity};
+        }
+        if (feedback.empty()) {
+          RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 5000,
+            "Ignoring empty HAL arm feedback from %s", arm_state_topic_.c_str());
+          return;
+        }
+        {
+          std::lock_guard<std::mutex> lock(hal_arm_feedback_mutex_);
+          if (latest_hal_arm_feedback_.valid && !isNewerMeasurementSequence(
+              message->header.sequence, latest_hal_arm_feedback_.measurement_sequence))
+          {
+            RCLCPP_WARN_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 5000,
+              "Ignoring non-increasing HAL arm measurement sequence %u from %s",
+              message->header.sequence, arm_state_topic_.c_str());
+            return;
+          }
+          latest_hal_arm_feedback_ = HalArmFeedbackSnapshot{
+            std::move(feedback), message->header.sequence, true};
+        }
+        hal_arm_feedback_generation_.fetch_add(1U, std::memory_order_release);
+      });
+
     box_pose_sub_ = node_->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
       box_pose_topic_, 10,
       [this](const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr message) {
@@ -560,10 +637,111 @@ private:
     return trajectory;
   }
 
-  template<typename TrajectoryT>
-  bool executeMotion(const TrajectoryT & trajectory, const CancelFunction & canceled)
+  void setExecutionError(const std::string & error)
   {
+    std::lock_guard<std::mutex> lock(execution_error_mutex_);
+    last_execution_error_ = error;
+  }
+
+  std::string executionError(const std::string & prefix)
+  {
+    std::lock_guard<std::mutex> lock(execution_error_mutex_);
+    return last_execution_error_.empty() ? prefix : prefix + ": " + last_execution_error_;
+  }
+
+  bool waitForExecutionSettled(
+    const moveit_msgs::msg::RobotTrajectory & trajectory,
+    const HalArmFeedbackSnapshot & prior_feedback, uint64_t minimum_feedback_generation,
+    const CancelFunction & canceled, std::map<std::string, double> * settled_positions)
+  {
+    const auto & joint_trajectory = trajectory.joint_trajectory;
+    if (joint_trajectory.joint_names.empty() || joint_trajectory.points.empty()) {
+      setExecutionError("controller reported success for an empty joint trajectory");
+      return false;
+    }
+    const auto & endpoint = joint_trajectory.points.back();
+    if (endpoint.positions.size() != joint_trajectory.joint_names.size()) {
+      setExecutionError("trajectory endpoint does not contain every commanded joint position");
+      return false;
+    }
+    std::map<std::string, double> target_positions;
+    for (std::size_t index = 0; index < joint_trajectory.joint_names.size(); ++index) {
+      target_positions[joint_trajectory.joint_names[index]] = endpoint.positions[index];
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(execution_settle_timeout_));
+    uint64_t last_feedback_generation = minimum_feedback_generation;
+    int settled_samples = 0;
+    std::string worst_position_joint{"unavailable"};
+    std::string worst_velocity_joint{"unavailable"};
+    double maximum_position_error = std::numeric_limits<double>::infinity();
+    double maximum_velocity = std::numeric_limits<double>::infinity();
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (execution_cancel_requested_.load() || canceled()) {
+        setExecutionError("execution canceled while waiting for fresh settled joint feedback");
+        return false;
+      }
+      const uint64_t feedback_generation = hal_arm_feedback_generation_.load(
+        std::memory_order_acquire);
+      if (feedback_generation <= last_feedback_generation) {
+        rclcpp::sleep_for(std::chrono::milliseconds(10));
+        continue;
+      }
+      last_feedback_generation = feedback_generation;
+      HalArmFeedbackSnapshot feedback;
+      {
+        std::lock_guard<std::mutex> lock(hal_arm_feedback_mutex_);
+        feedback = latest_hal_arm_feedback_;
+      }
+      if (!feedback.valid || !isNewerMeasurementSequence(
+          feedback.measurement_sequence, prior_feedback.measurement_sequence))
+      {
+        settled_samples = 0;
+        continue;
+      }
+      const auto check = checkExecutionFeedback(
+        target_positions, feedback.joints, execution_joint_tolerance_, execution_velocity_tolerance_);
+      maximum_position_error = check.maximum_position_error;
+      maximum_velocity = check.maximum_velocity;
+      worst_position_joint = check.worst_position_joint;
+      worst_velocity_joint = check.worst_velocity_joint;
+      settled_samples = check.settled ? settled_samples + 1 : 0;
+      if (settled_samples >= execution_settle_samples_) {
+        if (settled_positions) {
+          settled_positions->clear();
+          for (const auto & [joint_name, target_position] : target_positions) {
+            (void)target_position;
+            (*settled_positions)[joint_name] = feedback.joints.at(joint_name).position;
+          }
+        }
+        return true;
+      }
+      rclcpp::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::ostringstream message;
+    message << std::fixed << std::setprecision(6) <<
+      "execution endpoint did not settle within " << execution_settle_timeout_ <<
+      " s (worst_position_joint=" << worst_position_joint <<
+      ", position_error=" << maximum_position_error << " rad, worst_velocity_joint=" <<
+      worst_velocity_joint << ", velocity=" << maximum_velocity << " rad/s, samples=" <<
+      settled_samples << "/" << execution_settle_samples_ << ")";
+    setExecutionError(message.str());
+    RCLCPP_ERROR(node_->get_logger(), "%s", message.str().c_str());
+    move_group_.stop();
+    return false;
+  }
+
+  template<typename TrajectoryT>
+  bool executeMotion(
+    const TrajectoryT & trajectory, const CancelFunction & canceled,
+    std::map<std::string, double> * settled_positions = nullptr)
+  {
+    setExecutionError("");
     if (!execute_trajectory_client_->wait_for_action_server(std::chrono::seconds(2))) {
+      setExecutionError("ExecuteTrajectory action server is unavailable");
       return false;
     }
     ExecuteTrajectory::Goal request;
@@ -584,6 +762,7 @@ private:
     }
     const auto handle = goal_future.get();
     if (!handle) {
+      setExecutionError("trajectory goal was rejected");
       return false;
     }
     bool cancel_now = false;
@@ -609,8 +788,26 @@ private:
         active_execution_goal_.reset();
       }
     }
-    return result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result &&
-           result.result->error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+    if (result.code != rclcpp_action::ResultCode::SUCCEEDED || !result.result ||
+      result.result->error_code.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS)
+    {
+      setExecutionError("MoveIt ExecuteTrajectory action did not report success");
+      return false;
+    }
+    HalArmFeedbackSnapshot prior_feedback;
+    {
+      std::lock_guard<std::mutex> lock(hal_arm_feedback_mutex_);
+      prior_feedback = latest_hal_arm_feedback_;
+    }
+    if (!prior_feedback.valid) {
+      setExecutionError("no valid HAL arm measurement was available after trajectory execution");
+      return false;
+    }
+    const uint64_t feedback_generation = hal_arm_feedback_generation_.load(
+      std::memory_order_acquire);
+    return waitForExecutionSettled(
+      executableTrajectory(trajectory), prior_feedback, feedback_generation, canceled,
+      settled_positions);
   }
 
   void requestExecutionStop()
@@ -2092,8 +2289,11 @@ private:
         start_joints, controls, deadline, canceled, solve, path, report))
     {
       RCLCPP_WARN(
-        node_->get_logger(), "Approach waypoint %zu rejected: %s",
-        report.waypoint, report.detail.c_str());
+        node_->get_logger(),
+        "Approach waypoint %zu rejected: %s (classification=%s, failed_arm=%s, "
+        "ik_mode=%s, attempts=%zu)",
+        report.waypoint, report.detail.c_str(), closedChainFailureName(report.failure),
+        report.failed_arm.c_str(), report.ik_mode.c_str(), report.attempts);
       return false;
     }
     for (const auto & solution : path.states) {
@@ -3269,7 +3469,7 @@ private:
       return outcome(false, kSafetyAbort, error);
     }
     if (!executeMotion(pregrasp_plan, canceled)) {
-      return outcome(false, kExecutionFailed, "pregrasp execution failed");
+      return outcome(false, kExecutionFailed, executionError("pregrasp execution failed"));
     }
     if (canceled()) {
       return outcome(false, kExecutionFailed, "pick canceled before approach");
@@ -3287,7 +3487,7 @@ private:
     }
     feedback("approaching", 0.45F, box_message);
     if (!executeMotion(approach, canceled)) {
-      return outcome(false, kExecutionFailed, "approach execution failed");
+      return outcome(false, kExecutionFailed, executionError("approach execution failed"));
     }
     if (canceled()) {
       return outcome(false, kExecutionFailed, "pick canceled before attachment");
@@ -3363,7 +3563,9 @@ private:
     if (!executeMotion(carry_plan.trajectory, canceled)) {
       updateHeldPoseFromRobot();
       setState(ManipulationState::RECOVERY_REQUIRED, "carry execution failed");
-      return outcome(false, kRecoveryRequired, "carry execution failed; object remains held", held_pose_);
+      return outcome(
+        false, kRecoveryRequired,
+        executionError("carry execution failed") + "; object remains held", held_pose_);
     }
     if (canceled()) {
       updateHeldPoseFromRobot();
@@ -3444,7 +3646,9 @@ private:
     if (!executeMotion(transport, canceled)) {
       updateHeldPoseFromRobot();
       setState(ManipulationState::RECOVERY_REQUIRED, "place motion failed");
-      return outcome(false, kRecoveryRequired, "place motion failed; object remains held", held_pose_);
+      return outcome(
+        false, kRecoveryRequired,
+        executionError("place motion failed") + "; object remains held", held_pose_);
     }
     held_pose_ = place_message;
     if (canceled()) {
@@ -3492,7 +3696,8 @@ private:
       return outcome(false, kExecutionFailed, "box placed, but retreat was canceled", place_message);
     }
     if (!executeMotion(retreat, canceled)) {
-      return outcome(false, kExecutionFailed, "box placed, but retreat failed", place_message);
+      return outcome(
+        false, kExecutionFailed, executionError("box placed, but retreat failed"), place_message);
     }
     held_pose_ = geometry_msgs::msg::PoseStamped();
     if (canceled()) {
@@ -3530,7 +3735,8 @@ private:
     if (!executeMotion(zero_plan, canceled)) {
       setState(ManipulationState::EMPTY, "box placed; return-to-zero execution failed");
       return outcome(
-        false, kExecutionFailed, "box placed, but return-to-zero execution failed", place_message);
+        false, kExecutionFailed,
+        executionError("box placed, but return-to-zero execution failed"), place_message);
     }
     if (canceled()) {
       setState(ManipulationState::EMPTY, "box placed; reset requested after return to zero");
@@ -3784,9 +3990,13 @@ private:
 
       feedback("executing_zero", 0.70F);
       execution_cancel_requested_.store(false);
-      if (!executeMotion(reset_plan, [goal]() {return goal->is_canceling();})) {
+      std::map<std::string, double> settled_reset_positions;
+      if (!executeMotion(
+          reset_plan, [goal]() {return goal->is_canceling();}, &settled_reset_positions))
+      {
         const std::string message = goal->is_canceling() ?
-          "reset canceled during zero execution" : "execution to the reset target failed";
+          "reset canceled during zero execution" :
+          executionError("execution to the reset target failed");
         fail(
           goal->is_canceling() ? ResetManipulation::Result::CANCELED :
           ResetManipulation::Result::EXECUTION_FAILED,
@@ -3795,21 +4005,8 @@ private:
       }
 
       feedback("verifying", 0.90F);
-      current = move_group_.getCurrentState(reset_state_timeout_);
-      if (!current) {
-        fail(
-          ResetManipulation::Result::STATE_UNAVAILABLE,
-          "current robot state unavailable for reset verification");
-        return;
-      }
-      current->update();
-      std::map<std::string, double> measured;
-      for (const auto & [joint_name, target_position] : reset_target_values_) {
-        (void)target_position;
-        measured[joint_name] = current->getVariablePosition(joint_name);
-      }
       const auto verification = verifyJointTarget(
-        reset_target_values_, measured, reset_joint_tolerance_);
+        reset_target_values_, settled_reset_positions, reset_joint_tolerance_);
       if (!verification.within_tolerance) {
         fail(
           ResetManipulation::Result::VERIFICATION_FAILED,
@@ -4010,6 +4207,13 @@ private:
   double reset_preemption_timeout_;
   double reset_state_timeout_;
   double reset_joint_tolerance_;
+  double execution_settle_timeout_;
+  double execution_joint_tolerance_;
+  double execution_velocity_tolerance_;
+  int execution_settle_samples_;
+  double execution_feedback_max_age_;
+  double execution_feedback_future_skew_;
+  std::string arm_state_topic_;
   std::map<std::string, double> reset_target_values_;
   bool reset_physical_detach_done_{false};
   bool reset_scene_cleanup_done_{false};
@@ -4027,8 +4231,13 @@ private:
   ResetCoordinator reset_coordinator_;
   std::unique_ptr<ClosedChainPathPlanner> closed_chain_planner_;
   std::mutex execution_transition_mutex_;
+  std::mutex execution_error_mutex_;
   std::atomic<bool> execution_cancel_requested_{false};
   ExecuteTrajectoryGoalHandle::SharedPtr active_execution_goal_;
+  std::string last_execution_error_;
+  std::atomic<uint64_t> hal_arm_feedback_generation_{0};
+  std::mutex hal_arm_feedback_mutex_;
+  HalArmFeedbackSnapshot latest_hal_arm_feedback_;
   std::atomic<uint8_t> state_{ManipulationState::UNKNOWN};
   std::mutex pose_mutex_;
   std::mutex state_mutex_;
@@ -4051,6 +4260,7 @@ private:
     planning_scene_world_audit_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_filtered_cloud_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_filtered_cloud_sub_;
+  rclcpp::Subscription<aimdk_msgs::msg::JointStateArray>::SharedPtr hal_arm_state_sub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr box_path_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;

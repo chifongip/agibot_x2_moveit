@@ -415,6 +415,17 @@ results are published on `/pick_place/planned_box_path`,
 with per-route failure classification and budget data on
 `/pick_place/planning_diagnostics`.
 
+Each non-plan-only motion also requires a settled physical endpoint before the
+server begins its next phase. It waits for fresh, timestamped direct HAL arm
+feedback from `arm_state_topic`, then requires consecutive samples within
+`execution_joint_tolerance` and `execution_velocity_tolerance`; a timeout
+stops MoveIt execution and reports the largest joint position and velocity
+residual. Cached `/joint_states` republishes are not accepted as physical
+feedback. The same policy is configured in `dual_arm_controller` with
+per-joint goal tolerances and a nonzero `goal_time`. Calibrate these values
+from live encoder tracking before real-robot use; they must not be relaxed
+merely to pass an approach or reset.
+
 ## To do
 
 - Extend Place beyond its current local X/Y/Z/yaw correction window with a

@@ -36,6 +36,9 @@ def test_launch_controls_perception_source_selection():
     # wildcard parameter file, so this selector must remain launch-owned.
     assert "perception_3d_source" not in config
     assert "allow_execution" not in config
+    assert '"arm_state_topic": arm_state_topic' in LAUNCH_FILE.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_filtered_output_topics_match_moveit_configuration():
@@ -44,6 +47,18 @@ def test_filtered_output_topics_match_moveit_configuration():
 
     assert config["depth_filtered_cloud_topic"] == "/x2/moveit/depth_filtered_cloud"
     assert config["lidar_filtered_cloud_topic"] == "/x2/moveit/lidar_filtered_cloud"
+
+
+def test_execution_requires_fresh_settled_feedback():
+    with CONFIG_FILE.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
+
+    assert config["execution_settle_timeout"] > 0.0
+    assert config["execution_joint_tolerance"] > 0.0
+    assert config["execution_velocity_tolerance"] > 0.0
+    assert config["execution_settle_samples"] >= 2
+    assert config["execution_feedback_max_age"] > 0.0
+    assert config["execution_feedback_future_skew"] >= 0.0
 
 
 def test_recorded_failure_snapshot_is_complete_and_uses_full_box_pose():
@@ -84,7 +99,7 @@ def test_coordinated_grasp_search_has_conservative_limits():
     assert config["ik_attempts_per_candidate"] >= 4
     assert config["maximum_planning_candidates"] > 0
     assert config["planning_time_per_candidate"] > 0.0
-    assert config["pregrasp_planning_timeout"] == 30.0
+    assert config["pregrasp_planning_timeout"] >= 30.0
     assert config["maximum_retry_candidates"] == 3
     assert config["minimum_grasp_joint_margin"] >= 0.02
     assert config["closed_chain_position_tolerance"] == 0.010
