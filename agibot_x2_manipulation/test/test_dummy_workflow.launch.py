@@ -7,6 +7,7 @@ from agibot_x2_manipulation_msgs.action import Pick, PickPlace, Place
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.actions import Node
 import launch_testing
 import launch_testing.actions
 import pytest
@@ -17,27 +18,39 @@ from rclpy.action import ActionClient
 @pytest.mark.launch_test
 def generate_test_description():
     share = get_package_share_directory("agibot_x2_manipulation")
-    port = 18000 + os.getpid() % 10000
-    replay = IncludeLaunchDescription(
+    port = 20000 + os.getpid() % 10000
+    endpoint = f"tcp://127.0.0.1:{port}"
+    stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(share, "launch", "recorded_planning_failure.launch.py")
+            os.path.join(share, "launch", "box_pick_place.launch.py")
         ),
         launch_arguments={
-            "use_rviz": "false",
+            "command_transport": "zmq",
             "zmq_endpoint": f"tcp://*:{port}",
-            "fake_zmq_endpoint": f"tcp://127.0.0.1:{port}",
+            "use_rviz": "false",
+            "use_apriltag": "false",
+            "use_dummy_apriltag": "true",
+            "perception_3d_source": "none",
             "allow_execution": "true",
             "motion_planning_mode": "pose_to_pose",
+            "manipulation_state_file": f"/tmp/x2_dummy_workflow_{os.getpid()}",
         }.items(),
     )
-    return LaunchDescription([replay, launch_testing.actions.ReadyToTest()])
+    feedback = Node(
+        package="agibot_x2_ros2_control",
+        executable="fake_zmq_joint_states",
+        name="dummy_x2_joint_states",
+        output="screen",
+        arguments=["--endpoint", endpoint, "--initial-pose", "locomanipulation"],
+    )
+    return LaunchDescription([feedback, stack, launch_testing.actions.ReadyToTest()])
 
 
-class TestRecordedWorkflow(unittest.TestCase):
+class TestDummyWorkflow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         rclpy.init()
-        cls.node = rclpy.create_node("recorded_workflow_test")
+        cls.node = rclpy.create_node("dummy_workflow_test")
 
     @classmethod
     def tearDownClass(cls):
@@ -70,10 +83,9 @@ class TestRecordedWorkflow(unittest.TestCase):
         goal.place_pose.header.frame_id = "base_link"
         goal.place_pose.pose.position.x = 0.35
         goal.place_pose.pose.position.z = 0.17
-        goal.place_pose.pose.orientation.z = -0.0871557427
-        goal.place_pose.pose.orientation.w = 0.9961946981
+        goal.place_pose.pose.orientation.w = 1.0
 
-    def test_recorded_pick_place_and_pick_place(self):
+    def test_dummy_pick_place_and_pick_place(self):
         pick_goal = Pick.Goal()
         pick_goal.plan_only = True
         pick_result = self.send_goal(Pick, "/pick_box", pick_goal, 45.0)

@@ -41,6 +41,19 @@ def test_launch_controls_perception_source_selection():
     )
 
 
+def test_pose_to_pose_mode_is_selectable_and_closed_chain_remains_default():
+    with CONFIG_FILE.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
+
+    launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
+    recorded_source = RECORDED_LAUNCH_FILE.read_text(encoding="utf-8")
+    assert "motion_planning_mode" not in config
+    assert '"motion_planning_mode",\n                default_value="closed_chain"' in launch_source
+    assert 'choices=["closed_chain", "pose_to_pose"]' in launch_source
+    assert '"motion_planning_mode": motion_planning_mode' in launch_source
+    assert '"motion_planning_mode": motion_planning_mode' in recorded_source
+
+
 def test_launch_defaults_preserve_state_delivery_headroom():
     source = LAUNCH_FILE.read_text(encoding="utf-8")
 

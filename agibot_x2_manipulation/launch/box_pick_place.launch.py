@@ -82,6 +82,7 @@ def generate_launch_description():
     depth_camera_info_topic = LaunchConfiguration("depth_camera_info_topic")
     lidar_pointcloud_topic = LaunchConfiguration("lidar_pointcloud_topic")
     allow_execution = LaunchConfiguration("allow_execution")
+    motion_planning_mode = LaunchConfiguration("motion_planning_mode")
     manipulation_state_file = LaunchConfiguration("manipulation_state_file")
 
     config_share = get_package_share_directory("agibot_x2_moveit_config")
@@ -132,6 +133,15 @@ def generate_launch_description():
                 default_value="false",
                 choices=["true", "false"],
                 description="Explicit opt-in for any robot motion, including reset.",
+            ),
+            DeclareLaunchArgument(
+                "motion_planning_mode",
+                default_value="closed_chain",
+                choices=["closed_chain", "pose_to_pose"],
+                description=(
+                    "Use rigid closed-chain waypoint planning or collision-checked "
+                    "joint-space planning between dual-arm endpoint poses."
+                ),
             ),
             DeclareLaunchArgument(
                 "manipulation_state_file",
@@ -304,6 +314,7 @@ def generate_launch_description():
                         "allow_execution": ParameterValue(
                             allow_execution, value_type=bool
                         ),
+                        "motion_planning_mode": motion_planning_mode,
                         # The execution gate consumes direct HAL measurements,
                         # not the potentially cached joint-state broadcaster.
                         "arm_state_topic": arm_state_topic,

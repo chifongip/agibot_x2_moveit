@@ -279,6 +279,24 @@ ros2 action send_goal /pick_place \
   --feedback
 ```
 
+The server defaults to `motion_planning_mode:=closed_chain`, which samples and
+validates rigid box/TCP waypoints throughout approach, carry, placement, and
+retreat. For endpoint-only arm motion, select:
+
+```bash
+ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
+  motion_planning_mode:=pose_to_pose allow_execution:=false
+```
+
+In `pose_to_pose` mode, the server retains the same pregrasp, contact, lift,
+carry, place, retreat, and zero endpoints. It solves dual-arm IK at each
+endpoint, then asks MoveIt for a collision-checked joint-space plan to the next
+endpoint. Joint bounds, obstacle avoidance, attached-box collision geometry,
+execution feedback, and recovery handling remain active. This mode does not
+guarantee straight TCP motion or continuous rigid two-hand closure between
+endpoints, so validate with `plan_only: true` and fake-ZMQ simulation before
+enabling robot motion.
+
 Pregrasp planning first tests up to `maximum_planning_candidates` candidates
 for `planning_time_per_candidate` seconds each. If none succeeds, the best
 `maximum_retry_candidates` OMPL failures share the time remaining in the
@@ -359,14 +377,18 @@ fault before retrying.
 
 ## Simulation test
 
-For MuJoCo/ZMQ planning, start the fake feedback utility first; it publishes
-all 31 HAL joint states and assumes the simulator exactly follows received ZMQ
-arm commands:
+For a dummy pose-to-pose verification, start the fake feedback utility first.
+It publishes all 31 HAL joint states and assumes the simulated arms exactly
+follow received ZMQ commands:
 
 ```bash
-ros2 run agibot_x2_ros2_control fake_zmq_joint_states
+ros2 run agibot_x2_ros2_control fake_zmq_joint_states \
+  --endpoint tcp://127.0.0.1:8559 --initial-pose locomanipulation
+
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
-  command_transport:=zmq use_apriltag:=false use_dummy_apriltag:=true
+  command_transport:=zmq zmq_endpoint:=tcp://*:8559 \
+  use_apriltag:=false use_dummy_apriltag:=true \
+  motion_planning_mode:=pose_to_pose allow_execution:=false
 ```
 
 The dummy tag publishes `base_link -> tag0` and `/detections`. Its default
@@ -380,7 +402,8 @@ recorded box pose:
 
 ```bash
 ROS_DOMAIN_ID=99 ros2 launch agibot_x2_manipulation \
-  recorded_planning_failure.launch.py use_rviz:=true
+  recorded_planning_failure.launch.py use_rviz:=false \
+  motion_planning_mode:=pose_to_pose
 ```
 
 This isolated replay launch defaults `allow_execution:=true`, so it accepts
@@ -393,6 +416,19 @@ cannot leave the next clean launch latched in `HOLDING` or `UNKNOWN`.
 `simulate_ideal_attachment` is false by default; enabling it requires working
 `/mujoco_grasp/attach` and `/mujoco_grasp/detach` services that change the
 MuJoCo weld/physics, not just acknowledge the request.
+
+The package also provides isolated automated regressions for the dummy and
+recorded cases. Both select `motion_planning_mode:=pose_to_pose` and exercise
+plan-only Pick and PickPlace goals plus executed Pick, Place, and PickPlace
+goals against fake ZMQ feedback:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+colcon test --packages-select agibot_x2_manipulation \
+  --event-handlers console_direct+
+colcon test-result --verbose
+```
 
 The recorded full-workflow regression uses a reachable downward place from the
 adaptive carry pose:

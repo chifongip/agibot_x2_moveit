@@ -123,6 +123,29 @@ struct HalArmFeedbackSnapshot
 
 using CarryRoute = ClosedChainRoute;
 
+enum class MotionPlanningMode
+{
+  CLOSED_CHAIN,
+  POSE_TO_POSE
+};
+
+MotionPlanningMode parseMotionPlanningMode(const std::string & value)
+{
+  if (value == "closed_chain") {
+    return MotionPlanningMode::CLOSED_CHAIN;
+  }
+  if (value == "pose_to_pose") {
+    return MotionPlanningMode::POSE_TO_POSE;
+  }
+  throw std::runtime_error(
+          "motion_planning_mode must be 'closed_chain' or 'pose_to_pose'");
+}
+
+const char * motionPlanningModeName(MotionPlanningMode mode)
+{
+  return mode == MotionPlanningMode::POSE_TO_POSE ? "pose_to_pose" : "closed_chain";
+}
+
 const char * carryRouteName(CarryRoute route)
 {
   return closedChainRouteName(route);
@@ -258,6 +281,9 @@ public:
     right_group_name_ = parameter<std::string>(node_, "right_group", "right_arm");
     left_tcp_ = parameter<std::string>(node_, "left_tcp", "left_hand_tcp_link");
     right_tcp_ = parameter<std::string>(node_, "right_tcp", "right_hand_tcp_link");
+    motion_planning_mode_name_ = parameter<std::string>(
+      node_, "motion_planning_mode", "closed_chain");
+    motion_planning_mode_ = parseMotionPlanningMode(motion_planning_mode_name_);
     box_id_ = parameter<std::string>(node_, "box_id", "grasp_box");
     const auto dimensions = parameter<std::vector<double>>(
       node_,
@@ -415,6 +441,9 @@ public:
     move_group_.setMaxVelocityScalingFactor(velocity_scaling_);
     move_group_.setMaxAccelerationScalingFactor(acceleration_scaling_);
     move_group_.setPlanningTime(10.0);
+    RCLCPP_INFO(
+      node_->get_logger(), "Pick/place motion planning mode: %s",
+      motionPlanningModeName(motion_planning_mode_));
     const auto model = move_group_.getRobotModel();
     if (!model->hasJointModelGroup(move_group_.getName()) ||
       !model->hasJointModelGroup(left_group_name_) ||
@@ -1508,6 +1537,67 @@ private:
            verifyBoxSceneState(false, true, error);
   }
 
+  bool removeWorldBoxTemporarily(
+    moveit_msgs::msg::CollisionObject & saved_object, std::string & error)
+  {
+    try {
+      const auto objects = planning_scene_interface_.getObjects({box_id_});
+      const auto found = objects.find(box_id_);
+      if (found == objects.end()) {
+        error = "world box is unavailable for temporary planning-scene removal";
+        return false;
+      }
+      saved_object = found->second;
+      return removeBox(error);
+    } catch (const std::exception & exception) {
+      error = "failed to save the world box before endpoint planning: " +
+        std::string(exception.what());
+      return false;
+    }
+  }
+
+  bool restoreWorldBox(
+    const moveit_msgs::msg::CollisionObject & saved_object, std::string & error)
+  {
+    try {
+      auto object = saved_object;
+      object.operation = moveit_msgs::msg::CollisionObject::ADD;
+      if (!planning_scene_interface_.applyCollisionObject(object)) {
+        error = "MoveIt rejected restoration of the world box";
+        return false;
+      }
+      return verifyBoxSceneState(false, true, error);
+    } catch (const std::exception & exception) {
+      error = "failed to restore the world box: " + std::string(exception.what());
+      return false;
+    }
+  }
+
+  bool beginVirtualAttachment(
+    moveit_msgs::msg::CollisionObject & saved_object, std::string & error)
+  {
+    try {
+      const auto objects = planning_scene_interface_.getObjects({box_id_});
+      const auto found = objects.find(box_id_);
+      if (found == objects.end()) {
+        error = "world box is unavailable for virtual attachment";
+        return false;
+      }
+      saved_object = found->second;
+    } catch (const std::exception & exception) {
+      error = "failed to save the world box before virtual attachment: " +
+        std::string(exception.what());
+      return false;
+    }
+    return attachBoxToScene(error);
+  }
+
+  bool endVirtualAttachment(
+    const moveit_msgs::msg::CollisionObject & saved_object, std::string & error)
+  {
+    return detachBoxFromScene(error) && restoreWorldBox(saved_object, error);
+  }
+
   bool callAttachmentService(
     const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr & client, std::string & error,
     bool * request_dispatched = nullptr)
@@ -1782,6 +1872,157 @@ private:
     add("joint_margin", std::to_string(joint_margin));
     add("maximum_joint_step", std::to_string(maximum_joint_step));
     diagnostics_pub_->publish(array);
+  }
+
+  void publishEndpointDiagnostic(
+    const std::string & route, const std::string & segment, bool success,
+    const std::string & detail)
+  {
+    diagnostic_msgs::msg::DiagnosticArray array;
+    array.header.stamp = node_->now();
+    diagnostic_msgs::msg::DiagnosticStatus status;
+    status.name = "pick_place/pose_to_pose_planning";
+    status.hardware_id = "x2_dual_arm";
+    status.level = success ? diagnostic_msgs::msg::DiagnosticStatus::OK :
+      diagnostic_msgs::msg::DiagnosticStatus::WARN;
+    status.message = detail;
+    const auto add = [&status](const std::string & key, const std::string & value) {
+        diagnostic_msgs::msg::KeyValue item;
+        item.key = key;
+        item.value = value;
+        status.values.push_back(std::move(item));
+      };
+    add("motion_planning_mode", motionPlanningModeName(motion_planning_mode_));
+    add("grasp_id", active_grasp_id_);
+    add("route_id", route);
+    add("segment", segment);
+    diagnostics_pub_->publish(array);
+  }
+
+  bool solveDualArmEndpoint(
+    const moveit::core::RobotState & start, const Eigen::Isometry3d & left_pose,
+    const Eigen::Isometry3d & right_pose, bool allow_pad_contact,
+    moveit::core::RobotState & target, std::string & error)
+  {
+    const auto * dual_group = start.getJointModelGroup(move_group_.getName());
+    bool found_ik = false;
+    bool found_bounds = false;
+    for (int attempt = 0; attempt < closed_chain_ik_attempts_; ++attempt) {
+      moveit::core::RobotState candidate(start);
+      if (attempt > 0) {
+        candidate.setToRandomPositions(dual_group);
+      }
+      if (!setFromDualArmIK(
+          candidate, left_pose, right_pose, false, closed_chain_ik_timeout_))
+      {
+        continue;
+      }
+      found_ik = true;
+      candidate.update();
+      if (!candidate.satisfiesBounds(dual_group)) {
+        continue;
+      }
+      found_bounds = true;
+      if ((candidate.getGlobalLinkTransform(left_tcp_).translation() -
+        left_pose.translation()).norm() > closed_chain_contact_position_error_ ||
+        (candidate.getGlobalLinkTransform(right_tcp_).translation() -
+        right_pose.translation()).norm() > closed_chain_contact_position_error_ ||
+        poseAngularError(candidate.getGlobalLinkTransform(left_tcp_), left_pose) >
+        closed_chain_contact_orientation_error_ ||
+        poseAngularError(candidate.getGlobalLinkTransform(right_tcp_), right_pose) >
+        closed_chain_contact_orientation_error_)
+      {
+        continue;
+      }
+      if (!collisionFree(candidate, allow_pad_contact, false)) {
+        continue;
+      }
+      target = candidate;
+      return true;
+    }
+    error = !found_ik ? "dual-arm endpoint IK failed" :
+      !found_bounds ? "dual-arm endpoint violates joint bounds" :
+      "dual-arm endpoint violates TCP accuracy or collision constraints";
+    return false;
+  }
+
+  bool appendJointSpacePlan(
+    robot_trajectory::RobotTrajectory & combined, moveit::core::RobotState & state,
+    moveit::core::RobotState target, const std::string & route,
+    const std::string & segment, const CancelFunction & canceled, std::string & error)
+  {
+    if (canceled()) {
+      error = segment + " endpoint planning canceled";
+      publishEndpointDiagnostic(route, segment, false, error);
+      return false;
+    }
+    move_group_.setStartState(state);
+    move_group_.clearPoseTargets();
+    double maximum_normalization = 0.0;
+    bool move_group_reported_bounds = false;
+    if (!setValidatedPlanningTarget(
+        target, maximum_normalization,
+        move_group_reported_bounds, error, true, false))
+    {
+      error = segment + " endpoint target rejected: " + error;
+      publishEndpointDiagnostic(route, segment, false, error);
+      return false;
+    }
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    move_group_.setPlanningTime(planning_time_per_candidate_);
+    const auto result = move_group_.plan(plan);
+    move_group_.setPlanningTime(10.0);
+    if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+      error = segment + " joint-space planning failed: " +
+        moveit::core::error_code_to_string(result);
+      publishEndpointDiagnostic(route, segment, false, error);
+      return false;
+    }
+    if (canceled()) {
+      error = segment + " endpoint planning canceled after MoveIt returned";
+      publishEndpointDiagnostic(route, segment, false, error);
+      return false;
+    }
+    robot_trajectory::RobotTrajectory planned(state.getRobotModel(), move_group_.getName());
+    planned.setRobotTrajectoryMsg(state, plan.trajectory_);
+    if (planned.getWayPointCount() < 2U) {
+      error = segment + " joint-space plan contains fewer than two states";
+      publishEndpointDiagnostic(route, segment, false, error);
+      return false;
+    }
+    combined.append(
+      planned, planned.getWayPointDurationFromPrevious(1), 1);
+    state = planned.getLastWayPoint();
+    state.update();
+    publishEndpointDiagnostic(route, segment, true, "joint-space endpoint plan accepted");
+    return true;
+  }
+
+  bool appendPoseToPoseObjectPath(
+    robot_trajectory::RobotTrajectory & trajectory, moveit::core::RobotState & state,
+    const std::vector<ClosedChainWaypoint> & controls,
+    const Eigen::Isometry3d & box_to_left_contact,
+    const Eigen::Isometry3d & box_to_right_contact, const std::string & route,
+    const CancelFunction & canceled, std::string & error)
+  {
+    for (std::size_t index = 1; index < controls.size(); ++index) {
+      const auto grasp = graspFromBoxToTcp(
+        controls[index].pose, box_to_left_contact, box_to_right_contact, 0.0);
+      moveit::core::RobotState target(state);
+      if (!solveDualArmEndpoint(
+          state, grasp.left_contact, grasp.right_contact, true, target, error))
+      {
+        error = route + " " + controls[index].segment + " endpoint rejected: " + error;
+        publishEndpointDiagnostic(route, controls[index].segment, false, error);
+        return false;
+      }
+      if (!appendJointSpacePlan(
+          trajectory, state, target, route, controls[index].segment, canceled, error))
+      {
+        return false;
+      }
+    }
+    return true;
   }
 
   bool appendObjectPath(
@@ -2118,6 +2359,39 @@ private:
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     const CancelFunction & canceled)
   {
+    if (motion_planning_mode_ == MotionPlanningMode::POSE_TO_POSE) {
+      std::string error;
+      moveit::core::RobotState endpoint(start);
+      if (!solveDualArmEndpoint(
+          start, target.left_contact, target.right_contact, true, endpoint, error))
+      {
+        publishEndpointDiagnostic("approach", "contact", false, error);
+        return false;
+      }
+      moveit_msgs::msg::CollisionObject saved_box;
+      if (!removeWorldBoxTemporarily(saved_box, error)) {
+        publishEndpointDiagnostic("approach", "contact", false, error);
+        return false;
+      }
+      robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
+      trajectory.addSuffixWayPoint(start, 0.0);
+      moveit::core::RobotState state(start);
+      const bool planned = appendJointSpacePlan(
+        trajectory, state, endpoint, "approach", "contact", canceled, error);
+      std::string restore_error;
+      const bool restored = restoreWorldBox(saved_box, restore_error);
+      if (!restored) {
+        RCLCPP_ERROR(node_->get_logger(), "%s", restore_error.c_str());
+        return false;
+      }
+      if (!planned) {
+        RCLCPP_WARN(node_->get_logger(), "%s", error.c_str());
+        return false;
+      }
+      trajectory.getRobotTrajectoryMsg(output);
+      end_state = state;
+      return true;
+    }
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
     trajectory.addSuffixWayPoint(start, 0.0);
     moveit::core::RobotState state(start);
@@ -2523,7 +2797,24 @@ private:
       add(dogleg, "bounded_dogleg");
       add(target_pose, "dogleg_to_carry");
     }
-    if (!appendObjectPath(
+    if (motion_planning_mode_ == MotionPlanningMode::POSE_TO_POSE) {
+      moveit_msgs::msg::CollisionObject saved_box;
+      if (plan_only && !beginVirtualAttachment(saved_box, error)) {
+        return false;
+      }
+      const bool planned = appendPoseToPoseObjectPath(
+        trajectory, state, controls, box_to_left_contact, box_to_right_contact,
+        carryRouteName(route), canceled, error);
+      std::string restore_error;
+      const bool restored = !plan_only || endVirtualAttachment(saved_box, restore_error);
+      if (!restored) {
+        error = restore_error;
+        return false;
+      }
+      if (!planned) {
+        return false;
+      }
+    } else if (!appendObjectPath(
         trajectory, state, controls, plan_only, box_to_left_contact,
         box_to_right_contact, carryRouteName(route), deadline, canceled, error))
     {
@@ -2692,10 +2983,27 @@ private:
     const auto controls = makePlaceRouteWaypoints(
       held_pose, place_pose, lift_height_, carry_search_y_range_, from_pick, route);
 
-    if (!appendObjectPath(
+    const std::string route_name = std::string("place_") + carryRouteName(route);
+    if (motion_planning_mode_ == MotionPlanningMode::POSE_TO_POSE) {
+      moveit_msgs::msg::CollisionObject saved_box;
+      if (ignore_box && !beginVirtualAttachment(saved_box, error)) {
+        return false;
+      }
+      const bool planned = appendPoseToPoseObjectPath(
+        trajectory, state, controls, box_to_left_contact, box_to_right_contact,
+        route_name, canceled, error);
+      std::string restore_error;
+      const bool restored = !ignore_box || endVirtualAttachment(saved_box, restore_error);
+      if (!restored) {
+        error = restore_error;
+        return false;
+      }
+      if (!planned) {
+        return false;
+      }
+    } else if (!appendObjectPath(
         trajectory, state, controls, ignore_box, box_to_left_contact,
-        box_to_right_contact, std::string("place_") + carryRouteName(route),
-        deadline, canceled, error))
+        box_to_right_contact, route_name, deadline, canceled, error))
     {
       return false;
     }
@@ -2903,7 +3211,8 @@ private:
 
   bool setValidatedPlanningTarget(
     moveit::core::RobotState & target, double & maximum_normalization,
-    bool & move_group_reported_bounds, std::string & error)
+    bool & move_group_reported_bounds, std::string & error,
+    bool allow_pad_contact = false, bool ignore_box = false)
   {
     const auto * group = target.getJointModelGroup(move_group_.getName());
     if (!group) {
@@ -2937,7 +3246,7 @@ private:
       }
       return false;
     }
-    if (!collisionFree(target, false, false)) {
+    if (!collisionFree(target, allow_pad_contact, ignore_box)) {
       error = "normalized planning target is in collision";
       return false;
     }
@@ -4147,6 +4456,8 @@ private:
   std::string right_group_name_;
   std::string left_tcp_;
   std::string right_tcp_;
+  std::string motion_planning_mode_name_;
+  MotionPlanningMode motion_planning_mode_{MotionPlanningMode::CLOSED_CHAIN};
   std::string box_id_;
   std::string active_grasp_id_{"unassigned"};
   BoxDimensions dimensions_;

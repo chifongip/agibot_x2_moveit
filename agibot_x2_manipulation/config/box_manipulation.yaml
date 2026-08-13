@@ -93,8 +93,9 @@ pick_place_server:
     simulate_ideal_attachment: false
     attach_service: /mujoco_grasp/attach
     detach_service: /mujoco_grasp/detach
-    # Source selection is supplied by box_pick_place.launch.py. Do not define it
-    # in this node-scoped YAML: exact-node parameters override launch wildcards.
+    # Source and motion-mode selection are supplied by box_pick_place.launch.py.
+    # Do not define them in this node-scoped YAML: exact-node parameters override
+    # launch values.
     depth_filtered_cloud_topic: /x2/moveit/depth_filtered_cloud
     lidar_filtered_cloud_topic: /x2/moveit/lidar_filtered_cloud
     octomap_clear_service: /clear_octomap

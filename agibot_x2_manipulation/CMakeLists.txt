@@ -125,6 +125,7 @@ if(BUILD_TESTING)
   target_include_directories(test_execution_feedback PRIVATE include)
   ament_add_pytest_test(test_manipulation_config test/test_manipulation_config.py)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
+  add_launch_test(test/test_dummy_workflow.launch.py TIMEOUT 240)
 endif()
 
 ament_export_include_directories(include)

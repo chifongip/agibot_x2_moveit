@@ -17,6 +17,7 @@ def generate_launch_description():
     fake_zmq_endpoint = LaunchConfiguration("fake_zmq_endpoint")
     use_rviz = LaunchConfiguration("use_rviz")
     allow_execution = LaunchConfiguration("allow_execution")
+    motion_planning_mode = LaunchConfiguration("motion_planning_mode")
     manipulation_state_file = LaunchConfiguration("manipulation_state_file")
     joint_snapshot = os.path.join(
         manipulation_share, "config", "recorded_planning_failure_joint_state.yaml"
@@ -39,6 +40,11 @@ def generate_launch_description():
                     "Allow non-plan-only actions in this isolated recorded-state "
                     "simulation"
                 ),
+            ),
+            DeclareLaunchArgument(
+                "motion_planning_mode",
+                default_value="closed_chain",
+                choices=["closed_chain", "pose_to_pose"],
             ),
             DeclareLaunchArgument(
                 "manipulation_state_file",
@@ -78,6 +84,7 @@ def generate_launch_description():
                     "arm_state_topic": "/x2_replay/aima/hal/joint/arm/state",
                     "head_state_topic": "/x2_replay/aima/hal/joint/head/state",
                     "allow_execution": allow_execution,
+                    "motion_planning_mode": motion_planning_mode,
                     "manipulation_state_file": manipulation_state_file,
                 }.items(),
             ),
