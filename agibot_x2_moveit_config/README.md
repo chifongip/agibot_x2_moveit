@@ -39,9 +39,13 @@ state broadcaster, coordinated dual-arm controller, `move_group`, and optionally
 
 ```bash
 ros2 launch agibot_x2_moveit_config real_robot.launch.py \
-  command_transport:=ros_topic \
-  use_rviz:=true
+  command_transport:=ros_topic
 ```
+
+The real-robot defaults are headless and run `ros2_control` at 100 Hz. This
+leaves CPU and DDS scheduling headroom for the 100 ms HAL state watchdog. Use
+`use_rviz:=true` or `ros2_control_update_rate:=500` only after confirming the
+joint and IMU streams remain continuously fresh on the deployment host.
 
 `command_transport` is selected at launch and must be one of the following:
 
@@ -50,8 +54,10 @@ ros2 launch agibot_x2_moveit_config real_robot.launch.py \
 | `ros_topic` | `/aima/hal/joint/arm/command` | Direct arm control through the X2 HAL. |
 | `zmq` | A PUB socket bound at `tcp://*:8559` by default | Send arm targets to RoboJuDo's locomanipulation upper-body override. |
 
-The hardware interface always consumes these HAL state topics using sensor-data
-QoS:
+The hardware interface consumes these HAL state topics with best-effort,
+volatile, keep-last-one QoS. Each group has an independent callback group and
+state lock on a blocking multi-threaded executor so one continuously ready
+stream cannot starve the others:
 
 | Joint group | State topic |
 | --- | --- |
@@ -146,7 +152,7 @@ emergency stop during every initial test.
 ## Main files
 
 - `config/x2_ultra.ros2_control.xacro`: fake/real hardware selection and hardware parameters.
-- `config/ros2_controllers.yaml`: 500 Hz controller manager and one coordinated 14-joint trajectory controller.
+- `config/ros2_controllers.yaml`: 100 Hz controller manager and one coordinated 14-joint trajectory controller.
 - `config/moveit_controllers.yaml`: MoveIt action-controller mapping.
 - The URDF xacro adds passive `left/right_hand_pad_link` collision bodies and
   `left/right_hand_tcp_link` planning frames. Their default wrist offsets are

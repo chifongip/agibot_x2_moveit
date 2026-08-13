@@ -27,6 +27,11 @@ the 14 arm joints. Use `command_transport:=ros_topic` only when this process is
 intended to publish `/aima/hal/joint/*/command`; use the configured ZMQ endpoint
 for the ZMQ transport.
 
+The launch defaults to `ros2_control_update_rate:=100` and `use_rviz:=false`.
+These defaults leave scheduling headroom for the independent 100 ms RoboJuDo
+and ros2_control state watchdogs. Enable RViz or request a higher controller
+rate only after monitoring the joint and torso-IMU streams on the target host.
+
 ## Box and grasp calibration
 
 `config/box_manipulation.yaml` defines the box dimensions as

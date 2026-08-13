@@ -1,7 +1,8 @@
 # This config file is used by ros2_control
 controller_manager:
   ros__parameters:
-    update_rate: 500  # Hz; matches the working AimDK command publisher
+    # Keep enough host/DDS headroom for the independent 100 ms HAL watchdogs.
+    update_rate: 100
 
     dual_arm_controller:
       type: joint_trajectory_controller/JointTrajectoryController

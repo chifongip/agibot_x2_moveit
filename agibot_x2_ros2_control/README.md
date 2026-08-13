@@ -10,8 +10,12 @@ The MoveIt configuration supplies the operator launch file:
 source /opt/ros/humble/setup.bash
 source /home/ubuntu/x2_ws/install/setup.bash
 ros2 launch agibot_x2_moveit_config real_robot.launch.py \
-  command_transport:=ros_topic use_rviz:=true
+  command_transport:=ros_topic
 ```
+
+The launch defaults to a 100 Hz controller loop with RViz disabled to preserve
+HAL state-delivery headroom. The four state subscriptions use independent
+callback groups and state locks, and keep only their newest best-effort sample.
 
 Use `command_transport:=zmq` to bind a PUB socket at `tcp://*:8559`. In this
 mode, the `x2_locomanipulation_real` RoboJuDo pipeline must already control the

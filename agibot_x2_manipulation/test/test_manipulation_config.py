@@ -41,6 +41,13 @@ def test_launch_controls_perception_source_selection():
     )
 
 
+def test_launch_defaults_preserve_state_delivery_headroom():
+    source = LAUNCH_FILE.read_text(encoding="utf-8")
+
+    assert 'DeclareLaunchArgument("use_rviz", default_value="false")' in source
+    assert '"ros2_control_update_rate",\n                default_value="100"' in source
+
+
 def test_filtered_output_topics_match_moveit_configuration():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]

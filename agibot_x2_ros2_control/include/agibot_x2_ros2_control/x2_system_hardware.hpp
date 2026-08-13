@@ -3,6 +3,7 @@
 #include <aimdk_msgs/msg/joint_command_array.hpp>
 #include <aimdk_msgs/msg/joint_state_array.hpp>
 #include <hardware_interface/system_interface.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/state.hpp>
 
@@ -48,7 +49,8 @@ public:
 private:
   using SteadyTime = std::chrono::steady_clock::time_point;
 
-  void state_callback(const aimdk_msgs::msg::JointStateArray::SharedPtr message);
+  void state_callback(
+    const aimdk_msgs::msg::JointStateArray::SharedPtr message, std::size_t group_index);
   bool state_is_fresh_locked(SteadyTime now) const;
   bool parse_configuration();
   bool configure_ros_transport();
@@ -60,9 +62,9 @@ private:
   std::vector<double> safe_targets_locked() const;
 
   rclcpp::Node::SharedPtr node_;
-  rclcpp::executors::SingleThreadedExecutor::SharedPtr executor_;
+  std::shared_ptr<rclcpp::executors::MultiThreadedExecutor> executor_;
+  std::array<rclcpp::CallbackGroup::SharedPtr, 4> state_callback_groups_;
   std::thread spin_thread_;
-  std::atomic<bool> spin_running_{false};
   std::atomic<bool> active_{false};
   std::atomic<bool> fault_latched_{false};
 
@@ -70,7 +72,8 @@ private:
     4> state_subscriptions_;
   rclcpp::Publisher<aimdk_msgs::msg::JointCommandArray>::SharedPtr arm_command_publisher_;
 
-  mutable std::mutex data_mutex_;
+  mutable std::array<std::mutex, 4> state_mutexes_;
+  mutable std::mutex command_mutex_;
   std::unordered_map<std::string, std::size_t> joint_index_;
   std::vector<double> positions_;
   std::vector<double> velocities_;
@@ -78,6 +81,7 @@ private:
   std::vector<double> commands_;
   std::vector<SteadyTime> update_times_;
   std::vector<bool> received_;
+  std::vector<std::size_t> state_group_indices_;
   std::vector<bool> claimed_;
   std::vector<std::size_t> arm_indices_;
   std::vector<double> stiffness_;

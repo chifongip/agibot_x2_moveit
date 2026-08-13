@@ -164,13 +164,14 @@ def generate_launch_description():
                 default_value=str(config_path / "config/x2_ros2_control_gains.yaml"),
                 description="YAML file containing per-arm-joint stiffness and damping.",
             ),
-            DeclareLaunchArgument("use_rviz", default_value="true"),
+            DeclareLaunchArgument("use_rviz", default_value="false"),
             DeclareLaunchArgument(
                 "ros2_control_update_rate",
-                default_value="500",
+                default_value="100",
                 description=(
-                    "Controller-manager loop rate in Hz. Lower rates reduce "
-                    "offboard DDS/CPU load but also reduce command frequency."
+                    "Controller-manager loop rate in Hz. The 100 Hz default leaves "
+                    "headroom for safety-critical HAL state delivery; higher rates "
+                    "also increase command frequency and must be validated on the host."
                 ),
             ),
             DeclareLaunchArgument(

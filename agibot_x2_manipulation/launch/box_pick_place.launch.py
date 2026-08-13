@@ -126,7 +126,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "head_state_topic", default_value="/aima/hal/joint/head/state"
             ),
-            DeclareLaunchArgument("use_rviz", default_value="true"),
+            DeclareLaunchArgument("use_rviz", default_value="false"),
             DeclareLaunchArgument(
                 "allow_execution",
                 default_value="false",
@@ -145,8 +145,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "ros2_control_update_rate",
-                default_value="500",
-                description="Controller-manager loop rate passed to real_robot.launch.py.",
+                default_value="100",
+                description=(
+                    "Controller-manager loop rate passed to real_robot.launch.py. "
+                    "The 100 Hz default protects HAL state-delivery headroom."
+                ),
             ),
             DeclareLaunchArgument("use_apriltag", default_value="true"),
             DeclareLaunchArgument(

@@ -26,6 +26,13 @@ def test_launch_description_constructs():
     assert description.entities
 
 
+def test_real_robot_defaults_preserve_state_delivery_headroom():
+    source = LAUNCH_FILE.read_text(encoding="utf-8")
+
+    assert 'DeclareLaunchArgument("use_rviz", default_value="false")' in source
+    assert '"ros2_control_update_rate",\n                default_value="100"' in source
+
+
 @pytest.mark.parametrize("source", ["none", "depth", "lidar", "both"])
 def test_launch_setup_accepts_all_perception_modes(source):
     module = load_launch_module()

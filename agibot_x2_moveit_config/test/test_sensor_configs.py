@@ -58,3 +58,10 @@ def test_dual_arm_controller_requires_measured_endpoint_convergence():
         if isinstance(values, dict) and "goal" in values
     }
     assert all(constraints[joint]["goal"] > 0.0 for joint in controller["joints"])
+
+
+def test_controller_manager_default_preserves_state_delivery_headroom():
+    with (CONFIG_DIR / "ros2_controllers.yaml").open(encoding="utf-8") as stream:
+        manager = yaml.safe_load(stream)["controller_manager"]["ros__parameters"]
+
+    assert manager["update_rate"] == 100

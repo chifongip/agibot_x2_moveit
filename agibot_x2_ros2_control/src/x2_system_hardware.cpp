@@ -86,14 +86,20 @@ hardware_interface::CallbackReturn X2SystemHardware::on_init(
     }
 
     node_ = rclcpp::Node::make_shared("agibot_x2_system_hardware");
-    executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
-    const auto qos = rclcpp::SensorDataQoS();
+    executor_ = std::make_shared<rclcpp::executors::MultiThreadedExecutor>(
+      rclcpp::ExecutorOptions(), state_topics_.size());
+    auto state_qos = rclcpp::SensorDataQoS();
+    state_qos.keep_last(1);
     for (std::size_t i = 0; i < state_topics_.size(); ++i) {
+      state_callback_groups_[i] =
+        node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+      rclcpp::SubscriptionOptions options;
+      options.callback_group = state_callback_groups_[i];
       state_subscriptions_[i] = node_->create_subscription<aimdk_msgs::msg::JointStateArray>(
-        state_topics_[i], qos,
-        [this](const aimdk_msgs::msg::JointStateArray::SharedPtr message) {
-          state_callback(message);
-        });
+        state_topics_[i], state_qos,
+        [this, i](const aimdk_msgs::msg::JointStateArray::SharedPtr message) {
+          state_callback(message, i);
+        }, options);
     }
 
     if (command_transport_ == "ros_topic") {
@@ -105,14 +111,7 @@ hardware_interface::CallbackReturn X2SystemHardware::on_init(
     }
 
     executor_->add_node(node_);
-    spin_running_ = true;
-    spin_thread_ = std::thread(
-      [this]() {
-        while (spin_running_ && rclcpp::ok()) {
-          executor_->spin_some();
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-      });
+    spin_thread_ = std::thread([this]() {executor_->spin();});
   } catch (const std::exception & exception) {
     RCLCPP_ERROR(
       rclcpp::get_logger("X2SystemHardware"), "Initialization failed: %s",
@@ -142,6 +141,7 @@ bool X2SystemHardware::parse_configuration()
   commands_.assign(info_.joints.size(), nan);
   update_times_.resize(info_.joints.size());
   received_.assign(info_.joints.size(), false);
+  state_group_indices_.resize(info_.joints.size());
   claimed_.assign(info_.joints.size(), false);
 
   for (std::size_t i = 0; i < info_.joints.size(); ++i) {
@@ -158,6 +158,20 @@ bool X2SystemHardware::parse_configuration()
               joint.name);
     }
     joint_index_[joint.name] = i;
+    if (joint.name.rfind("waist_", 0) == 0) {
+      state_group_indices_[i] = 1;
+    } else if (joint.name.rfind("head_", 0) == 0) {
+      state_group_indices_[i] = 3;
+    } else if (
+      joint.name.rfind("left_shoulder_", 0) == 0 ||
+      joint.name.rfind("right_shoulder_", 0) == 0 || joint.name == "left_elbow_joint" ||
+      joint.name == "right_elbow_joint" || joint.name.rfind("left_wrist_", 0) == 0 ||
+      joint.name.rfind("right_wrist_", 0) == 0)
+    {
+      state_group_indices_[i] = 2;
+    } else {
+      state_group_indices_[i] = 0;
+    }
     const bool has_position_command =
       has_interface(joint.command_interfaces, hardware_interface::HW_IF_POSITION);
     const bool is_arm = joint.name.rfind("left_shoulder_", 0) == 0 ||
@@ -231,7 +245,9 @@ bool X2SystemHardware::configure_zmq_transport()
 
 void X2SystemHardware::stop_io()
 {
-  spin_running_ = false;
+  if (executor_) {
+    executor_->cancel();
+  }
   if (spin_thread_.joinable()) {
     spin_thread_.join();
   }
@@ -276,10 +292,10 @@ std::vector<hardware_interface::CommandInterface> X2SystemHardware::export_comma
 }
 
 void X2SystemHardware::state_callback(
-  const aimdk_msgs::msg::JointStateArray::SharedPtr message)
+  const aimdk_msgs::msg::JointStateArray::SharedPtr message, std::size_t group_index)
 {
   const auto now = std::chrono::steady_clock::now();
-  std::lock_guard<std::mutex> lock(data_mutex_);
+  std::lock_guard<std::mutex> lock(state_mutexes_[group_index]);
   for (const auto & joint : message->joints) {
     const auto found = joint_index_.find(joint.name);
     if (found == joint_index_.end()) {
@@ -294,6 +310,12 @@ void X2SystemHardware::state_callback(
       continue;
     }
     const auto index = found->second;
+    if (state_group_indices_[index] != group_index) {
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 1000,
+        "Ignoring joint %s received on the wrong state topic", joint.name.c_str());
+      continue;
+    }
     positions_[index] = joint.position;
     velocities_[index] = joint.velocity;
     efforts_[index] = joint.effort;
@@ -324,7 +346,9 @@ hardware_interface::CallbackReturn X2SystemHardware::on_activate(
     std::chrono::duration<double>(activation_timeout_sec_));
   while (std::chrono::steady_clock::now() < deadline) {
     {
-      std::lock_guard<std::mutex> lock(data_mutex_);
+      std::scoped_lock lock(
+        state_mutexes_[0], state_mutexes_[1], state_mutexes_[2], state_mutexes_[3],
+        command_mutex_);
       if (state_is_fresh_locked(std::chrono::steady_clock::now())) {
         for (const auto index : arm_indices_) {
           commands_[index] = positions_[index];
@@ -384,7 +408,7 @@ hardware_interface::return_type X2SystemHardware::perform_command_mode_switch(
   const std::vector<std::string> & start_interfaces,
   const std::vector<std::string> & stop_interfaces)
 {
-  std::lock_guard<std::mutex> lock(data_mutex_);
+  std::scoped_lock lock(state_mutexes_[2], command_mutex_);
   const auto update_claim = [this](const std::string & interface, bool claimed) {
       const auto separator = interface.rfind('/');
       if (separator == std::string::npos ||
@@ -420,7 +444,8 @@ hardware_interface::return_type X2SystemHardware::read(
     return hardware_interface::return_type::OK;
   }
   {
-    std::lock_guard<std::mutex> lock(data_mutex_);
+    std::scoped_lock lock(
+      state_mutexes_[0], state_mutexes_[1], state_mutexes_[2], state_mutexes_[3]);
     if (state_is_fresh_locked(std::chrono::steady_clock::now())) {
       return hardware_interface::return_type::OK;
     }
@@ -450,7 +475,7 @@ hardware_interface::return_type X2SystemHardware::write(
   }
   std::vector<double> targets;
   {
-    std::lock_guard<std::mutex> lock(data_mutex_);
+    std::scoped_lock lock(state_mutexes_[2], command_mutex_);
     targets = safe_targets_locked();
   }
   if (std::any_of(
