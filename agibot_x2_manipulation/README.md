@@ -457,8 +457,8 @@ with per-route failure classification and budget data on
 `/pick_place/planning_diagnostics`.
 
 Each non-plan-only motion also requires a settled physical endpoint before the
-server begins its next phase. It waits for fresh, timestamped direct HAL arm
-feedback from `arm_state_topic`, then requires consecutive samples within
+server begins its next phase. It waits for direct HAL arm feedback received
+after controller execution, then requires consecutive samples within
 `execution_joint_tolerance` and `execution_velocity_tolerance`; a timeout
 stops MoveIt execution and reports the largest joint position and velocity
 residual. Cached `/joint_states` republishes are not accepted as physical

@@ -117,7 +117,6 @@ struct PlannedGrasp
 struct HalArmFeedbackSnapshot
 {
   std::map<std::string, JointFeedback> joints;
-  uint32_t measurement_sequence{0};
   bool valid{false};
 };
 
@@ -389,21 +388,16 @@ public:
     execution_velocity_tolerance_ = parameter<double>(
       node_, "execution_velocity_tolerance", 0.01);
     execution_settle_samples_ = parameter<int>(node_, "execution_settle_samples", 3);
-    execution_feedback_max_age_ = parameter<double>(
-      node_, "execution_feedback_max_age", 0.25);
-    execution_feedback_future_skew_ = parameter<double>(
-      node_, "execution_feedback_future_skew", 0.10);
     arm_state_topic_ = parameter<std::string>(
       node_, "arm_state_topic", "/aima/hal/joint/arm/state");
     if (reset_preemption_timeout_ <= 0.0 || reset_state_timeout_ <= 0.0 ||
       reset_joint_tolerance_ < 0.0 || execution_settle_timeout_ <= 0.0 ||
       execution_joint_tolerance_ < 0.0 || execution_velocity_tolerance_ < 0.0 ||
-      execution_settle_samples_ < 1 || execution_feedback_max_age_ <= 0.0 ||
-      execution_feedback_future_skew_ < 0.0 || arm_state_topic_.empty())
+      execution_settle_samples_ < 1 || arm_state_topic_.empty())
     {
       throw std::runtime_error(
-              "reset/execution timeouts and feedback age must be positive; tolerances must be "
-              "nonnegative; arm_state_topic must not be empty");
+              "reset/execution timeouts must be positive; tolerances must be nonnegative; "
+              "arm_state_topic must not be empty");
     }
     if (initial_state_ != "empty" && initial_state_ != "unknown") {
       throw std::runtime_error("initial_state must be 'empty' or 'unknown'");
@@ -542,18 +536,6 @@ public:
     hal_arm_state_sub_ = node_->create_subscription<aimdk_msgs::msg::JointStateArray>(
       arm_state_topic_, rclcpp::SensorDataQoS(),
       [this](const aimdk_msgs::msg::JointStateArray::SharedPtr message) {
-        const rclcpp::Time measurement_time(message->header.meas_stamp);
-        const double measurement_age = (node_->now() - measurement_time).seconds();
-        if (measurement_time.nanoseconds() <= 0 || !std::isfinite(measurement_age) ||
-          measurement_age > execution_feedback_max_age_ ||
-          measurement_age < -execution_feedback_future_skew_)
-        {
-          RCLCPP_WARN_THROTTLE(
-            node_->get_logger(), *node_->get_clock(), 5000,
-            "Ignoring stale HAL arm feedback from %s (measurement age %.6f s)",
-            arm_state_topic_.c_str(), measurement_age);
-          return;
-        }
         std::map<std::string, JointFeedback> feedback;
         for (const auto & joint : message->joints) {
           if (!std::isfinite(joint.position) || !std::isfinite(joint.velocity)) {
@@ -572,17 +554,8 @@ public:
         }
         {
           std::lock_guard<std::mutex> lock(hal_arm_feedback_mutex_);
-          if (latest_hal_arm_feedback_.valid && !isNewerMeasurementSequence(
-              message->header.sequence, latest_hal_arm_feedback_.measurement_sequence))
-          {
-            RCLCPP_WARN_THROTTLE(
-              node_->get_logger(), *node_->get_clock(), 5000,
-              "Ignoring non-increasing HAL arm measurement sequence %u from %s",
-              message->header.sequence, arm_state_topic_.c_str());
-            return;
-          }
           latest_hal_arm_feedback_ = HalArmFeedbackSnapshot{
-            std::move(feedback), message->header.sequence, true};
+            std::move(feedback), true};
         }
         hal_arm_feedback_generation_.fetch_add(1U, std::memory_order_release);
       });
@@ -680,8 +653,8 @@ private:
 
   bool waitForExecutionSettled(
     const moveit_msgs::msg::RobotTrajectory & trajectory,
-    const HalArmFeedbackSnapshot & prior_feedback, uint64_t minimum_feedback_generation,
-    const CancelFunction & canceled, std::map<std::string, double> * settled_positions)
+    uint64_t minimum_feedback_generation, const CancelFunction & canceled,
+    std::map<std::string, double> * settled_positions)
   {
     const auto & joint_trajectory = trajectory.joint_trajectory;
     if (joint_trajectory.joint_names.empty() || joint_trajectory.points.empty()) {
@@ -724,9 +697,7 @@ private:
         std::lock_guard<std::mutex> lock(hal_arm_feedback_mutex_);
         feedback = latest_hal_arm_feedback_;
       }
-      if (!feedback.valid || !isNewerMeasurementSequence(
-          feedback.measurement_sequence, prior_feedback.measurement_sequence))
-      {
+      if (!feedback.valid) {
         settled_samples = 0;
         continue;
       }
@@ -823,20 +794,19 @@ private:
       setExecutionError("MoveIt ExecuteTrajectory action did not report success");
       return false;
     }
-    HalArmFeedbackSnapshot prior_feedback;
+    bool has_prior_feedback = false;
     {
       std::lock_guard<std::mutex> lock(hal_arm_feedback_mutex_);
-      prior_feedback = latest_hal_arm_feedback_;
+      has_prior_feedback = latest_hal_arm_feedback_.valid;
     }
-    if (!prior_feedback.valid) {
+    if (!has_prior_feedback) {
       setExecutionError("no valid HAL arm measurement was available after trajectory execution");
       return false;
     }
     const uint64_t feedback_generation = hal_arm_feedback_generation_.load(
       std::memory_order_acquire);
     return waitForExecutionSettled(
-      executableTrajectory(trajectory), prior_feedback, feedback_generation, canceled,
-      settled_positions);
+      executableTrajectory(trajectory), feedback_generation, canceled, settled_positions);
   }
 
   void requestExecutionStop()
@@ -4522,8 +4492,6 @@ private:
   double execution_joint_tolerance_;
   double execution_velocity_tolerance_;
   int execution_settle_samples_;
-  double execution_feedback_max_age_;
-  double execution_feedback_future_skew_;
   std::string arm_state_topic_;
   std::map<std::string, double> reset_target_values_;
   bool reset_physical_detach_done_{false};

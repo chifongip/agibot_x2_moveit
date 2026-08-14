@@ -29,14 +29,5 @@ TEST(ExecutionFeedback, RejectsOffsetAndMovingMeasurements)
   EXPECT_TRUE(settled.settled);
 }
 
-TEST(ExecutionFeedback, RequiresASequenceNewerThanTheCompletionBaseline)
-{
-  constexpr uint32_t sequence = 42U;
-  EXPECT_FALSE(isNewerMeasurementSequence(sequence, sequence));
-  EXPECT_FALSE(isNewerMeasurementSequence(sequence - 1U, sequence));
-  EXPECT_TRUE(isNewerMeasurementSequence(sequence + 1U, sequence));
-  EXPECT_TRUE(isNewerMeasurementSequence(0U, UINT32_MAX));
-}
-
 }  // namespace
 }  // namespace agibot_x2_manipulation

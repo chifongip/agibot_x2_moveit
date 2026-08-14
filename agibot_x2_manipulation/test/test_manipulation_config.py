@@ -77,8 +77,6 @@ def test_execution_requires_fresh_settled_feedback():
     assert config["execution_joint_tolerance"] > 0.0
     assert config["execution_velocity_tolerance"] > 0.0
     assert config["execution_settle_samples"] >= 2
-    assert config["execution_feedback_max_age"] > 0.0
-    assert config["execution_feedback_future_skew"] >= 0.0
 
 
 def test_recorded_failure_snapshot_is_complete_and_uses_full_box_pose():

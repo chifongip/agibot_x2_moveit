@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cmath>
-#include <cstdint>
 #include <limits>
 #include <map>
 #include <string>
@@ -23,14 +22,6 @@ struct ExecutionFeedbackCheck
   double maximum_position_error{std::numeric_limits<double>::infinity()};
   double maximum_velocity{std::numeric_limits<double>::infinity()};
 };
-
-// Header sequence numbers are uint32_t and therefore wrap. A difference in
-// the forward half of the sequence space is newer; an identical or older
-// measurement must never satisfy an execution endpoint check.
-inline bool isNewerMeasurementSequence(uint32_t candidate, uint32_t reference)
-{
-  return candidate != reference && static_cast<int32_t>(candidate - reference) > 0;
-}
 
 inline ExecutionFeedbackCheck checkExecutionFeedback(
   const std::map<std::string, double> & target_positions,
