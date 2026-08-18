@@ -1,7 +1,19 @@
-from moveit_configs_utils import MoveItConfigsBuilder
-from moveit_configs_utils.launches import generate_rsp_launch
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 
 def generate_launch_description():
-    moveit_config = MoveItConfigsBuilder("x2_ultra", package_name="agibot_x2_moveit_config").to_moveit_configs()
-    return generate_rsp_launch(moveit_config)
+    bringup_path = Path(get_package_share_directory("x2_bringup"))
+    return LaunchDescription(
+        [
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    str(bringup_path / "launch" / "rsp.launch.py")
+                )
+            )
+        ]
+    )

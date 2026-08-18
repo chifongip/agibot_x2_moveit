@@ -34,8 +34,9 @@ ros2 launch agibot_x2_moveit_config demo.launch.py
 
 ## Real-control launch
 
-The real launch starts `robot_state_publisher`, `ros2_control_node`, the joint
-state broadcaster, coordinated dual-arm controller, `move_group`, and optionally RViz:
+The real launch includes `x2_bringup`'s shared `robot_state_publisher`,
+`ros2_control_node`, and joint-state broadcaster, then starts the coordinated
+dual-arm controller, `move_group`, and optionally RViz:
 
 ```bash
 ros2 launch agibot_x2_moveit_config real_robot.launch.py \
@@ -46,6 +47,10 @@ The real-robot defaults are headless and run `ros2_control` at 100 Hz. This
 leaves CPU and DDS scheduling headroom for the 100 ms HAL state watchdog. Use
 `use_rviz:=true` or `ros2_control_update_rate:=500` only after confirming the
 joint and IMU streams remain continuously fresh on the deployment host.
+
+To share state with navigation, start `x2_bringup` once, then pass
+`start_state_bringup:=false` to this launch so MoveIt consumes the existing
+`/joint_states`, `/tf`, and `/tf_static` topics.
 
 `command_transport` is selected at launch and must be one of the following:
 
@@ -68,7 +73,8 @@ stream cannot starve the others:
 
 The direct backend publishes `aimdk_msgs/msg/JointCommandArray` messages with
 the arm position target, zero velocity/effort, and configured stiffness/damping.
-The initial arm gains are in [x2_ros2_control_gains.yaml](config/x2_ros2_control_gains.yaml),
+The initial arm gains are in `x2_bringup`'s
+`config/x2_ros2_control_gains.yaml`,
 using the defaults recorded by the locomanipulation policy. To use another
 gain file, supply an absolute path:
 
@@ -151,12 +157,12 @@ emergency stop during every initial test.
 
 ## Main files
 
-- `config/x2_ultra.ros2_control.xacro`: fake/real hardware selection and hardware parameters.
-- `config/ros2_controllers.yaml`: 100 Hz controller manager and one coordinated 14-joint trajectory controller.
+- `x2_bringup/config/x2_ultra.ros2_control.xacro`: fake/real hardware selection and hardware parameters.
+- `x2_bringup/config/ros2_controllers.yaml`: 100 Hz controller manager and one coordinated 14-joint trajectory controller.
 - `config/moveit_controllers.yaml`: MoveIt action-controller mapping.
 - The URDF xacro adds passive `left/right_hand_pad_link` collision bodies and
   `left/right_hand_tcp_link` planning frames. Their default wrist offsets are
   placeholders and must be calibrated before physical grasping. The left
   contact direction is TCP `-Y`; the right contact direction is TCP `+Y`.
-- `config/x2_ros2_control_gains.yaml`: direct HAL stiffness and damping.
-- `launch/real_robot.launch.py`: full real-control stack.
+- `x2_bringup/config/x2_ros2_control_gains.yaml`: direct HAL stiffness and damping.
+- `launch/real_robot.launch.py`: MoveIt and arm-controller launch consuming shared state.

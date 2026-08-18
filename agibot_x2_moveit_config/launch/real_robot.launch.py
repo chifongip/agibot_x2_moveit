@@ -2,8 +2,9 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -20,8 +21,10 @@ def launch_setup(context):
     gains_file = LaunchConfiguration("ros2_control_gains_file")
     use_rviz = LaunchConfiguration("use_rviz")
     control_update_rate = LaunchConfiguration("ros2_control_update_rate")
+    start_state_bringup = LaunchConfiguration("start_state_bringup")
     perception_source = LaunchConfiguration("perception_3d_source").perform(context)
     config_path = Path(get_package_share_directory("agibot_x2_moveit_config"))
+    bringup_path = Path(get_package_share_directory("x2_bringup"))
 
     builder = MoveItConfigsBuilder(
         "x2_ultra", package_name="agibot_x2_moveit_config"
@@ -67,35 +70,22 @@ def launch_setup(context):
     ]
 
     return [
-        Node(
-            package="robot_state_publisher",
-            executable="robot_state_publisher",
-            output="screen",
-            parameters=[robot_description, {"publish_frequency": 50.0}],
-        ),
-        Node(
-            package="controller_manager",
-            executable="ros2_control_node",
-            output="screen",
-            parameters=[
-                robot_description,
-                str(config_path / "config/ros2_controllers.yaml"),
-                {
-                    "update_rate": ParameterValue(
-                        control_update_rate, value_type=int
-                    )
-                },
-            ],
-        ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=[
-                "joint_state_broadcaster",
-                "--controller-manager",
-                "/controller_manager",
-            ],
-            output="screen",
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                str(bringup_path / "launch" / "state_publisher.launch.py")
+            ),
+            launch_arguments={
+                "use_fake_hardware": "false",
+                "command_transport": command_transport,
+                "zmq_endpoint": zmq_endpoint,
+                "leg_state_topic": leg_state_topic,
+                "waist_state_topic": waist_state_topic,
+                "arm_state_topic": arm_state_topic,
+                "head_state_topic": head_state_topic,
+                "ros2_control_gains_file": gains_file,
+                "ros2_control_update_rate": control_update_rate,
+            }.items(),
+            condition=IfCondition(start_state_bringup),
         ),
         Node(
             package="controller_manager",
@@ -133,7 +123,7 @@ def launch_setup(context):
 
 
 def generate_launch_description():
-    config_path = Path(get_package_share_directory("agibot_x2_moveit_config"))
+    bringup_path = Path(get_package_share_directory("x2_bringup"))
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -161,10 +151,21 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "ros2_control_gains_file",
-                default_value=str(config_path / "config/x2_ros2_control_gains.yaml"),
+                default_value=str(
+                    bringup_path / "config" / "x2_ros2_control_gains.yaml"
+                ),
                 description="YAML file containing per-arm-joint stiffness and damping.",
             ),
             DeclareLaunchArgument("use_rviz", default_value="false"),
+            DeclareLaunchArgument(
+                "start_state_bringup",
+                default_value="true",
+                choices=["true", "false"],
+                description=(
+                    "Start x2_bringup's shared state pipeline. Set false when it "
+                    "is already running for navigation or another consumer."
+                ),
+            ),
             DeclareLaunchArgument(
                 "ros2_control_update_rate",
                 default_value="100",

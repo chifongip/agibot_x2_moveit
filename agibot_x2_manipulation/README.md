@@ -32,6 +32,11 @@ These defaults leave scheduling headroom for the independent 100 ms RoboJuDo
 and ros2_control state watchdogs. Enable RViz or request a higher controller
 rate only after monitoring the joint and torso-IMU streams on the target host.
 
+For a navigation stack that already owns shared state, start
+`x2_bringup state_publisher.launch.py` once and launch manipulation with
+`start_state_bringup:=false`. This makes the manipulation stack consume the
+existing `/joint_states`, `/tf`, and `/tf_static` interfaces.
+
 ## Box and grasp calibration
 
 `config/box_manipulation.yaml` defines the box dimensions as
