@@ -13,6 +13,9 @@ if(BUILD_TESTING)
     APPEND_ENV
       AMENT_PREFIX_PATH=${CMAKE_INSTALL_PREFIX}
       PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR})
+  ament_add_pytest_test(
+    test_workspace_manifest test/test_workspace_manifest.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launch")

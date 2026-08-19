@@ -7,6 +7,10 @@ repositories:
     type: git
     url: https://github.com/chifongip/agibot_x2_ros2_control.git
     version: main
+  x2_bringup:
+    type: git
+    url: https://github.com/chifongip/x2_bringup.git
+    version: main
   x2_description:
     type: git
     url: https://github.com/chifongip/x2_description.git
