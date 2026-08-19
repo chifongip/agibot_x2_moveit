@@ -1,18 +1,19 @@
 # AgiBot X2 MoveIt stack
 
-This repository contains the X2 packages maintained together:
+This repository contains the X2 MoveIt and manipulation packages:
 
 - `agibot_x2_moveit_config`: MoveIt 2 configuration, launch files, controllers, and gains.
-- `agibot_x2_ros2_control`: X2 HAL/ZMQ ros2_control hardware interface and simulation feedback utility.
 - `agibot_x2_manipulation_msgs`: pick/place action definitions.
 - `agibot_x2_manipulation`: AprilTag box localization and coordinated dual-arm manipulation.
 
-The robot description and AimDK messages are separate repositories so their
-vendor-facing history and releases remain independent.
+The X2 HAL/ZMQ hardware plugin lives in the separate
+[`agibot_x2_ros2_control`](https://github.com/chifongip/agibot_x2_ros2_control)
+repository. The robot description and AimDK messages are also separate so
+hardware-facing history and releases remain independent.
 
 ## Workspace setup
 
-Install Git LFS once, then import the three pinned source repositories into a
+Install Git LFS once, then import the four pinned source repositories into a
 new workspace:
 
 ```bash
@@ -38,7 +39,7 @@ for box geometry, AprilTag setup, and the pick/place action.
 ## Repository policy
 
 - Do not commit colcon `build`, `install`, or `log` directories.
-- Keep functional changes to the MoveIt configuration and its hardware plugin
-  in the same pull request when they must be deployed together.
+- Coordinate interface changes with the `agibot_x2_ros2_control` repository;
+  do not duplicate hardware-plugin code here.
 - Use tags for robot-tested releases and record the matching AimDK, RoboJuDo,
   and robot firmware versions in each release note.

@@ -3,6 +3,10 @@ repositories:
     type: git
     url: https://github.com/chifongip/agibot_x2_moveit.git
     version: main
+  agibot_x2_ros2_control:
+    type: git
+    url: https://github.com/chifongip/agibot_x2_ros2_control.git
+    version: main
   x2_description:
     type: git
     url: https://github.com/chifongip/x2_description.git
