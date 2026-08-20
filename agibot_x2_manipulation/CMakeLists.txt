@@ -75,6 +75,25 @@ target_include_directories(reset_coordinator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 
+add_library(pick_place_core
+  src/pick_place/attachment_controller.cpp
+  src/pick_place/box_pose_tracker.cpp
+  src/pick_place/dual_arm_motion_planner.cpp
+  src/pick_place/manipulation_state_store.cpp
+  src/pick_place/pick_place_config.cpp
+  src/pick_place/perception_synchronizer.cpp
+  src/pick_place/planning_scene_manager.cpp
+  src/pick_place/trajectory_executor.cpp)
+target_include_directories(pick_place_core PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(pick_place_core
+  box_geometry closed_chain_path_planner perception_readiness planning_budget Eigen3::Eigen)
+ament_target_dependencies(pick_place_core
+  aimdk_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
+  moveit_ros_planning_interface nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs
+  std_srvs tf2_eigen tf2_geometry_msgs tf2_ros visualization_msgs)
+
 add_executable(box_localizer_node src/box_localizer_node.cpp)
 target_link_libraries(box_localizer_node box_geometry)
 ament_target_dependencies(box_localizer_node
@@ -85,8 +104,10 @@ target_link_libraries(dummy_apriltag_node box_geometry)
 ament_target_dependencies(dummy_apriltag_node apriltag_msgs geometry_msgs rclcpp tf2_ros)
 
 add_executable(pick_place_server src/pick_place_server.cpp)
+target_include_directories(pick_place_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pick_place_server
-  box_geometry closed_chain_path_planner perception_readiness planning_budget reset_coordinator reset_utils)
+  box_geometry closed_chain_path_planner perception_readiness pick_place_core planning_budget
+  reset_coordinator reset_utils)
 ament_target_dependencies(pick_place_server
   agibot_x2_manipulation_msgs aimdk_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
   moveit_ros_planning_interface nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs std_srvs tf2_eigen
@@ -123,6 +144,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_reset_coordinator reset_coordinator)
   ament_add_gtest(test_execution_feedback test/test_execution_feedback.cpp)
   target_include_directories(test_execution_feedback PRIVATE include)
+  ament_add_gtest(test_manipulation_state_store test/test_manipulation_state_store.cpp)
+  target_include_directories(test_manipulation_state_store PRIVATE src include)
+  target_link_libraries(test_manipulation_state_store pick_place_core)
+  ament_add_gtest(test_pick_place_config test/test_pick_place_config.cpp)
+  target_include_directories(test_pick_place_config PRIVATE src include)
+  target_link_libraries(test_pick_place_config pick_place_core)
+  ament_target_dependencies(test_pick_place_config rclcpp)
   ament_add_pytest_test(test_manipulation_config test/test_manipulation_config.py)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
   add_launch_test(test/test_dummy_workflow.launch.py TIMEOUT 240)

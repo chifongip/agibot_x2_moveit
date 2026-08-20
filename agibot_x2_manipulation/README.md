@@ -7,6 +7,37 @@ the pelvis: all example box and place poses are pelvis-relative, not
 floor-relative. Treat the supplied values as simulation starting points and
 calibrate them before hardware execution.
 
+## Pick/place server
+
+`pick_place_server` is the manipulation workflow node. It owns the
+`/pick_box`, `/place_box`, `/pick_place`, and `/reset_manipulation` actions,
+and the `/recover_manipulation_state` service. It validates the latest box
+pose, maintains the collision object and attachment state, plans synchronized
+dual-arm motion, and verifies direct HAL feedback after execution. It persists
+whether an object may still be held, so an interrupted execution requires
+explicit recovery or reset before another manipulation goal is accepted.
+
+Actions are serialized and default to planning-only use: `allow_execution` is
+false unless explicitly enabled. The node's public action names and state topic
+are intended to remain stable for higher-level task clients.
+
+Internally, `pick_place_server.cpp` is the workflow orchestrator. The focused
+components under `src/pick_place/` are:
+
+- `pick_place_config` and `manipulation_state_store`: immutable parameter
+  loading and compatible recovery-state persistence.
+- `box_pose_tracker`, `planning_scene_manager`, and
+  `perception_synchronizer`: pose validation, MoveIt scene lifecycle, and
+  occupancy-map refresh readiness.
+- `attachment_controller` and `trajectory_executor`: physical or simulated
+  attachment requests and execution/HAL-settling checks.
+- `dual_arm_motion_planner`: grasp selection, IK, collision validation, and
+  closed-chain or pose-to-pose carry/place planning.
+
+This keeps ROS workflow policy in the server while isolating MoveIt,
+perception, and transport-specific behavior for targeted testing and
+maintenance.
+
 ## Build and safety
 
 Build from the workspace root after changing source or configuration:
