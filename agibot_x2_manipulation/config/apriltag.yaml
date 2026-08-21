@@ -4,6 +4,7 @@
     family: 36h11
     size: 0.05
     max_hamming: 0
+    qos_profile: sensor_data
     detector:
       threads: 2
       decimate: 1.0
