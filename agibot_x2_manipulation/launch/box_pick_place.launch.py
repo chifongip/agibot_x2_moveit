@@ -68,6 +68,7 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration("use_rviz")
     ros2_control_update_rate = LaunchConfiguration("ros2_control_update_rate")
     start_state_bringup = LaunchConfiguration("start_state_bringup")
+    spawn_dual_arm_controller = LaunchConfiguration("spawn_dual_arm_controller")
     camera_image = LaunchConfiguration("camera_image")
     camera_info = LaunchConfiguration("camera_info")
     use_image_decompressor = LaunchConfiguration("use_image_decompressor")
@@ -136,6 +137,15 @@ def generate_launch_description():
                 description=(
                     "Start x2_bringup's shared state pipeline. Set false when it "
                     "is already running for navigation or another consumer."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "spawn_dual_arm_controller",
+                default_value="true",
+                choices=["true", "false"],
+                description=(
+                    "Configure and activate dual_arm_controller. Set false only "
+                    "when it is already active on the shared controller manager."
                 ),
             ),
             DeclareLaunchArgument(
@@ -257,6 +267,7 @@ def generate_launch_description():
                     "head_state_topic": head_state_topic,
                     "use_rviz": use_rviz,
                     "start_state_bringup": start_state_bringup,
+                    "spawn_dual_arm_controller": spawn_dual_arm_controller,
                     "ros2_control_update_rate": ros2_control_update_rate,
                     "perception_3d_source": perception_3d_source,
                     "depth_image_topic": depth_image_topic,

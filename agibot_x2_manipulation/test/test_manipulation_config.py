@@ -69,6 +69,14 @@ def test_launch_can_consume_existing_shared_state():
     assert '"start_state_bringup": start_state_bringup' in source
 
 
+def test_launch_can_reuse_an_active_dual_arm_controller():
+    source = LAUNCH_FILE.read_text(encoding="utf-8")
+
+    assert '"spawn_dual_arm_controller",' in source
+    assert 'default_value="true"' in source
+    assert '"spawn_dual_arm_controller": spawn_dual_arm_controller' in source
+
+
 def test_filtered_output_topics_match_moveit_configuration():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]

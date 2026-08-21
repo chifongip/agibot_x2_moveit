@@ -89,6 +89,7 @@ def test_launch_setup_accepts_all_perception_modes(source):
             ),
             "use_rviz": "false",
             "start_state_bringup": "true",
+            "spawn_dual_arm_controller": "true",
             "perception_3d_source": source,
             "depth_image_topic": "/test/depth",
             "depth_camera_info_topic": "/test/depth_camera_info",
@@ -105,3 +106,32 @@ def test_real_robot_can_consume_existing_shared_state():
     assert '"start_state_bringup",' in source
     assert 'default_value="true"' in source
     assert "condition=IfCondition(start_state_bringup)" in source
+
+
+def test_real_robot_can_reuse_an_active_dual_arm_controller():
+    module = load_launch_module()
+    bringup_path = Path(get_package_share_directory("x2_bringup"))
+    context = LaunchContext()
+    context.launch_configurations.update(
+        {
+            "command_transport": "zmq",
+            "zmq_endpoint": "tcp://*:8559",
+            "leg_state_topic": "/aima/hal/joint/leg/state",
+            "waist_state_topic": "/aima/hal/joint/waist/state",
+            "arm_state_topic": "/aima/hal/joint/arm/state",
+            "head_state_topic": "/aima/hal/joint/head/state",
+            "ros2_control_gains_file": str(
+                bringup_path / "config" / "x2_ros2_control_gains.yaml"
+            ),
+            "use_rviz": "false",
+            "start_state_bringup": "false",
+            "spawn_dual_arm_controller": "false",
+            "perception_3d_source": "none",
+            "depth_image_topic": "/test/depth",
+            "depth_camera_info_topic": "/test/depth_camera_info",
+            "lidar_pointcloud_topic": "/test/points",
+        }
+    )
+    entities = module.launch_setup(context)
+
+    assert entities[1].condition.evaluate(context) is False

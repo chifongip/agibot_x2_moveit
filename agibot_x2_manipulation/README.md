@@ -50,7 +50,8 @@ source install/setup.bash
 ```
 
 `box_pick_place.launch.py` includes the real-robot MoveIt and `ros2_control`
-launch, activates `dual_arm_controller`, and is therefore motion-enabling.
+launch, activates `dual_arm_controller` by default, and is therefore
+motion-enabling.
 Before a real execution, verify the 31 fresh HAL joint states, controller and
 command-transport ownership, TF, the collision scene, and a `plan_only: true`
 goal. Do not run a second controller manager or another controller that claims
@@ -67,6 +68,11 @@ For a navigation stack that already owns shared state, start
 `x2_bringup state_publisher.launch.py` once and launch manipulation with
 `start_state_bringup:=false`. This makes the manipulation stack consume the
 existing `/joint_states`, `/tf`, and `/tf_static` interfaces.
+
+When the shared controller manager already has `dual_arm_controller` active,
+also pass `spawn_dual_arm_controller:=false`. This reuses the active trajectory
+controller without attempting to configure it a second time. Do not use this
+option when the controller is inactive or unconfigured.
 
 ## Box and grasp calibration
 

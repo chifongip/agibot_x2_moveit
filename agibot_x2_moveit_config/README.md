@@ -52,6 +52,11 @@ To share state with navigation, start `x2_bringup` once, then pass
 `start_state_bringup:=false` to this launch so MoveIt consumes the existing
 `/joint_states`, `/tf`, and `/tf_static` topics.
 
+If that shared controller manager already has `dual_arm_controller` active,
+also pass `spawn_dual_arm_controller:=false` to avoid configuring it a second
+time. Leave this argument at its default when the controller is inactive or
+unconfigured.
+
 `command_transport` is selected at launch and must be one of the following:
 
 | Value | Command destination | Use case |

@@ -22,6 +22,7 @@ def launch_setup(context):
     use_rviz = LaunchConfiguration("use_rviz")
     control_update_rate = LaunchConfiguration("ros2_control_update_rate")
     start_state_bringup = LaunchConfiguration("start_state_bringup")
+    spawn_dual_arm_controller = LaunchConfiguration("spawn_dual_arm_controller")
     perception_source = LaunchConfiguration("perception_3d_source").perform(context)
     config_path = Path(get_package_share_directory("agibot_x2_moveit_config"))
     bringup_path = Path(get_package_share_directory("x2_bringup"))
@@ -96,6 +97,7 @@ def launch_setup(context):
                 "/controller_manager",
             ],
             output="screen",
+            condition=IfCondition(spawn_dual_arm_controller),
         ),
         Node(
             package="moveit_ros_move_group",
@@ -164,6 +166,15 @@ def generate_launch_description():
                 description=(
                     "Start x2_bringup's shared state pipeline. Set false when it "
                     "is already running for navigation or another consumer."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "spawn_dual_arm_controller",
+                default_value="true",
+                choices=["true", "false"],
+                description=(
+                    "Configure and activate dual_arm_controller. Set false only "
+                    "when the shared controller manager already has it active."
                 ),
             ),
             DeclareLaunchArgument(
