@@ -2,8 +2,12 @@ import importlib.util
 from pathlib import Path
 
 import yaml
+from sensor_msgs.msg import CameraInfo, Image
 
-from agibot_x2_manipulation_image_test import load_decompressor_module
+from agibot_x2_manipulation_image_test import (
+    load_decompressor_module,
+    load_raw_throttler_module,
+)
 
 
 CONFIG_FILE = Path(__file__).parents[1] / "config" / "box_manipulation.yaml"
@@ -169,6 +173,26 @@ def test_x2_jpeg_end_marker_is_repaired():
     assert module.repair_jpeg(complete) == complete
 
 
+def test_raw_image_throttle_limits_frame_rate_and_preserves_camera_info():
+    module = load_raw_throttler_module()
+    limiter = module.FrameRateLimiter(1.0)
+    camera_info = CameraInfo()
+    camera_info.header.frame_id = "camera_calibration_frame"
+    camera_info.k[0] = 500.0
+    image = Image()
+    image.header.frame_id = "camera_optical_frame"
+    image.header.stamp.sec = 12
+    image.header.stamp.nanosec = 34
+
+    assert limiter.accept(0.0)
+    assert not limiter.accept(0.999)
+    assert limiter.accept(1.0)
+    paired_camera_info = module.camera_info_for_image(camera_info, image)
+    assert paired_camera_info.header == image.header
+    assert paired_camera_info.k[0] == 500.0
+    assert camera_info.header.frame_id == "camera_calibration_frame"
+
+
 def test_apriltag_camera_subscriber_remaps_follow_image_namespace():
     module = load_launch_module()
     assert module.apriltag_remappings(
@@ -181,3 +205,24 @@ def test_apriltag_camera_subscriber_remaps_follow_image_namespace():
         "/aima/hal/sensor/rgbd_head_front/rgb_image",
         "/aima/hal/sensor/rgbd_head_front/rgb_camera_info",
     )[1][0] == "/aima/hal/sensor/rgbd_head_front/camera_info"
+
+
+def test_apriltag_uses_throttled_raw_camera_topics_when_enabled():
+    module = load_launch_module()
+    assert module.apriltag_input_topics(
+        True,
+        "/camera/image_raw",
+        "/camera/camera_info",
+        "/x2/rgb_image_throttled",
+        "/x2/rgb_image_throttled/camera_info",
+    ) == (
+        "/x2/rgb_image_throttled",
+        "/x2/rgb_image_throttled/camera_info",
+    )
+    assert module.apriltag_input_topics(
+        False,
+        "/camera/image_raw",
+        "/camera/camera_info",
+        "/x2/rgb_image_throttled",
+        "/x2/rgb_image_throttled/camera_info",
+    ) == ("/camera/image_raw", "/camera/camera_info")

@@ -122,6 +122,10 @@ install(PROGRAMS
   scripts/best_effort_image_decompressor.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME best_effort_image_decompressor)
+install(PROGRAMS
+  scripts/raw_image_throttler.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME raw_image_throttler)
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})

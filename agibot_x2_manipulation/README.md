@@ -158,17 +158,26 @@ for production use.
 
 ### Robot onboard computer
 
-Onboard, the detector can use the native raw RGB stream directly; no decoder is
-needed:
+Onboard, the detector can use the native raw RGB stream directly. To cap
+AprilTag detection at 1 Hz, enable the paired raw image and camera-info
+throttler:
 
 ```bash
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   command_transport:=zmq \
   use_apriltag:=true \
   use_image_decompressor:=false \
+  use_raw_image_throttler:=true \
+  raw_image_throttle_max_rate:=1.0 \
   camera_image:=/aima/hal/sensor/rgbd_head_front/rgb_image \
   camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
 ```
+
+The throttler publishes `/x2/rgb_image_throttled` and a camera-info message
+with the same header for every selected frame; the internal AprilTag node uses
+those topics automatically. It reduces detector work, but still receives and
+deserializes every raw camera message. Configure the camera driver itself to
+1 Hz when reducing camera-side CPU or bandwidth is also required.
 
 ### Hybrid real camera with simulated arms
 

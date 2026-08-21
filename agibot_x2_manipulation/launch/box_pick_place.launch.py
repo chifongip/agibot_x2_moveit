@@ -22,6 +22,19 @@ def apriltag_remappings(image_topic, camera_info_topic):
     ]
 
 
+def apriltag_input_topics(
+    use_raw_image_throttler,
+    camera_image,
+    camera_info,
+    throttled_camera_image,
+    throttled_camera_info,
+):
+    """Select the source consumed by the AprilTag CameraSubscriber."""
+    if use_raw_image_throttler:
+        return throttled_camera_image, throttled_camera_info
+    return camera_image, camera_info
+
+
 def create_apriltag_node(
     context,
     *,
@@ -29,6 +42,9 @@ def create_apriltag_node(
     use_dummy_apriltag,
     camera_image,
     camera_info,
+    use_raw_image_throttler,
+    throttled_camera_image,
+    throttled_camera_info,
     tag_params,
 ):
     if use_apriltag.perform(context).lower() != "true":
@@ -36,8 +52,13 @@ def create_apriltag_node(
     if use_dummy_apriltag.perform(context).lower() == "true":
         return []
 
-    image_topic = camera_image.perform(context)
-    camera_info_topic = camera_info.perform(context)
+    image_topic, camera_info_topic = apriltag_input_topics(
+        use_raw_image_throttler.perform(context).lower() == "true",
+        camera_image.perform(context),
+        camera_info.perform(context),
+        throttled_camera_image.perform(context),
+        throttled_camera_info.perform(context),
+    )
     return [
         Node(
             package="apriltag_ros",
@@ -79,6 +100,13 @@ def generate_launch_description():
         "image_decompress_input_reliability"
     )
     image_decompress_rmw = LaunchConfiguration("image_decompress_rmw")
+    use_raw_image_throttler = LaunchConfiguration("use_raw_image_throttler")
+    throttled_camera_image = LaunchConfiguration("throttled_camera_image")
+    throttled_camera_info = LaunchConfiguration("throttled_camera_info")
+    raw_image_throttle_max_rate = LaunchConfiguration("raw_image_throttle_max_rate")
+    raw_image_throttle_input_reliability = LaunchConfiguration(
+        "raw_image_throttle_input_reliability"
+    )
     perception_3d_source = LaunchConfiguration("perception_3d_source")
     depth_image_topic = LaunchConfiguration("depth_image_topic")
     depth_camera_info_topic = LaunchConfiguration("depth_camera_info_topic")
@@ -235,6 +263,31 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
+                "use_raw_image_throttler",
+                default_value="false",
+                choices=["true", "false"],
+                description=(
+                    "Limit the raw image stream consumed by AprilTag while "
+                    "republishing matching camera information."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "throttled_camera_image",
+                default_value="/x2/rgb_image_throttled",
+            ),
+            DeclareLaunchArgument(
+                "throttled_camera_info",
+                default_value="/x2/rgb_image_throttled/camera_info",
+            ),
+            DeclareLaunchArgument(
+                "raw_image_throttle_max_rate", default_value="10.0"
+            ),
+            DeclareLaunchArgument(
+                "raw_image_throttle_input_reliability",
+                default_value="best_effort",
+                choices=["reliable", "best_effort"],
+            ),
+            DeclareLaunchArgument(
                 "perception_3d_source",
                 default_value="none",
                 choices=["none", "depth", "lidar", "both"],
@@ -298,6 +351,30 @@ def generate_launch_description():
                     "best_effort_image_decompressor:=error",
                 ],
             ),
+            Node(
+                package="agibot_x2_manipulation",
+                executable="raw_image_throttler",
+                name="raw_image_throttler",
+                output="screen",
+                condition=IfCondition(use_raw_image_throttler),
+                parameters=[
+                    {
+                        "input_image_topic": camera_image,
+                        "input_camera_info_topic": camera_info,
+                        "output_image_topic": throttled_camera_image,
+                        "output_camera_info_topic": throttled_camera_info,
+                        "max_rate_hz": ParameterValue(
+                            raw_image_throttle_max_rate, value_type=float
+                        ),
+                        "input_reliability": raw_image_throttle_input_reliability,
+                    }
+                ],
+                arguments=[
+                    "--ros-args",
+                    "--log-level",
+                    "raw_image_throttler:=error",
+                ],
+            ),
             OpaqueFunction(
                 function=create_apriltag_node,
                 kwargs={
@@ -305,6 +382,9 @@ def generate_launch_description():
                     "use_dummy_apriltag": use_dummy_apriltag,
                     "camera_image": camera_image,
                     "camera_info": camera_info,
+                    "use_raw_image_throttler": use_raw_image_throttler,
+                    "throttled_camera_image": throttled_camera_image,
+                    "throttled_camera_info": throttled_camera_info,
                     "tag_params": tag_params,
                 },
             ),
