@@ -52,7 +52,6 @@ def test_demo_launch_uses_shared_fake_state_bringup():
     assert "static_virtual_joint_tfs.launch.py" in source
     assert "move_group.launch.py" in source
     assert "moveit_rviz.launch.py" in source
-    assert "warehouse_db.launch.py" in source
 
 
 def test_rsp_launch_delegates_to_passive_shared_publisher():

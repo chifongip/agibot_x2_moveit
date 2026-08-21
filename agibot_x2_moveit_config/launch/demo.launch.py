@@ -16,7 +16,6 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            DeclareBooleanLaunchArg("db", default_value=False),
             DeclareBooleanLaunchArg("debug", default_value=False),
             DeclareBooleanLaunchArg("use_rviz", default_value=True),
             IncludeLaunchDescription(
@@ -54,12 +53,6 @@ def generate_launch_description():
                     str(config_path / "launch" / "moveit_rviz.launch.py")
                 ),
                 condition=IfCondition(LaunchConfiguration("use_rviz")),
-            ),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    str(config_path / "launch" / "warehouse_db.launch.py")
-                ),
-                condition=IfCondition(LaunchConfiguration("db")),
             ),
         ]
     )
