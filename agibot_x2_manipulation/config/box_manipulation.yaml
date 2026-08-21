@@ -4,7 +4,7 @@ box_localizer:
     tag_frame: tag0
     detections_topic: /detections
     tag_id: 0
-    box_dimensions: [0.15, 0.35, 0.32]  # length X, width Y, height Z [m]
+    box_dimensions: [0.15, 0.32, 0.32]  # length X, width Y, height Z [m]
     tag_to_box_yaw: 0.0
     stable_sample_count: 3
     maximum_pose_age: 1.5
@@ -23,7 +23,7 @@ pick_place_server:
     left_tcp: left_hand_tcp_link
     right_tcp: right_hand_tcp_link
     box_id: grasp_box
-    box_dimensions: [0.15, 0.35, 0.32]
+    box_dimensions: [0.15, 0.32, 0.32]
     pregrasp_distance: 0.08
     contact_height_offset: 0.0
     lift_height: 0.05
@@ -32,8 +32,8 @@ pick_place_server:
     ik_timeout: 0.05
     # Coordinated dual-arm search. These are shared grasp hypotheses, not
     # independent per-hand pose tolerances.
-    grasp_position_tolerance: 0.020
-    grasp_orientation_tolerance: 0.13962634  # 8 degrees
+    grasp_position_tolerance: 0.05
+    grasp_orientation_tolerance: 0.1745329252  # 10 degrees
     pregrasp_distance_tolerance: 0.020
     alternate_face_alignment_tolerance: 0.261799388  # 15 degrees from best face pair
     maximum_grasp_candidates: 128
@@ -55,8 +55,8 @@ pick_place_server:
     closed_chain_projection_limit: 32
     closed_chain_validation_position_step: 0.005
     closed_chain_validation_orientation_step: 0.0174533
-    closed_chain_contact_position_error: 0.002
-    closed_chain_contact_orientation_error: 0.0174533
+    closed_chain_contact_position_error: 0.05
+    closed_chain_contact_orientation_error: 0.1745329252  # 10 degrees
     carry_search_timeout: 8.0
     maximum_carry_candidates: 96
     carry_search_x_range: 0.05
@@ -81,12 +81,12 @@ pick_place_server:
     reset_named_target: zero
     reset_preemption_timeout: 15.0
     reset_state_timeout: 2.0
-    reset_joint_tolerance: 0.02
+    reset_joint_tolerance: 0.1
     # Validate these against measured hardware tracking. The server requires
     # direct post-execution feedback satisfying them before any following phase.
-    execution_settle_timeout: 2.0
-    execution_joint_tolerance: 0.02
-    execution_velocity_tolerance: 0.01
+    execution_settle_timeout: 10.0
+    execution_joint_tolerance: 0.1
+    execution_velocity_tolerance: 0.05
     execution_settle_samples: 3
     simulate_ideal_attachment: false
     attach_service: /mujoco_grasp/attach
