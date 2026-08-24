@@ -6,7 +6,7 @@
     max_hamming: 0
     qos_profile: sensor_data
     detector:
-      threads: 2
+      threads: 1
       decimate: 1.0
       blur: 0.0
       refine: true
