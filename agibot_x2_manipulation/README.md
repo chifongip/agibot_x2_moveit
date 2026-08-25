@@ -82,6 +82,38 @@ is the box center; +Z is up. The localizer converts the top-tag pose into that
 frame, and `tag_to_box_yaw` describes their fixed yaw offset. Keep the
 `box_dimensions` values for `box_localizer` and `pick_place_server` identical.
 
+## Table-tag placement calibration
+
+The default launch derives an empty action `place_pose` from `tag9`. The tag is
+configured as a vertical table reference: +X points right, +Y points upward,
+and +Z points toward the robot, so its X-Z plane is the tabletop.
+`table_tag_height_above_tabletop` defines the calibrated vertical distance to
+the tabletop. The desired box center is
+directly below the tag's tabletop projection, at tag-frame coordinates
+`[table_x_offset, -table_tag_height_above_tabletop + box_height / 2,
+table_z_offset]`. At zero yaw, box
++X, +Y, and +Z align with tag -Z, -X, and +Y, preserving an upright placed box.
+
+Leave `place_pose` empty to use this stable tag-derived target. The server
+accepts only three strictly increasing tag-9 detections from
+`/front_center_rectify/detections`, each paired with the `tag9` transform at
+the exact detection timestamp. Consecutive samples must be no more than
+`table_tag_maximum_sample_gap` apart (2.5 seconds by default), and their
+derived placement poses must be within 5 mm and 3 degrees of their mean. A
+long detector outage therefore requires three new samples before placement can
+resume. Once accepted, that `base_link` target is frozen for the complete
+PickPlace operation. Set
+`table_tag_place_offset: [x, z]` to move the target in the table plane, and
+keep an explicit action `place_pose` when a caller must override the calibrated
+target. The server waits up to `table_tag_stability_timeout` (6 seconds by
+default) for a fresh stable table-tag pose before rejecting the goal.
+`box_pick_place.launch.py` starts the front-center tag9 pipeline at 1 Hz by
+default. It is independent of `use_apriltag`, which controls the tag0 pickup
+detector. `use_dummy_apriltag:=true` always disables both real-camera
+pipelines. Set `start_table_tag_detector:=false` when
+`rgb_head_front_center_apriltag.launch.py` is already running separately; do
+not run both because they would publish competing `tag9` transforms.
+
 The grasp convention is deliberately asymmetric: the right TCP +Y axis and the
 left TCP -Y axis pass through their contact surfaces. Both TCP +X axes point
 up along the box. Calibrate `left_hand_pad_origin` and `right_hand_pad_origin`
@@ -312,7 +344,7 @@ ros2 action send_goal /pick_box agibot_x2_manipulation_msgs/action/Pick \
   "{plan_only: true}" --feedback
 
 ros2 action send_goal /place_box agibot_x2_manipulation_msgs/action/Place \
-  "{place_pose: {header: {frame_id: base_link}, pose: {position: {x: 0.35, y: 0.0, z: 0.29}, orientation: {w: 1.0}}}, plan_only: true}" \
+  "{plan_only: true}" \
   --feedback
 ```
 
@@ -326,7 +358,7 @@ Test the complete sequence without executing motion:
 ```bash
 ros2 action send_goal /pick_place \
   agibot_x2_manipulation_msgs/action/PickPlace \
-  "{place_pose: {header: {frame_id: base_link}, pose: {position: {x: 0.35, y: 0.0, z: 0.29}, orientation: {w: 1.0}}}, plan_only: true}" \
+  "{plan_only: true}" \
   --feedback
 ```
 
@@ -439,6 +471,7 @@ ros2 run agibot_x2_ros2_control fake_zmq_joint_states \
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   command_transport:=zmq zmq_endpoint:=tcp://*:8559 \
   use_apriltag:=false use_dummy_apriltag:=true \
+  start_table_tag_detector:=false \
   motion_planning_mode:=pose_to_pose allow_execution:=false
 ```
 

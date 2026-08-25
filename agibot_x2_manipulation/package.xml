@@ -36,9 +36,14 @@
   <depend>visualization_msgs</depend>
   <exec_depend>agibot_x2_moveit_config</exec_depend>
   <exec_depend>apriltag_ros</exec_depend>
+  <exec_depend>compressed_image_transport</exec_depend>
+  <exec_depend>image_proc</exec_depend>
+  <exec_depend>image_transport</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>moveit_configs_utils</exec_depend>
+  <exec_depend>rclcpp_components</exec_depend>
+  <exec_depend>topic_tools</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>agibot_x2_ros2_control</test_depend>

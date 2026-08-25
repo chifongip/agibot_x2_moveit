@@ -90,7 +90,7 @@ target_include_directories(pick_place_core PRIVATE
 target_link_libraries(pick_place_core
   box_geometry closed_chain_path_planner perception_readiness planning_budget Eigen3::Eigen)
 ament_target_dependencies(pick_place_core
-  aimdk_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
+  aimdk_msgs apriltag_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
   moveit_ros_planning_interface nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs
   std_srvs tf2_eigen tf2_geometry_msgs tf2_ros visualization_msgs)
 
@@ -155,6 +155,10 @@ if(BUILD_TESTING)
   target_include_directories(test_pick_place_config PRIVATE src include)
   target_link_libraries(test_pick_place_config pick_place_core)
   ament_target_dependencies(test_pick_place_config rclcpp)
+  ament_add_gtest(test_table_tag_pose_tracker test/test_table_tag_pose_tracker.cpp)
+  target_include_directories(test_table_tag_pose_tracker PRIVATE src include)
+  target_link_libraries(test_table_tag_pose_tracker pick_place_core)
+  ament_target_dependencies(test_table_tag_pose_tracker apriltag_msgs geometry_msgs rclcpp tf2_ros)
   ament_add_pytest_test(test_manipulation_config test/test_manipulation_config.py)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
   add_launch_test(test/test_dummy_workflow.launch.py TIMEOUT 240)

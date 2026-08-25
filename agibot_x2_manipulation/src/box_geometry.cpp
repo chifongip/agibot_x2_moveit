@@ -11,6 +11,8 @@ namespace agibot_x2_manipulation
 namespace
 {
 
+constexpr double kHalfPi = 1.57079632679489661923;
+
 Eigen::Isometry3d contactPose(
   const Eigen::Isometry3d & box_pose, const Eigen::Vector3d & point_in_box,
   const Eigen::Vector3d & outward_in_box, bool left_hand, double wrist_rotation = 0.0)
@@ -109,6 +111,31 @@ Eigen::Isometry3d boxPoseFromTopTag(
   Eigen::Isometry3d tag_to_box = Eigen::Isometry3d::Identity();
   tag_to_box.linear() = Eigen::AngleAxisd(tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   tag_to_box.translation() = Eigen::Vector3d(0.0, 0.0, -dimensions.height / 2.0);
+  return tag_pose * tag_to_box;
+}
+
+Eigen::Isometry3d boxPoseFromVerticalTableTag(
+  const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
+  double tag_height_above_tabletop, double table_x_offset,
+  double table_z_offset, double tag_to_box_yaw)
+{
+  validate(dimensions);
+  if (!std::isfinite(tag_height_above_tabletop) || tag_height_above_tabletop < 0.0 ||
+    !std::isfinite(table_x_offset) || !std::isfinite(table_z_offset) ||
+    !std::isfinite(tag_to_box_yaw))
+  {
+    throw std::invalid_argument("vertical table-tag calibration values must be finite and valid");
+  }
+
+  Eigen::Isometry3d tag_to_box = Eigen::Isometry3d::Identity();
+  // Box +X, +Y, and +Z align with tag -Z, -X, and +Y respectively.
+  tag_to_box.linear() =
+    Eigen::AngleAxisd(-kHalfPi, Eigen::Vector3d::UnitX()).toRotationMatrix() *
+    Eigen::AngleAxisd(kHalfPi, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+    Eigen::AngleAxisd(tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  tag_to_box.translation() = Eigen::Vector3d(
+    table_x_offset, -tag_height_above_tabletop + dimensions.height / 2.0,
+    table_z_offset);
   return tag_pose * tag_to_box;
 }
 

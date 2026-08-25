@@ -30,6 +30,7 @@ def generate_test_description():
             "use_rviz": "false",
             "use_apriltag": "false",
             "use_dummy_apriltag": "true",
+            "start_table_tag_detector": "false",
             "perception_3d_source": "none",
             "allow_execution": "true",
             "motion_planning_mode": "pose_to_pose",

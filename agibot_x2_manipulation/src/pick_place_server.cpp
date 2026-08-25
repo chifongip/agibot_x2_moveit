@@ -147,6 +147,17 @@ public:
       node, config_, move_group_, planning_scene_, held_box_to_left_contact_,
       held_box_to_right_contact_, held_geometry_valid_, held_pose_)
   {
+    if (config_.use_tag_derived_place_pose) {
+      table_tag_pose_tracker_ = std::make_unique<TableTagPlacePoseTracker>(
+        node_, config_.planning_frame, config_.table_tag_frame,
+        config_.table_tag_detections_topic, config_.table_tag_id,
+        config_.table_tag_minimum_decision_margin, config_.dimensions,
+        config_.table_tag_height_above_tabletop, config_.table_tag_place_offset.x(),
+        config_.table_tag_place_offset.y(), config_.table_tag_to_box_yaw,
+        static_cast<std::size_t>(config_.table_tag_stable_sample_count),
+        config_.maximum_table_tag_pose_age, config_.table_tag_maximum_position_spread,
+        config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap);
+    }
     move_group_.setPoseReferenceFrame(config_.planning_frame);
     move_group_.setMaxVelocityScalingFactor(config_.velocity_scaling);
     move_group_.setMaxAccelerationScalingFactor(config_.acceleration_scaling);
@@ -238,6 +249,21 @@ private:
   void releaseOperation()
   {
     reset_coordinator_.releaseOperation();
+  }
+
+  bool resolvePlacePose(
+    const geometry_msgs::msg::PoseStamped & requested, geometry_msgs::msg::PoseStamped & output,
+    std::string & error, const CancelFunction & canceled) const
+  {
+    if (!requested.header.frame_id.empty()) {
+      return box_pose_tracker_.transformGoalPose(requested, output, error);
+    }
+    if (!config_.use_tag_derived_place_pose) {
+      error = "place_pose.frame_id is empty";
+      return false;
+    }
+    return table_tag_pose_tracker_->waitForStablePose(
+      config_.table_tag_stability_timeout, canceled, output, error);
   }
 
   rclcpp_action::GoalResponse onPickGoal(
@@ -621,9 +647,9 @@ private:
       if (requested_place) {
         geometry_msgs::msg::PoseStamped transformed_place;
         std::string transform_error;
-        if (!box_pose_tracker_.transformGoalPose(
+        if (!resolvePlacePose(
             *requested_place, transformed_place,
-            transform_error))
+            transform_error, canceled))
         {
           return outcome(false, kInvalidGoal, transform_error);
         }
@@ -830,7 +856,7 @@ private:
     }
     geometry_msgs::msg::PoseStamped place_message;
     std::string error;
-    if (!box_pose_tracker_.transformGoalPose(requested_pose, place_message, error)) {
+    if (!resolvePlacePose(requested_pose, place_message, error, canceled)) {
       return outcome(false, kInvalidGoal, error);
     }
     Eigen::Isometry3d place_pose;
@@ -1012,7 +1038,7 @@ private:
     }
     geometry_msgs::msg::PoseStamped place_message;
     std::string error;
-    if (!box_pose_tracker_.transformGoalPose(requested_place, place_message, error)) {
+    if (!resolvePlacePose(requested_place, place_message, error, canceled)) {
       return outcome(false, kInvalidGoal, error);
     }
     Eigen::Isometry3d pick_pose;
@@ -1342,8 +1368,12 @@ private:
     const CancelFunction canceled =
       [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested();};
     try {
-      if (goal->get_goal()->plan_only) {
-        task = planCompletePath(goal->get_goal()->place_pose, canceled);
+      geometry_msgs::msg::PoseStamped place_pose;
+      std::string place_error;
+      if (!resolvePlacePose(goal->get_goal()->place_pose, place_pose, place_error, canceled)) {
+        task = outcome(false, kInvalidGoal, place_error);
+      } else if (goal->get_goal()->plan_only) {
+        task = planCompletePath(place_pose, canceled);
       } else {
         const FeedbackFunction pick_feedback = [goal](
           const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
@@ -1353,7 +1383,7 @@ private:
             message->box_pose = pose;
             goal->publish_feedback(message);
           };
-        task = runPick(false, pick_feedback, canceled, &goal->get_goal()->place_pose);
+        task = runPick(false, pick_feedback, canceled, &place_pose);
         if (task.success) {
           const FeedbackFunction place_feedback = [goal](
             const std::string & stage, float progress,
@@ -1364,7 +1394,7 @@ private:
               message->box_pose = pose;
               goal->publish_feedback(message);
             };
-          task = runPlace(goal->get_goal()->place_pose, false, place_feedback, canceled);
+          task = runPlace(place_pose, false, place_feedback, canceled);
         }
         if (!task.success && task.object_held) {
           task.message += "; object remains held";
@@ -1389,6 +1419,7 @@ private:
   const PickPlaceConfig config_;
   ManipulationStateStore state_store_;
   BoxPoseTracker box_pose_tracker_;
+  std::unique_ptr<TableTagPlacePoseTracker> table_tag_pose_tracker_;
   Eigen::Isometry3d held_box_to_left_contact_{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d held_box_to_right_contact_{Eigen::Isometry3d::Identity()};
   bool held_geometry_valid_{false};

@@ -45,6 +45,13 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, config.reset_state_timeout);
   EXPECT_DOUBLE_EQ(config.execution_joint_tolerance, config.reset_joint_tolerance);
   EXPECT_EQ(config.perception_source, Perception3dSource::NONE);
+  EXPECT_FALSE(config.use_tag_derived_place_pose);
+  EXPECT_EQ(config.table_tag_frame, "tag9");
+  EXPECT_DOUBLE_EQ(config.table_tag_height_above_tabletop, 0.55);
+  EXPECT_EQ(config.table_tag_detections_topic, "/front_center_rectify/detections");
+  EXPECT_EQ(config.table_tag_id, 9);
+  EXPECT_EQ(config.table_tag_stable_sample_count, 3);
+  EXPECT_DOUBLE_EQ(config.table_tag_maximum_sample_gap, 2.5);
   EXPECT_TRUE(config.carry_pose.matrix().allFinite());
 }
 
@@ -55,12 +62,18 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   test_node->declare_parameter<double>("reset_state_timeout", 4.5);
   test_node->declare_parameter<double>("reset_joint_tolerance", 0.08);
   test_node->declare_parameter<std::string>("perception_3d_source", "both");
+  test_node->declare_parameter<bool>("use_tag_derived_place_pose", true);
+  test_node->declare_parameter<std::vector<double>>("table_tag_place_offset", {0.1, -0.2});
 
   const auto config = loadPickPlaceConfig(test_node);
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::POSE_TO_POSE);
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, 4.5);
   EXPECT_DOUBLE_EQ(config.execution_joint_tolerance, 0.08);
   EXPECT_EQ(config.perception_source, Perception3dSource::BOTH);
+  EXPECT_TRUE(config.use_tag_derived_place_pose);
+  EXPECT_DOUBLE_EQ(config.table_tag_place_offset.x(), 0.1);
+  EXPECT_DOUBLE_EQ(config.table_tag_place_offset.y(), -0.2);
+  EXPECT_EQ(config.table_tag_stable_sample_count, 3);
 }
 
 TEST_F(PickPlaceConfigTest, RejectsMalformedVectorParameters)
@@ -79,6 +92,16 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidModeAndUnsafeExecutionValues)
   const auto bad_execution = node("bad_execution");
   bad_execution->declare_parameter<int>("execution_settle_samples", 0);
   EXPECT_THROW(loadPickPlaceConfig(bad_execution), std::runtime_error);
+
+  const auto bad_table_tag = node("bad_table_tag");
+  bad_table_tag->declare_parameter<bool>("use_tag_derived_place_pose", true);
+  bad_table_tag->declare_parameter<int>("table_tag_stable_sample_count", 1);
+  EXPECT_THROW(loadPickPlaceConfig(bad_table_tag), std::runtime_error);
+
+  const auto bad_table_tag_gap = node("bad_table_tag_gap");
+  bad_table_tag_gap->declare_parameter<bool>("use_tag_derived_place_pose", true);
+  bad_table_tag_gap->declare_parameter<double>("table_tag_maximum_sample_gap", 0.0);
+  EXPECT_THROW(loadPickPlaceConfig(bad_table_tag_gap), std::runtime_error);
 }
 
 TEST_F(PickPlaceConfigTest, RejectsInvalidSearchBudgetsAndInitialState)

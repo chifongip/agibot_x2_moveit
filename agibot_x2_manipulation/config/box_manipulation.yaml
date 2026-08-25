@@ -68,6 +68,23 @@ pick_place_server:
     # before allowing larger shifts from the requested final box pose.
     adaptive_place_position_tolerance: [0.015, 0.015, 0.005]
     adaptive_place_yaw_tolerance: 0.0872664626  # 5 degrees
+    # An empty action place_pose is resolved from tag9. Its frame uses +X right,
+    # +Y up, and +Z toward the robot; [x, z] offsets are in the tabletop plane.
+    # At zero yaw, box +X, +Y, and +Z align with tag -Z, -X, and +Y.
+    use_tag_derived_place_pose: true
+    table_tag_frame: tag9
+    table_tag_height_above_tabletop: 0.47
+    table_tag_place_offset: [0.0, 0.15]
+    table_tag_to_box_yaw: 0.0
+    maximum_table_tag_pose_age: 1.5
+    table_tag_detections_topic: /front_center_rectify/detections
+    table_tag_id: 9
+    table_tag_minimum_decision_margin: 20.0
+    table_tag_stable_sample_count: 3
+    table_tag_maximum_position_spread: 0.005
+    table_tag_maximum_angular_spread: 0.0523598776  # 3 degrees
+    table_tag_maximum_sample_gap: 2.5  # s; reset after a detector outage
+    table_tag_stability_timeout: 6.0
     maximum_joint_step: 0.35
     velocity_scaling: 0.10
     acceleration_scaling: 0.10

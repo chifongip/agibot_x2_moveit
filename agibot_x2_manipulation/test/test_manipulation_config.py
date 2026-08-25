@@ -1,6 +1,9 @@
 import importlib.util
 from pathlib import Path
+from xml.etree import ElementTree
 
+from launch import LaunchContext
+from launch.actions import IncludeLaunchDescription
 import yaml
 from sensor_msgs.msg import CameraInfo, Image
 
@@ -20,6 +23,10 @@ RECORDED_TAG_FILE = (
     / "recorded_planning_failure_dummy_apriltag.yaml"
 )
 LAUNCH_FILE = Path(__file__).parents[1] / "launch" / "box_pick_place.launch.py"
+TABLE_TAG_LAUNCH_FILE = (
+    Path(__file__).parents[1] / "launch" / "rgb_head_front_center_apriltag.launch.py"
+)
+PACKAGE_FILE = Path(__file__).parents[1] / "package.xml"
 RECORDED_LAUNCH_FILE = (
     Path(__file__).parents[1] / "launch" / "recorded_planning_failure.launch.py"
 )
@@ -87,6 +94,72 @@ def test_filtered_output_topics_match_moveit_configuration():
 
     assert config["depth_filtered_cloud_topic"] == "/x2/moveit/depth_filtered_cloud"
     assert config["lidar_filtered_cloud_topic"] == "/x2/moveit/lidar_filtered_cloud"
+
+
+def test_tag9_derives_the_default_table_place_pose():
+    with CONFIG_FILE.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
+
+    assert config["use_tag_derived_place_pose"] is True
+    assert config["table_tag_frame"] == "tag9"
+    assert config["table_tag_height_above_tabletop"] > 0.0
+    assert config["table_tag_place_offset"] == [0.0, 0.15]
+    assert config["maximum_table_tag_pose_age"] > 0.0
+    assert config["table_tag_detections_topic"] == "/front_center_rectify/detections"
+    assert config["table_tag_id"] == 9
+    assert config["table_tag_stable_sample_count"] == 3
+    assert config["table_tag_maximum_position_spread"] == 0.005
+    assert config["table_tag_maximum_angular_spread"] == 0.0523598776
+    assert config["table_tag_maximum_sample_gap"] == 2.5
+
+
+def test_default_launch_starts_the_table_tag_detector_at_one_hz():
+    source = LAUNCH_FILE.read_text(encoding="utf-8")
+    table_tag_source = TABLE_TAG_LAUNCH_FILE.read_text(encoding="utf-8")
+
+    assert '"start_table_tag_detector",\n                default_value="true"' in source
+    assert '"table_tag_detector_max_rate_hz",\n                default_value="1.0"' in source
+    assert '"rgb_head_front_center_apriltag.launch.py"' in source
+    assert "table_tag_detector_enabled = PythonExpression" in source
+    assert "condition=IfCondition(table_tag_detector_enabled)" in source
+    assert '"max_rate_hz": table_tag_detector_max_rate_hz' in source
+    assert "name='max_rate_hz', default_value='1.0'" in table_tag_source
+
+
+def test_dummy_mode_and_explicit_disable_stop_the_table_tag_detector(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path / "ros_log"))
+    module = load_launch_module()
+    launch_description = module.generate_launch_description()
+    table_tag_include = next(
+        entity
+        for entity in launch_description.entities
+        if isinstance(entity, IncludeLaunchDescription) and entity.condition is not None
+    )
+    context = LaunchContext()
+    context.launch_configurations["start_table_tag_detector"] = "true"
+    context.launch_configurations["use_dummy_apriltag"] = "false"
+    assert table_tag_include.condition.evaluate(context)
+
+    context.launch_configurations["use_dummy_apriltag"] = "true"
+    assert not table_tag_include.condition.evaluate(context)
+
+    context.launch_configurations["start_table_tag_detector"] = "false"
+    assert not table_tag_include.condition.evaluate(context)
+
+
+def test_table_tag_detector_runtime_dependencies_are_declared():
+    root = ElementTree.parse(PACKAGE_FILE).getroot()
+    dependencies = {entry.text for entry in root if entry.text}
+
+    assert {
+        "compressed_image_transport",
+        "image_proc",
+        "image_transport",
+        "rclcpp_components",
+        "topic_tools",
+    } <= dependencies
 
 
 def test_execution_requires_fresh_settled_feedback():

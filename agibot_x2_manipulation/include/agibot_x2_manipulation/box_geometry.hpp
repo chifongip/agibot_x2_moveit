@@ -55,6 +55,15 @@ Eigen::Isometry3d boxPoseFromTopTag(
   const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
   double tag_to_box_yaw = 0.0);
 
+/// Convert a vertically mounted table-tag pose into a box-center place pose.
+/// The tag frame uses +X right, +Y up, and +Z toward the robot.
+/// The two offsets are in the tabletop X-Z plane, measured from the tag projection.
+/// At zero yaw, box +X, +Y, and +Z align with tag -Z, -X, and +Y respectively.
+Eigen::Isometry3d boxPoseFromVerticalTableTag(
+  const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
+  double tag_height_above_tabletop, double table_x_offset = 0.0,
+  double table_z_offset = 0.0, double tag_to_box_yaw = 0.0);
+
 /// Choose the face pair closest to base +/-Y and construct opposing TCP poses.
 GraspGeometry computeGraspGeometry(
   const Eigen::Isometry3d & box_pose, const BoxDimensions & dimensions,

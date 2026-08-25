@@ -77,6 +77,7 @@ def generate_launch_description():
                     "use_rviz": use_rviz,
                     "use_apriltag": "false",
                     "use_dummy_apriltag": "true",
+                    "start_table_tag_detector": "false",
                     "dummy_tag_params_file": tag_snapshot,
                     "perception_3d_source": "none",
                     "leg_state_topic": "/x2_replay/aima/hal/joint/leg/state",

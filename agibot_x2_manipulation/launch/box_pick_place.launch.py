@@ -2,7 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -85,6 +85,17 @@ def generate_launch_description():
     head_state_topic = LaunchConfiguration("head_state_topic")
     use_apriltag = LaunchConfiguration("use_apriltag")
     use_dummy_apriltag = LaunchConfiguration("use_dummy_apriltag")
+    start_table_tag_detector = LaunchConfiguration("start_table_tag_detector")
+    table_tag_detector_max_rate_hz = LaunchConfiguration("table_tag_detector_max_rate_hz")
+    table_tag_detector_enabled = PythonExpression(
+        [
+            "'",
+            start_table_tag_detector,
+            "'.lower() == 'true' and '",
+            use_dummy_apriltag,
+            "'.lower() != 'true'",
+        ]
+    )
     dummy_tag_params_file = LaunchConfiguration("dummy_tag_params_file")
     use_rviz = LaunchConfiguration("use_rviz")
     ros2_control_update_rate = LaunchConfiguration("ros2_control_update_rate")
@@ -211,11 +222,27 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("use_apriltag", default_value="true"),
             DeclareLaunchArgument(
+                "start_table_tag_detector",
+                default_value="true",
+                choices=["true", "false"],
+                description=(
+                    "Start the front-center tag9 detector used for empty place_pose goals. "
+                    "This is independent of use_apriltag (tag0); dummy mode always "
+                    "disables it. Set false when the standalone detector is already running."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "table_tag_detector_max_rate_hz",
+                default_value="1.0",
+                description="Maximum front-center table-tag detection rate.",
+            ),
+            DeclareLaunchArgument(
                 "use_dummy_apriltag",
                 default_value="false",
+                choices=["true", "false"],
                 description=(
-                    "Publish a test-only tag pose and detections. This disables the "
-                    "internal camera detector."
+                    "Publish a test-only tag pose and detections. This disables both "
+                    "camera detector pipelines."
                 ),
             ),
             DeclareLaunchArgument(
@@ -387,6 +414,17 @@ def generate_launch_description():
                     "throttled_camera_info": throttled_camera_info,
                     "tag_params": tag_params,
                 },
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        manipulation_share, "launch", "rgb_head_front_center_apriltag.launch.py"
+                    )
+                ),
+                condition=IfCondition(table_tag_detector_enabled),
+                launch_arguments={
+                    "max_rate_hz": table_tag_detector_max_rate_hz,
+                }.items(),
             ),
             Node(
                 package="agibot_x2_manipulation",

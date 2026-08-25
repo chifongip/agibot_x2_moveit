@@ -2,6 +2,7 @@
 
 #include <geometry_msgs/msg/pose.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <stdexcept>
 #include <vector>
@@ -143,6 +144,60 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     place_tolerance[0], place_tolerance[1], place_tolerance[2]);
   config.adaptive_place_yaw_tolerance = parameter<double>(
     node, "adaptive_place_yaw_tolerance", 0.0872664626);
+  config.use_tag_derived_place_pose = parameter<bool>(
+    node, "use_tag_derived_place_pose", false);
+  config.table_tag_frame = parameter<std::string>(node, "table_tag_frame", "tag9");
+  config.table_tag_height_above_tabletop = parameter<double>(
+    node, "table_tag_height_above_tabletop", 0.55);
+  const auto table_tag_place_offset = parameter<std::vector<double>>(
+    node, "table_tag_place_offset", {0.0, 0.0});
+  if (table_tag_place_offset.size() != 2U) {
+    throw std::runtime_error("table_tag_place_offset must contain [table_x, table_z]");
+  }
+  config.table_tag_place_offset = Eigen::Vector2d(
+    table_tag_place_offset[0], table_tag_place_offset[1]);
+  config.table_tag_to_box_yaw = parameter<double>(node, "table_tag_to_box_yaw", 0.0);
+  config.maximum_table_tag_pose_age = parameter<double>(
+    node, "maximum_table_tag_pose_age", config.max_pose_age);
+  config.table_tag_detections_topic = parameter<std::string>(
+    node, "table_tag_detections_topic", "/front_center_rectify/detections");
+  config.table_tag_id = parameter<int>(node, "table_tag_id", 9);
+  config.table_tag_minimum_decision_margin = parameter<double>(
+    node, "table_tag_minimum_decision_margin", 20.0);
+  config.table_tag_stable_sample_count = parameter<int>(
+    node, "table_tag_stable_sample_count", 3);
+  config.table_tag_maximum_position_spread = parameter<double>(
+    node, "table_tag_maximum_position_spread", 0.005);
+  config.table_tag_maximum_angular_spread = parameter<double>(
+    node, "table_tag_maximum_angular_spread", 0.0523598776);
+  config.table_tag_maximum_sample_gap = parameter<double>(
+    node, "table_tag_maximum_sample_gap", 2.5);
+  config.table_tag_stability_timeout = parameter<double>(
+    node, "table_tag_stability_timeout", 6.0);
+  if (config.use_tag_derived_place_pose &&
+    (config.table_tag_frame.empty() ||
+    !std::isfinite(config.table_tag_height_above_tabletop) ||
+    config.table_tag_height_above_tabletop < 0.0 ||
+    !config.table_tag_place_offset.allFinite() ||
+    !std::isfinite(config.table_tag_to_box_yaw) ||
+    !std::isfinite(config.maximum_table_tag_pose_age) ||
+    config.maximum_table_tag_pose_age <= 0.0 ||
+    config.table_tag_detections_topic.empty() || config.table_tag_id < 0 ||
+    !std::isfinite(config.table_tag_minimum_decision_margin) ||
+    config.table_tag_minimum_decision_margin < 0.0 ||
+    config.table_tag_stable_sample_count < 2 ||
+    !std::isfinite(config.table_tag_maximum_position_spread) ||
+    config.table_tag_maximum_position_spread < 0.0 ||
+    !std::isfinite(config.table_tag_maximum_angular_spread) ||
+    config.table_tag_maximum_angular_spread < 0.0 ||
+    !std::isfinite(config.table_tag_maximum_sample_gap) ||
+    config.table_tag_maximum_sample_gap <= 0.0 ||
+    !std::isfinite(config.table_tag_stability_timeout) ||
+    config.table_tag_stability_timeout <= 0.0))
+  {
+    throw std::runtime_error(
+            "tag-derived place pose requires valid table-tag detection and calibration values");
+  }
   config.max_joint_step = parameter<double>(node, "maximum_joint_step", 0.35);
   config.allow_execution = parameter<bool>(node, "allow_execution", false);
   config.velocity_scaling = parameter<double>(node, "velocity_scaling", 0.10);

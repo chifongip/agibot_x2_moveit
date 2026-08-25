@@ -28,6 +28,36 @@ TEST(BoxGeometry, TopTagIsShiftedToBoxCenter)
   EXPECT_NEAR(box.translation().z(), 0.65, 1e-12);
 }
 
+TEST(BoxGeometry, VerticalTableTagDerivesAnUprightPlacePose)
+{
+  Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();
+  tag.translation() = Eigen::Vector3d(1.0, 2.0, 3.0);
+  const auto box = boxPoseFromVerticalTableTag(tag, {0.4, 0.2, 0.3}, 0.55);
+
+  EXPECT_NEAR(box.translation().x(), 1.0, 1e-12);
+  EXPECT_NEAR(box.translation().y(), 1.60, 1e-12);
+  EXPECT_NEAR(box.translation().z(), 3.0, 1e-12);
+  EXPECT_LT((box.linear() * Eigen::Vector3d::UnitX() + Eigen::Vector3d::UnitZ()).norm(), 1e-12);
+  EXPECT_LT((box.linear() * Eigen::Vector3d::UnitY() + Eigen::Vector3d::UnitX()).norm(), 1e-12);
+  EXPECT_LT((box.linear() * Eigen::Vector3d::UnitZ() - Eigen::Vector3d::UnitY()).norm(), 1e-12);
+}
+
+TEST(BoxGeometry, VerticalTableTagAppliesTabletopOffsetsAndBoxYaw)
+{
+  Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();
+  tag.linear() = Eigen::AngleAxisd(kPi / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const auto box = boxPoseFromVerticalTableTag(
+    tag, {0.4, 0.2, 0.3}, 0.55, 0.2, -0.1, kPi / 2.0);
+
+  EXPECT_LT((box.translation() - tag * Eigen::Vector3d(0.2, -0.4, -0.1)).norm(), 1e-12);
+  EXPECT_LT(
+    (box.linear() - tag.linear() *
+    Eigen::AngleAxisd(-kPi / 2.0, Eigen::Vector3d::UnitX()).toRotationMatrix() *
+    Eigen::AngleAxisd(kPi / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+    Eigen::AngleAxisd(kPi / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix()).norm(),
+    1e-12);
+}
+
 TEST(BoxGeometry, AlignedBoxUsesLocalYFaces)
 {
   const auto grasp = computeGraspGeometry(boxAtYaw(0.0), {0.4, 0.2, 0.3}, 0.08);
