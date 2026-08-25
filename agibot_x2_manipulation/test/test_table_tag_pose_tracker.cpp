@@ -6,6 +6,7 @@
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include <array>
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -73,10 +74,7 @@ protected:
   void SetUp() override
   {
     node_ = std::make_shared<rclcpp::Node>("table_tag_pose_tracker_test");
-    tracker_ = std::make_unique<TableTagPlacePoseTracker>(
-      node_, "base_link", "tag9", "/table_tag_test/detections", 9, 20.0,
-      BoxDimensions{0.15, 0.32, 0.32}, 0.47, 0.0, 0.15, 0.0, 3, 5.0,
-      0.005, 0.0523598776, 2.5);
+    createTracker(5.0);
     transform_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node_);
     detections_publisher_ = node_->create_publisher<apriltag_msgs::msg::AprilTagDetectionArray>(
       "/table_tag_test/detections", rclcpp::SensorDataQoS());
@@ -100,6 +98,14 @@ protected:
       executor_.spin_some();
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+  }
+
+  void createTracker(double maximum_age)
+  {
+    tracker_ = std::make_unique<TableTagPlacePoseTracker>(
+      node_, "base_link", "tag9", "/table_tag_test/detections", 9, 20.0,
+      BoxDimensions{0.15, 0.32, 0.32}, 0.47, 0.0, 0.15, 0.0, 3, maximum_age,
+      0.005, 0.0523598776, 2.5);
   }
 
   void publishTransform(double x, const rclcpp::Time & stamp)
@@ -132,35 +138,47 @@ protected:
   rclcpp::Publisher<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_publisher_;
 };
 
-TEST_F(TableTagPoseTrackerTest, UsesTransformAtEachDetectionTimestamp)
+TEST_F(TableTagPoseTrackerTest, UsesLatestTransformWhenDetectionTfArrivesLater)
 {
   const auto now = node_->now();
-  const auto first = now - rclcpp::Duration::from_seconds(0.20);
-  const auto second = now - rclcpp::Duration::from_seconds(0.15);
-  const auto third = now - rclcpp::Duration::from_seconds(0.10);
-  const auto newer_conflicting = now - rclcpp::Duration::from_seconds(0.05);
+  const std::array transforms{
+    now - rclcpp::Duration::from_seconds(0.30),
+    now - rclcpp::Duration::from_seconds(0.20),
+    now - rclcpp::Duration::from_seconds(0.10),
+  };
 
-  // Make the latest transform conflict with the three transforms referenced by
-  // detections. A latest-TF lookup would either reject the window or use 0.45.
-  for (int i = 0; i < 3; ++i) {
-    publishTransform(0.25, first);
-    publishTransform(0.25, second);
-    publishTransform(0.25, third);
-    publishTransform(0.45, newer_conflicting);
+  // Every detection is slightly newer than its latest available tag TF, which
+  // models delivery on separate DDS topics. The robot is stationary, so the
+  // latest transform remains the correct table-tag pose for each detection.
+  for (const auto & transform_stamp : transforms) {
+    publishTransform(0.25, transform_stamp);
     spinFor(std::chrono::milliseconds(10));
+    publishDetection(transform_stamp + rclcpp::Duration::from_seconds(0.01));
+    spinFor(std::chrono::milliseconds(20));
   }
-  publishDetection(first);
-  spinFor(std::chrono::milliseconds(20));
-  publishDetection(second);
-  spinFor(std::chrono::milliseconds(20));
-  publishDetection(third);
-  spinFor(std::chrono::milliseconds(20));
 
   geometry_msgs::msg::PoseStamped stable_pose;
   std::string error;
   ASSERT_TRUE(tracker_->waitForStablePose(
       0.1, []() {return false;}, stable_pose, error)) << error;
   EXPECT_NEAR(stable_pose.pose.position.x, 0.25, 1e-6);
+}
+
+TEST_F(TableTagPoseTrackerTest, RejectsStaleLatestTransform)
+{
+  tracker_.reset();
+  createTracker(0.05);
+  const auto now = node_->now();
+  publishTransform(0.25, now - rclcpp::Duration::from_seconds(0.10));
+  spinFor(std::chrono::milliseconds(20));
+  publishDetection(node_->now());
+  spinFor(std::chrono::milliseconds(20));
+
+  geometry_msgs::msg::PoseStamped stable_pose;
+  std::string error;
+  EXPECT_FALSE(tracker_->waitForStablePose(
+      0.05, []() {return false;}, stable_pose, error));
+  EXPECT_EQ(error, "no fresh stable table tag pose");
 }
 
 }  // namespace

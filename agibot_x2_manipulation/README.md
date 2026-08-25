@@ -96,8 +96,10 @@ table_z_offset]`. At zero yaw, box
 
 Leave `place_pose` empty to use this stable tag-derived target. The server
 accepts only three strictly increasing tag-9 detections from
-`/front_center_rectify/detections`, each paired with the `tag9` transform at
-the exact detection timestamp. Consecutive samples must be no more than
+`/front_center_rectify/detections`, each paired with the latest fresh `tag9`
+transform. This requires the robot, including every joint in the camera-to-base
+TF chain, and the table/tag to remain stationary during measurement.
+Consecutive samples must be no more than
 `table_tag_maximum_sample_gap` apart (2.5 seconds by default), and their
 derived placement poses must be within 5 mm and 3 degrees of their mean. A
 long detector outage therefore requires three new samples before placement can
@@ -553,6 +555,11 @@ merely to pass an approach or reset.
 
 ## To do
 
+- Replace the current stationary-table `TimePointZero` lookup with a bounded
+  retry queue for the exact detection timestamp before supporting table-tag
+  measurements while the base or head moves. The retry must retain the source
+  timestamp, wait briefly for its matching TF, and reject it on timeout rather
+  than falling back to a transform from another image.
 - Extend Place beyond its current local X/Y/Z/yaw correction window with a
   runtime placement-region search. Given a detected support surface and an
   allowed placement region, it should sample and rank collision-free,

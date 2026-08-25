@@ -232,12 +232,28 @@ void TableTagPlacePoseTracker::onDetections(
         "Table tag detection rejected because it is older than %.3f s", maximum_age_);
       return;
     }
+    // Tag detections and their TF are separate topics. During table-tag
+    // measurement the robot and table are stationary, so the latest fresh tag
+    // transform is equivalent to the detection-time transform.
     const auto transform = tf_buffer_.lookupTransform(
-      planning_frame_, tag_frame_, detection_stamp);
+      planning_frame_, tag_frame_, tf2::TimePointZero);
+    const rclcpp::Time transform_stamp(transform.header.stamp);
+    if (transform_stamp.nanoseconds() == 0) {
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "Table tag TF rejected because its timestamp is zero");
+      return;
+    }
+    if ((node_->now() - transform_stamp).seconds() > maximum_age_) {
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "Table tag TF rejected because it is older than %.3f s", maximum_age_);
+      return;
+    }
     const Eigen::Isometry3d sample = boxPoseFromVerticalTableTag(
       tf2::transformToEigen(transform), dimensions_, tag_height_above_tabletop_,
       table_x_offset_, table_z_offset_, tag_to_box_yaw_);
-    updateStablePose(sample, message->header.stamp);
+    updateStablePose(sample, transform.header.stamp);
   } catch (const tf2::TransformException & error) {
     RCLCPP_WARN_THROTTLE(
       node_->get_logger(), *node_->get_clock(), 2000,
