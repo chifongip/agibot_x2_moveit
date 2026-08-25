@@ -74,6 +74,11 @@ def create_apriltag_node(
                 (camera_info_source, paired_camera_info_topic),
             ],
             output='screen',
+            arguments=[
+                "--ros-args",
+                "--log-level",
+                "front_center_rectify.apriltag:=error",
+            ],
         ),
     ]
 
