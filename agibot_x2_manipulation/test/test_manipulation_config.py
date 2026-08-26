@@ -88,6 +88,16 @@ def test_launch_can_reuse_an_active_dual_arm_controller():
     assert '"spawn_dual_arm_controller": spawn_dual_arm_controller' in source
 
 
+def test_recovery_service_does_not_starve_joint_state_callbacks():
+    source = (
+        Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "recovery_callback_group_ = node_->create_callback_group(" in source
+    assert "rmw_qos_profile_services_default, recovery_callback_group_" in source
+    assert "rclcpp::ExecutorOptions(), 2" in source
+
+
 def test_filtered_output_topics_match_moveit_configuration():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]

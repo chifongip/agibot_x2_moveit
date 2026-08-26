@@ -233,10 +233,13 @@ public:
       std::bind(&PickPlaceServer::onResetGoal, this, std::placeholders::_1, std::placeholders::_2),
       std::bind(&PickPlaceServer::onResetCancel, this, std::placeholders::_1),
       std::bind(&PickPlaceServer::onResetAccepted, this, std::placeholders::_1));
+    recovery_callback_group_ = node_->create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive);
     recovery_service_ = node_->create_service<RecoverManipulationState>(
       "/recover_manipulation_state",
       std::bind(
-        &PickPlaceServer::recoverState, this, std::placeholders::_1, std::placeholders::_2));
+        &PickPlaceServer::recoverState, this, std::placeholders::_1, std::placeholders::_2),
+      rmw_qos_profile_services_default, recovery_callback_group_);
     publishState();
   }
 
@@ -1442,6 +1445,7 @@ private:
   rclcpp_action::Server<Place>::SharedPtr place_action_server_;
   rclcpp_action::Server<PickPlace>::SharedPtr pick_place_action_server_;
   rclcpp_action::Server<ResetManipulation>::SharedPtr reset_action_server_;
+  rclcpp::CallbackGroup::SharedPtr recovery_callback_group_;
   rclcpp::Service<RecoverManipulationState>::SharedPtr recovery_service_;
 };
 
@@ -1454,7 +1458,8 @@ int main(int argc, char ** argv)
     "pick_place_server",
     rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
   auto server = std::make_shared<agibot_x2_manipulation::PickPlaceServer>(node);
-  rclcpp::executors::MultiThreadedExecutor executor;
+  rclcpp::executors::MultiThreadedExecutor executor(
+    rclcpp::ExecutorOptions(), 2);
   executor.add_node(node);
   executor.spin();
   server.reset();
