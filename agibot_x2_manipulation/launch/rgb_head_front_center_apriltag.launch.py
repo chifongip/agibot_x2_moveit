@@ -92,9 +92,12 @@ def generate_launch_description():
     camera_info_topic = LaunchConfiguration('camera_info_topic')
     decoded_image_topic = LaunchConfiguration('decoded_image_topic')
     raw_image_topic = LaunchConfiguration('raw_image_topic')
+    resized_image_topic = LaunchConfiguration('resized_image_topic')
     rectified_image_topic = LaunchConfiguration('rectified_image_topic')
     apriltag_config_file = LaunchConfiguration('apriltag_config_file')
     max_rate_hz = LaunchConfiguration('max_rate_hz')
+    resize_width = LaunchConfiguration('resize_width')
+    resize_height = LaunchConfiguration('resize_height')
 
     arg_namespace = DeclareLaunchArgument(
         name='namespace', default_value='front_center_rectify',
@@ -135,7 +138,15 @@ def generate_launch_description():
     arg_raw_image_topic = DeclareLaunchArgument(
         name='raw_image_topic',
         default_value='/aima/hal/sensor/rgb_head_front_center/rgb_image_raw',
-        description='Timestamp-paired raw image topic used by the rectifier'
+        description='Timestamp-paired raw image topic used by the resize node'
+    )
+
+    arg_resized_image_topic = DeclareLaunchArgument(
+        name='resized_image_topic',
+        default_value=(
+            '/aima/hal/sensor/rgb_head_front_center/rgb_image_resized'
+        ),
+        description='Scaled raw image topic used by the rectifier'
     )
 
     arg_rectified_image_topic = DeclareLaunchArgument(
@@ -155,14 +166,41 @@ def generate_launch_description():
         description='Maximum compressed and timestamp-paired image rate'
     )
 
+    arg_resize_width = DeclareLaunchArgument(
+        name='resize_width', default_value='640',
+        description='Width in pixels for the rectification and AprilTag input'
+    )
+
+    arg_resize_height = DeclareLaunchArgument(
+        name='resize_height', default_value='480',
+        description='Height in pixels for the rectification and AprilTag input'
+    )
+
     composable_nodes = [
+        ComposableNode(
+            package='image_proc',
+            plugin='image_proc::ResizeNode',
+            name='resize_color_node',
+            namespace=LaunchConfiguration('namespace'),
+            parameters=[{
+                'use_scale': False,
+                'width': ParameterValue(resize_width, value_type=int),
+                'height': ParameterValue(resize_height, value_type=int),
+            }],
+            remappings=[
+                ('image/image_raw', raw_image_topic),
+                ('image/camera_info', 'raw_camera_info'),
+                ('resize/image_raw', resized_image_topic),
+                ('resize/camera_info', 'camera_info'),
+            ],
+        ),
         ComposableNode(
             package='image_proc',
             plugin='image_proc::RectifyNode',
             name='rectify_color_node',
             namespace=LaunchConfiguration('namespace'),
             remappings=[
-                ('image', raw_image_topic),
+                ('image', resized_image_topic),
                 ('image_rect', rectified_image_topic),
             ],
         ),
@@ -204,8 +242,9 @@ def generate_launch_description():
         output='screen',
     )
 
-    # Pair the latest calibration with a rate-limited decoded image, assigning
-    # the exact image header to CameraInfo for image_proc and AprilTag.
+    # Pair the latest calibration with a rate-limited decoded image. ResizeNode
+    # then scales this calibration and republishes it as camera_info for both
+    # RectifyNode and AprilTag pose estimation.
     raw_image_throttler = Node(
         package='agibot_x2_manipulation',
         executable='raw_image_throttler',
@@ -215,7 +254,7 @@ def generate_launch_description():
             'input_image_topic': decoded_image_topic,
             'input_camera_info_topic': camera_info_topic,
             'output_image_topic': raw_image_topic,
-            'output_camera_info_topic': 'camera_info',
+            'output_camera_info_topic': 'raw_camera_info',
             'max_rate_hz': ParameterValue(max_rate_hz, value_type=float),
             'input_reliability': 'best_effort',
         }],
@@ -263,9 +302,12 @@ def generate_launch_description():
         arg_camera_info_topic,
         arg_decoded_image_topic,
         arg_raw_image_topic,
+        arg_resized_image_topic,
         arg_rectified_image_topic,
         arg_apriltag_config_file,
         arg_max_rate_hz,
+        arg_resize_width,
+        arg_resize_height,
         arg_container,
         compressed_image_throttler,
         decompress_image,

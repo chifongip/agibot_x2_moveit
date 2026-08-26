@@ -126,6 +126,22 @@ def test_default_launch_starts_the_table_tag_detector_at_one_hz():
     assert "name='max_rate_hz', default_value='1.0'" in table_tag_source
 
 
+def test_table_tag_pipeline_resizes_before_rectification_with_scaled_camera_info():
+    source = TABLE_TAG_LAUNCH_FILE.read_text(encoding="utf-8")
+
+    assert source.index("plugin='image_proc::ResizeNode'") < source.index(
+        "plugin='image_proc::RectifyNode'"
+    )
+    assert "'use_scale': False" in source
+    assert "'width': ParameterValue(resize_width, value_type=int)" in source
+    assert "'height': ParameterValue(resize_height, value_type=int)" in source
+    assert "('image/camera_info', 'raw_camera_info')" in source
+    assert "('resize/camera_info', 'camera_info')" in source
+    assert "'output_camera_info_topic': 'raw_camera_info'" in source
+    assert "name='resize_width', default_value='640'" in source
+    assert "name='resize_height', default_value='480'" in source
+
+
 def test_dummy_mode_and_explicit_disable_stop_the_table_tag_detector(
     monkeypatch, tmp_path
 ):

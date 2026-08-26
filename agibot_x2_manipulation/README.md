@@ -141,6 +141,14 @@ and tilt checks pass (`maximum_box_tilt` is 20 degrees by default). Inspect
 `/detections`, `/box_pose`, `/box_markers`, and
 `/grasp_markers` before planning.
 
+The front-center table-tag launch drops compressed frames before decoding, then
+resizes each selected raw frame to 640x480 before rectification and detection.
+`image_proc::ResizeNode` scales the corresponding `CameraInfo`, which is used
+for both rectification and AprilTag pose estimation. Override `resize_width`
+and `resize_height` together when a different detection resolution is needed.
+This reduces rectification and detector work, but the JPEG decoder still
+decodes at the camera's native resolution.
+
 ## Camera and AprilTag workflows
 
 The launch creates an internal AprilTag node when `use_apriltag:=true`. Its
