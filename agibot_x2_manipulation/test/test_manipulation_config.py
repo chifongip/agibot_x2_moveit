@@ -98,6 +98,18 @@ def test_recovery_service_does_not_starve_joint_state_callbacks():
     assert "rclcpp::ExecutorOptions(), 2" in source
 
 
+def test_place_endpoint_rejection_reports_requested_pose():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "pick_place"
+        / "dual_arm_motion_planner.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "requested_place_pose(frame=" in source
+    assert "formatPose(requested_pose)" in source
+
+
 def test_filtered_output_topics_match_moveit_configuration():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]

@@ -47,6 +47,18 @@ geometry_msgs::msg::Pose toPoseMsg(const Eigen::Isometry3d & pose)
   return result;
 }
 
+std::string formatPose(const Eigen::Isometry3d & pose)
+{
+  Eigen::Quaterniond orientation(pose.linear());
+  orientation.normalize();
+  std::ostringstream stream;
+  stream << std::fixed << std::setprecision(6) << "[x=" << pose.translation().x() <<
+    ", y=" << pose.translation().y() << ", z=" << pose.translation().z() <<
+    ", qx=" << orientation.x() << ", qy=" << orientation.y() <<
+    ", qz=" << orientation.z() << ", qw=" << orientation.w() << "]";
+  return stream.str();
+}
+
 }  // namespace
 
 class DualArmMotionPlanner::Impl
@@ -1586,7 +1598,9 @@ public:
         return score_a < score_b || (score_a == score_b && a.order < b.order);
       });
     if (endpoints.empty()) {
-      error = "no place endpoint passed IK, bounds, and collision precheck";
+      error = "no place endpoint passed IK, bounds, and collision precheck; "
+        "requested_place_pose(frame=" + config_.planning_frame + ")=" +
+        formatPose(requested_pose);
       return false;
     }
 

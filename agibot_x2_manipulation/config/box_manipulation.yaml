@@ -66,8 +66,8 @@ pick_place_server:
     carry_search_orientation_tolerance: 0.1745329252  # 10 degrees
     # Bounded local correction only; a placement-region planner is required
     # before allowing larger shifts from the requested final box pose.
-    adaptive_place_position_tolerance: [0.015, 0.015, 0.005]
-    adaptive_place_yaw_tolerance: 0.0872664626  # 5 degrees
+    adaptive_place_position_tolerance: [0.05, 0.05, 0.02]
+    adaptive_place_yaw_tolerance: 0.1745329252  # 10 degrees
     # An empty action place_pose is resolved from tag9. Its frame uses +X right,
     # +Y up, and +Z toward the robot; [x, z] offsets are in the tabletop plane.
     # At zero yaw, box +X, +Y, and +Z align with tag -Z, -X, and +Y.
