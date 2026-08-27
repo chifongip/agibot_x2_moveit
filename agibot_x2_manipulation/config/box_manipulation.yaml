@@ -76,7 +76,7 @@ pick_place_server:
     table_tag_height_above_tabletop: 0.47
     table_tag_place_offset: [0.0, 0.15]
     table_tag_to_box_yaw: 0.0
-    maximum_table_tag_pose_age: 1.5
+    maximum_table_tag_pose_age: 2.5
     table_tag_detections_topic: /front_center_rectify/detections
     table_tag_id: 9
     table_tag_minimum_decision_margin: 20.0
@@ -84,14 +84,14 @@ pick_place_server:
     table_tag_maximum_position_spread: 0.005
     table_tag_maximum_angular_spread: 0.0523598776  # 3 degrees
     table_tag_maximum_sample_gap: 2.5  # s; reset after a detector outage
-    table_tag_stability_timeout: 6.0
+    table_tag_stability_timeout: 10.0
     maximum_joint_step: 0.35
     velocity_scaling: 0.10
     acceleration_scaling: 0.10
     # Simulation-tested pelvis-relative box pose used while the base navigates.
     # Recalibrate this pose before real-robot navigation.
     carry_box_pose: [0.35, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
-    recovery_position_tolerance: 0.04
+    recovery_position_tolerance: 0.1
     recovery_angular_tolerance: 0.1745329252  # 10 degrees
     # Permit a small measured encoder/model discrepancy before Place. This is
     # not a replacement for calibrated URDF position limits.
