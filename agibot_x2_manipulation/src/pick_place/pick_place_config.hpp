@@ -94,6 +94,7 @@ struct PickPlaceConfig
   Eigen::Isometry3d carry_pose{Eigen::Isometry3d::Identity()};
   double recovery_position_tolerance{0.0};
   double recovery_angular_tolerance{0.0};
+  double place_start_state_bounds_tolerance{0.0};
   std::string state_file;
   std::string initial_state;
   std::string post_place_named_target;

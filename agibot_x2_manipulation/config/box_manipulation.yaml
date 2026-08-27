@@ -93,6 +93,9 @@ pick_place_server:
     carry_box_pose: [0.35, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
     recovery_position_tolerance: 0.04
     recovery_angular_tolerance: 0.1745329252  # 10 degrees
+    # Permit a small measured encoder/model discrepancy before Place. This is
+    # not a replacement for calibrated URDF position limits.
+    place_start_state_bounds_tolerance: 0.02  # rad, about 1.15 degrees
     initial_state: empty
     post_place_named_target: zero
     reset_named_target: zero

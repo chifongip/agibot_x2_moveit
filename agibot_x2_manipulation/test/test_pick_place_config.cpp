@@ -44,6 +44,7 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_FALSE(config.allow_execution);
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, config.reset_state_timeout);
   EXPECT_DOUBLE_EQ(config.execution_joint_tolerance, config.reset_joint_tolerance);
+  EXPECT_DOUBLE_EQ(config.place_start_state_bounds_tolerance, 0.02);
   EXPECT_EQ(config.perception_source, Perception3dSource::NONE);
   EXPECT_FALSE(config.use_tag_derived_place_pose);
   EXPECT_EQ(config.table_tag_frame, "tag9");
@@ -61,6 +62,7 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   test_node->declare_parameter<std::string>("motion_planning_mode", "pose_to_pose");
   test_node->declare_parameter<double>("reset_state_timeout", 4.5);
   test_node->declare_parameter<double>("reset_joint_tolerance", 0.08);
+  test_node->declare_parameter<double>("place_start_state_bounds_tolerance", 0.05);
   test_node->declare_parameter<std::string>("perception_3d_source", "both");
   test_node->declare_parameter<bool>("use_tag_derived_place_pose", true);
   test_node->declare_parameter<std::vector<double>>("table_tag_place_offset", {0.1, -0.2});
@@ -69,6 +71,7 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::POSE_TO_POSE);
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, 4.5);
   EXPECT_DOUBLE_EQ(config.execution_joint_tolerance, 0.08);
+  EXPECT_DOUBLE_EQ(config.place_start_state_bounds_tolerance, 0.05);
   EXPECT_EQ(config.perception_source, Perception3dSource::BOTH);
   EXPECT_TRUE(config.use_tag_derived_place_pose);
   EXPECT_DOUBLE_EQ(config.table_tag_place_offset.x(), 0.1);
@@ -92,6 +95,10 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidModeAndUnsafeExecutionValues)
   const auto bad_execution = node("bad_execution");
   bad_execution->declare_parameter<int>("execution_settle_samples", 0);
   EXPECT_THROW(loadPickPlaceConfig(bad_execution), std::runtime_error);
+
+  const auto bad_bounds_tolerance = node("bad_bounds_tolerance");
+  bad_bounds_tolerance->declare_parameter<double>("place_start_state_bounds_tolerance", -0.01);
+  EXPECT_THROW(loadPickPlaceConfig(bad_bounds_tolerance), std::runtime_error);
 
   const auto bad_table_tag = node("bad_table_tag");
   bad_table_tag->declare_parameter<bool>("use_tag_derived_place_pose", true);

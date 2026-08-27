@@ -2080,8 +2080,16 @@ public:
     }
     current->update();
     const auto * dual_group = current->getJointModelGroup(move_group_.getName());
-    if (!current->satisfiesBounds(dual_group)) {
-      error = "current robot state violates bounds before Place";
+    if (!current->satisfiesBounds(
+        dual_group, config_.place_start_state_bounds_tolerance))
+    {
+      const auto [margin, joint] = current->getMinDistanceToPositionBounds(dual_group);
+      error = "current robot state exceeds position bounds before Place";
+      if (joint) {
+        error += " at " + joint->getName() + " (margin=" + std::to_string(margin) +
+          " rad, tolerance=" + std::to_string(config_.place_start_state_bounds_tolerance) +
+          " rad)";
+      }
       return false;
     }
     const Eigen::Isometry3d left_estimate =

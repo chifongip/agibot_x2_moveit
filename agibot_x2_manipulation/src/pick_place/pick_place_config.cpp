@@ -212,6 +212,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     node, "recovery_position_tolerance", 0.04);
   config.recovery_angular_tolerance = parameter<double>(
     node, "recovery_angular_tolerance", 0.1745329252);
+  config.place_start_state_bounds_tolerance = parameter<double>(
+    node, "place_start_state_bounds_tolerance", 0.02);
   config.state_file = parameter<std::string>(node, "state_file", defaultStateFile());
   config.initial_state = parameter<std::string>(node, "initial_state", "empty");
   config.post_place_named_target = parameter<std::string>(node, "post_place_named_target", "zero");
@@ -229,7 +231,9 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.arm_state_topic = parameter<std::string>(
     node, "arm_state_topic", "/aima/hal/joint/arm/state");
   if (config.reset_preemption_timeout <= 0.0 || config.reset_state_timeout <= 0.0 ||
-    config.reset_joint_tolerance < 0.0 || config.execution_settle_timeout <= 0.0 ||
+    config.reset_joint_tolerance < 0.0 ||
+    !std::isfinite(config.place_start_state_bounds_tolerance) ||
+    config.place_start_state_bounds_tolerance < 0.0 || config.execution_settle_timeout <= 0.0 ||
     config.execution_joint_tolerance < 0.0 || config.execution_velocity_tolerance < 0.0 ||
     config.execution_settle_samples < 1 || config.arm_state_topic.empty())
   {
