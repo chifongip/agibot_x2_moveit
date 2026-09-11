@@ -28,6 +28,20 @@ TEST(BoxGeometry, TopTagIsShiftedToBoxCenter)
   EXPECT_NEAR(box.translation().z(), 0.65, 1e-12);
 }
 
+TEST(BoxGeometry, TopTagAppliesTagFrameOffset)
+{
+  Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();
+  tag.translation() = Eigen::Vector3d(1.0, 2.0, 0.8);
+  tag.linear() = Eigen::AngleAxisd(kPi / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const Eigen::Vector3d offset(0.10, -0.20, 0.05);
+
+  const auto box = boxPoseFromTopTag(tag, {0.4, 0.2, 0.3}, 0.0, offset);
+
+  EXPECT_LT(
+    (box.translation() - tag * Eigen::Vector3d(0.10, -0.20, -0.10)).norm(),
+    1e-12);
+}
+
 TEST(BoxGeometry, VerticalTableTagDerivesAnUprightPlacePose)
 {
   Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();

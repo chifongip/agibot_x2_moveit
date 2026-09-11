@@ -85,8 +85,13 @@ option when the controller is inactive or unconfigured.
 `config/box_manipulation.yaml` defines the box dimensions as
 `[length_x, width_y, height_z]` in metres, in the aligned box frame. Its origin
 is the box center; +Z is up. The localizer converts the top-tag pose into that
-frame, and `tag_to_box_yaw` describes their fixed yaw offset. Keep the
-`box_dimensions` values for `box_localizer` and `pick_place_server` identical.
+frame. `tag_to_box_yaw` describes their fixed yaw offset.
+`tag_to_box_offset: [x, y, z]` adds a translation in tag-frame coordinates to
+the nominal centered-top-tag transform; its default `[0, 0, 0]` preserves the
+box-center position of half the box height below the tag. Use it to calibrate a
+tag that is not centered on the box top, or to apply a measured pickup-pose
+correction. Keep the `box_dimensions` values for `box_localizer` and
+`pick_place_server` identical.
 
 ## Table-tag placement calibration
 

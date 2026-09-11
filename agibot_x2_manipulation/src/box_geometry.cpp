@@ -105,12 +105,16 @@ void validate(const BoxDimensions & dimensions)
 
 Eigen::Isometry3d boxPoseFromTopTag(
   const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
-  double tag_to_box_yaw)
+  double tag_to_box_yaw, const Eigen::Vector3d & tag_to_box_offset)
 {
   validate(dimensions);
+  if (!std::isfinite(tag_to_box_yaw) || !tag_to_box_offset.allFinite()) {
+    throw std::invalid_argument("top-tag calibration values must be finite");
+  }
   Eigen::Isometry3d tag_to_box = Eigen::Isometry3d::Identity();
   tag_to_box.linear() = Eigen::AngleAxisd(tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-  tag_to_box.translation() = Eigen::Vector3d(0.0, 0.0, -dimensions.height / 2.0);
+  tag_to_box.translation() =
+    Eigen::Vector3d(0.0, 0.0, -dimensions.height / 2.0) + tag_to_box_offset;
   return tag_pose * tag_to_box;
 }
 

@@ -51,9 +51,11 @@ struct GraspCandidate
 };
 
 /// Convert a centered, aligned top-tag pose into the box-center pose.
+/// tag_to_box_offset is an additional translation in tag-frame coordinates.
 Eigen::Isometry3d boxPoseFromTopTag(
   const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
-  double tag_to_box_yaw = 0.0);
+  double tag_to_box_yaw = 0.0,
+  const Eigen::Vector3d & tag_to_box_offset = Eigen::Vector3d::Zero());
 
 /// Convert a vertically mounted table-tag pose into a box-center place pose.
 /// The tag frame uses +X right, +Y up, and +Z toward the robot.

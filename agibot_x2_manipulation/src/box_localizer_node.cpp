@@ -35,6 +35,16 @@ public:
     }
     dimensions_ = {dimensions[0], dimensions[1], dimensions[2]};
     tag_to_box_yaw_ = declare_parameter("tag_to_box_yaw", 0.0);
+    const auto tag_to_box_offset = declare_parameter<std::vector<double>>(
+      "tag_to_box_offset", {0.0, 0.0, 0.0});
+    if (tag_to_box_offset.size() != 3U) {
+      throw std::runtime_error("tag_to_box_offset must contain [x, y, z]");
+    }
+    tag_to_box_offset_ = Eigen::Vector3d(
+      tag_to_box_offset[0], tag_to_box_offset[1], tag_to_box_offset[2]);
+    if (!std::isfinite(tag_to_box_yaw_) || !tag_to_box_offset_.allFinite()) {
+      throw std::runtime_error("top-tag calibration values must be finite");
+    }
     stable_count_ = static_cast<std::size_t>(declare_parameter("stable_sample_count", 10));
     max_age_ = declare_parameter("maximum_pose_age", 0.25);
     max_position_spread_ = declare_parameter("maximum_position_spread", 0.005);
@@ -71,7 +81,8 @@ private:
         return;
       }
       const Eigen::Isometry3d tag_pose = tf2::transformToEigen(tf);
-      const Eigen::Isometry3d box_pose = boxPoseFromTopTag(tag_pose, dimensions_, tag_to_box_yaw_);
+      const Eigen::Isometry3d box_pose = boxPoseFromTopTag(
+        tag_pose, dimensions_, tag_to_box_yaw_, tag_to_box_offset_);
       const Eigen::Vector3d box_up = box_pose.linear() * Eigen::Vector3d::UnitZ();
       const double tilt = std::acos(std::clamp(box_up.dot(Eigen::Vector3d::UnitZ()), -1.0, 1.0));
       if (tilt > max_box_tilt_) {
@@ -159,6 +170,7 @@ private:
   int tag_id_;
   BoxDimensions dimensions_;
   double tag_to_box_yaw_;
+  Eigen::Vector3d tag_to_box_offset_;
   std::size_t stable_count_;
   double max_age_;
   double max_position_spread_;

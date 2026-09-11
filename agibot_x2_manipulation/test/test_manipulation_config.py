@@ -237,6 +237,14 @@ def test_recorded_failure_launch_allows_isolated_execution_by_default():
     assert '"manipulation_state_file": manipulation_state_file' in source
 
 
+def test_pickup_tag_offset_defaults_to_zero():
+    with CONFIG_FILE.open(encoding="utf-8") as stream:
+        document = yaml.safe_load(stream)
+
+    localizer = document["box_localizer"]["ros__parameters"]
+    assert localizer["tag_to_box_offset"] == [0.0, 0.0, 0.0]
+
+
 def test_coordinated_grasp_search_has_conservative_limits():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         document = yaml.safe_load(stream)

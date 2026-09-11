@@ -6,6 +6,8 @@ box_localizer:
     tag_id: 0
     box_dimensions: [0.15, 0.32, 0.32]  # length X, width Y, height Z [m]
     tag_to_box_yaw: 0.0
+    # Additional [x, y, z] correction from the centered top-tag model, in tag coordinates [m].
+    tag_to_box_offset: [0.0, 0.0, 0.0]
     stable_sample_count: 3
     maximum_pose_age: 1.5
     maximum_position_spread: 0.005
@@ -73,7 +75,7 @@ pick_place_server:
     # At zero yaw, box +X, +Y, and +Z align with tag -Z, -X, and +Y.
     use_tag_derived_place_pose: true
     table_tag_frame: tag9
-    table_tag_height_above_tabletop: 0.47
+    table_tag_height_above_tabletop: 0.55
     table_tag_place_offset: [0.0, 0.15]
     table_tag_to_box_yaw: 0.0
     maximum_table_tag_pose_age: 2.5
