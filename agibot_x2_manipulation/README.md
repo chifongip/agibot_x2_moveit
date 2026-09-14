@@ -64,6 +64,12 @@ These defaults leave scheduling headroom for the independent 100 ms RoboJuDo
 and ros2_control state watchdogs. Enable RViz or request a higher controller
 rate only after monitoring the joint and torso-IMU streams on the target host.
 
+`initial_arm_command_mode:=measured` keeps the measured pose at the first
+dual-arm-controller claim. To issue a temporary all-zero arm startup target to
+the low-level controller, explicitly pass `initial_arm_command_mode:=zero`.
+This is not MoveIt planning; it applies at the controller's first joint claim,
+then later MoveIt arm targets again follow the active controller.
+
 For a navigation stack that already owns shared state, start
 `x2_bringup state_publisher.launch.py` once and launch manipulation with
 `start_state_bringup:=false`. This makes the manipulation stack consume the

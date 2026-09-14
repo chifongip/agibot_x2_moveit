@@ -70,6 +70,8 @@ def test_launch_defaults_preserve_state_delivery_headroom():
 
     assert 'DeclareLaunchArgument("use_rviz", default_value="false")' in source
     assert '"ros2_control_update_rate",\n                default_value="100"' in source
+    assert '"initial_arm_command_mode",\n                default_value="measured"' in source
+    assert '"initial_arm_command_mode": initial_arm_command_mode' in source
 
 
 def test_launch_can_consume_existing_shared_state():

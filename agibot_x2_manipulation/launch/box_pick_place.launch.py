@@ -78,6 +78,7 @@ def create_apriltag_node(
 
 def generate_launch_description():
     command_transport = LaunchConfiguration("command_transport")
+    initial_arm_command_mode = LaunchConfiguration("initial_arm_command_mode")
     zmq_endpoint = LaunchConfiguration("zmq_endpoint")
     leg_state_topic = LaunchConfiguration("leg_state_topic")
     waist_state_topic = LaunchConfiguration("waist_state_topic")
@@ -140,6 +141,7 @@ def generate_launch_description():
             mappings={
                 "use_fake_hardware": "false",
                 "command_transport": command_transport,
+                "initial_arm_command_mode": initial_arm_command_mode,
                 "zmq_endpoint": zmq_endpoint,
                 "leg_state_topic": leg_state_topic,
                 "waist_state_topic": waist_state_topic,
@@ -154,6 +156,15 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "command_transport", default_value="zmq", choices=["ros_topic", "zmq"]
+            ),
+            DeclareLaunchArgument(
+                "initial_arm_command_mode",
+                default_value="measured",
+                choices=["measured", "zero"],
+                description=(
+                    "Startup arm target. Zero initializes the arm controller's first "
+                    "claim to zero, then resumes controller trajectories."
+                ),
             ),
             DeclareLaunchArgument("zmq_endpoint", default_value="tcp://*:8559"),
             DeclareLaunchArgument(
@@ -340,6 +351,7 @@ def generate_launch_description():
                 ),
                 launch_arguments={
                     "command_transport": command_transport,
+                    "initial_arm_command_mode": initial_arm_command_mode,
                     "zmq_endpoint": zmq_endpoint,
                     "leg_state_topic": leg_state_topic,
                     "waist_state_topic": waist_state_topic,

@@ -57,6 +57,13 @@ also pass `spawn_dual_arm_controller:=false` to avoid configuring it a second
 time. Leave this argument at its default when the controller is inactive or
 unconfigured.
 
+The arm-controller handoff defaults to `initial_arm_command_mode:=measured`,
+which holds the measured arm pose. To supply a zero-radian command for all
+fourteen arm joints, explicitly pass `initial_arm_command_mode:=zero`. This is
+a low-level startup command at the controller's first joint claim, not a
+collision-checked MoveIt trajectory; later arm targets again follow the active
+controller.
+
 `command_transport` is selected at launch and must be one of the following:
 
 | Value | Command destination | Use case |
