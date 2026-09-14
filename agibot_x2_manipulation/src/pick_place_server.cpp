@@ -10,6 +10,7 @@
 #include "pick_place/planning_scene_manager.hpp"
 #include "pick_place/trajectory_executor.hpp"
 
+#include <agibot_x2_manipulation_msgs/action/move_carry_pose.hpp>
 #include <agibot_x2_manipulation_msgs/action/pick.hpp>
 #include <agibot_x2_manipulation_msgs/action/pick_place.hpp>
 #include <agibot_x2_manipulation_msgs/action/place.hpp>
@@ -25,6 +26,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -45,6 +47,7 @@ namespace
 using PickPlace = agibot_x2_manipulation_msgs::action::PickPlace;
 using Pick = agibot_x2_manipulation_msgs::action::Pick;
 using Place = agibot_x2_manipulation_msgs::action::Place;
+using MoveCarryPose = agibot_x2_manipulation_msgs::action::MoveCarryPose;
 using ResetManipulation = agibot_x2_manipulation_msgs::action::ResetManipulation;
 using ManipulationState = agibot_x2_manipulation_msgs::msg::ManipulationState;
 using RecoverManipulationState =
@@ -52,6 +55,7 @@ using RecoverManipulationState =
 using PickGoalHandle = rclcpp_action::ServerGoalHandle<Pick>;
 using PlaceGoalHandle = rclcpp_action::ServerGoalHandle<Place>;
 using PickPlaceGoalHandle = rclcpp_action::ServerGoalHandle<PickPlace>;
+using MoveCarryPoseGoalHandle = rclcpp_action::ServerGoalHandle<MoveCarryPose>;
 using ResetGoalHandle = rclcpp_action::ServerGoalHandle<ResetManipulation>;
 
 constexpr uint16_t kSuccess = 0;
@@ -229,6 +233,13 @@ public:
         std::placeholders::_2),
       std::bind(&PickPlaceServer::onPickPlaceCancel, this, std::placeholders::_1),
       std::bind(&PickPlaceServer::onPickPlaceAccepted, this, std::placeholders::_1));
+    move_carry_pose_action_server_ = rclcpp_action::create_server<MoveCarryPose>(
+      node_, "move_carry_pose",
+      std::bind(
+        &PickPlaceServer::onMoveCarryPoseGoal, this, std::placeholders::_1,
+        std::placeholders::_2),
+      std::bind(&PickPlaceServer::onMoveCarryPoseCancel, this, std::placeholders::_1),
+      std::bind(&PickPlaceServer::onMoveCarryPoseAccepted, this, std::placeholders::_1));
     reset_action_server_ = rclcpp_action::create_server<ResetManipulation>(
       node_, "reset_manipulation",
       std::bind(&PickPlaceServer::onResetGoal, this, std::placeholders::_1, std::placeholders::_2),
@@ -312,6 +323,27 @@ private:
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
   }
 
+  rclcpp_action::GoalResponse onMoveCarryPoseGoal(
+    const rclcpp_action::GoalUUID &, std::shared_ptr<const MoveCarryPose::Goal> goal)
+  {
+    if (goal->target_pose != MoveCarryPose::Goal::CARRY_A &&
+      goal->target_pose != MoveCarryPose::Goal::CARRY_B)
+    {
+      RCLCPP_ERROR(node_->get_logger(), "Rejecting MoveCarryPose: invalid target_pose");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    if (!goal->plan_only && !config_.allow_execution) {
+      RCLCPP_ERROR(
+        node_->get_logger(), "Rejecting MoveCarryPose execution: allow_execution is false");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    if (!reserveGoal()) {
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    trajectory_executor_.resetCancellation();
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+  }
+
   rclcpp_action::GoalResponse onResetGoal(
     const rclcpp_action::GoalUUID &, std::shared_ptr<const ResetManipulation::Goal> goal)
   {
@@ -352,6 +384,12 @@ private:
     return cancelGoal(goal);
   }
 
+  rclcpp_action::CancelResponse onMoveCarryPoseCancel(
+    const std::shared_ptr<MoveCarryPoseGoalHandle> & goal)
+  {
+    return cancelGoal(goal);
+  }
+
   rclcpp_action::CancelResponse onResetCancel(const std::shared_ptr<ResetGoalHandle> & goal)
   {
     const auto response = cancelGoal(goal);
@@ -372,6 +410,11 @@ private:
   void onPickPlaceAccepted(const std::shared_ptr<PickPlaceGoalHandle> goal)
   {
     std::thread([this, goal]() {executePickPlace(goal);}).detach();
+  }
+
+  void onMoveCarryPoseAccepted(const std::shared_ptr<MoveCarryPoseGoalHandle> goal)
+  {
+    std::thread([this, goal]() {executeMoveCarryPose(goal);}).detach();
   }
 
   void onResetAccepted(const std::shared_ptr<ResetGoalHandle> goal)
@@ -627,6 +670,163 @@ private:
       result.achieved_pose.header.frame_id = config_.planning_frame;
     }
     return result;
+  }
+
+  const char * carryPoseName(uint8_t target_pose) const
+  {
+    return target_pose == MoveCarryPose::Goal::CARRY_A ? "A" : "B";
+  }
+
+  const Eigen::Isometry3d & carryPose(uint8_t target_pose) const
+  {
+    return target_pose == MoveCarryPose::Goal::CARRY_A ?
+           config_.carry_pose : config_.carry_pose_b;
+  }
+
+  bool planCarryTransition(
+    const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
+    const Eigen::Isometry3d & target_pose, moveit_msgs::msg::RobotTrajectory & trajectory,
+    moveit::core::RobotState & end_state, std::string & error, const CancelFunction & canceled)
+  {
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(config_.carry_search_timeout));
+    const std::array<CarryRoute, 7> routes{
+      CarryRoute::DIRECT, CarryRoute::LIFT_THEN_XY, CarryRoute::LOW_XY_THEN_LIFT,
+      CarryRoute::ROTATE_BEFORE_TRANSLATION, CarryRoute::ROTATE_AFTER_TRANSLATION,
+      CarryRoute::DOGLEG_NEGATIVE_Y, CarryRoute::DOGLEG_POSITIVE_Y};
+    std::string last_error = "no carry route evaluated";
+    for (const auto route : routes) {
+      if (canceled()) {
+        error = "carry transition planning canceled";
+        return false;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) {
+        error = "carry transition planning timed out; last failure: " + last_error;
+        return false;
+      }
+      const auto route_deadline = std::min(
+        deadline, now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(3.25)));
+      moveit_msgs::msg::RobotTrajectory candidate_trajectory;
+      moveit::core::RobotState candidate_end(start);
+      std::string candidate_error;
+      try {
+        // The box is already attached in the planning scene while HOLDING, so
+        // this is an execution-equivalent collision check even for plan_only.
+        if (!motion_planner_.buildCarryRoute(
+            start, from_pose, target_pose, route, false,
+            held_box_to_left_contact_, held_box_to_right_contact_,
+            candidate_trajectory, candidate_end, candidate_error, route_deadline, canceled))
+        {
+          last_error = candidate_error;
+          continue;
+        }
+      } catch (const std::exception & exception) {
+        last_error = exception.what();
+        continue;
+      }
+      trajectory = std::move(candidate_trajectory);
+      end_state = std::move(candidate_end);
+      RCLCPP_INFO(
+        node_->get_logger(), "Selected carry transition route %s",
+        closedChainRouteName(route));
+      return true;
+    }
+    error = "no feasible carry transition route; last failure: " + last_error;
+    return false;
+  }
+
+  TaskOutcome runMoveCarryPose(
+    uint8_t target, bool plan_only, const FeedbackFunction & feedback,
+    const CancelFunction & canceled)
+  {
+    if (canceled()) {
+      return outcome(false, kSafetyAbort, "carry transition canceled before validation", held_pose_);
+    }
+    if (target != MoveCarryPose::Goal::CARRY_A && target != MoveCarryPose::Goal::CARRY_B) {
+      return outcome(false, kInvalidGoal, "target_pose must be CARRY_A or CARRY_B", held_pose_);
+    }
+    if (state_.load() != ManipulationState::HOLDING) {
+      return outcome(false, kInvalidState, "MoveCarryPose requires a held object", held_pose_);
+    }
+
+    std::string error;
+    if (!motion_planner_.validateHeldClosure(error)) {
+      setState(ManipulationState::RECOVERY_REQUIRED, error);
+      return outcome(false, kRecoveryRequired, error, held_pose_);
+    }
+    Eigen::Isometry3d from_pose;
+    try {
+      from_pose = toEigen(held_pose_.pose);
+    } catch (const std::exception & exception) {
+      return outcome(false, kRecoveryRequired, exception.what(), held_pose_);
+    }
+    const Eigen::Isometry3d & target_pose = carryPose(target);
+    const Eigen::Quaterniond from_rotation(from_pose.linear());
+    const Eigen::Quaterniond target_rotation(target_pose.linear());
+    const double angular_error = 2.0 * std::acos(
+      std::clamp(std::abs(from_rotation.dot(target_rotation)), 0.0, 1.0));
+    const auto target_message = stampedPose(target_pose);
+    if ((from_pose.translation() - target_pose.translation()).norm() < 1e-4 &&
+      angular_error < 1e-3)
+    {
+      feedback("holding_carry_" + std::string(carryPoseName(target)), 1.0F, target_message);
+      return outcome(
+        true, kSuccess, "box is already at carry pose " + std::string(carryPoseName(target)),
+        target_message);
+    }
+    if (!perception_.refresh(error)) {
+      return outcome(false, kSafetyAbort, error, held_pose_);
+    }
+    if (canceled()) {
+      return outcome(false, kSafetyAbort, "carry transition canceled before planning", held_pose_);
+    }
+    feedback("planning_carry_" + std::string(carryPoseName(target)), 0.15F, held_pose_);
+    auto current = move_group_.getCurrentState(2.0);
+    if (!current) {
+      return outcome(false, kSafetyAbort, "current robot state unavailable", held_pose_);
+    }
+    moveit_msgs::msg::RobotTrajectory trajectory;
+    moveit::core::RobotState end_state(*current);
+    if (!planCarryTransition(
+        *current, from_pose, target_pose, trajectory, end_state, error, canceled))
+    {
+      return outcome(
+        false, kPlanningFailed, "carry transition planning failed: " + error, held_pose_);
+    }
+    if (canceled()) {
+      return outcome(false, kSafetyAbort, "carry transition canceled after planning", held_pose_);
+    }
+    if (plan_only) {
+      return outcome(
+        true, kSuccess, "carry transition to pose " + std::string(carryPoseName(target)) +
+        " is feasible", target_message);
+    }
+
+    feedback("moving_to_carry_" + std::string(carryPoseName(target)), 0.50F, held_pose_);
+    if (!trajectory_executor_.execute(trajectory, canceled)) {
+      motion_planner_.updateHeldPoseFromRobot();
+      setState(ManipulationState::RECOVERY_REQUIRED, "carry transition execution failed");
+      return outcome(
+        false, kRecoveryRequired,
+        trajectory_executor_.error("carry transition execution failed") +
+        "; object remains held", held_pose_);
+    }
+    if (canceled()) {
+      motion_planner_.updateHeldPoseFromRobot();
+      setState(ManipulationState::RECOVERY_REQUIRED, "carry transition canceled after execution");
+      return outcome(
+        false, kRecoveryRequired, "carry transition canceled; object remains held", held_pose_);
+    }
+    held_pose_ = target_message;
+    setState(
+      ManipulationState::HOLDING,
+      "box moved to carry pose " + std::string(carryPoseName(target)));
+    feedback("holding_carry_" + std::string(carryPoseName(target)), 1.0F, held_pose_);
+    return outcome(
+      true, kSuccess, "box moved to carry pose " + std::string(carryPoseName(target)), held_pose_);
   }
 
 
@@ -1119,7 +1319,10 @@ private:
     result->error_code = task.code;
     result->message = task.message;
     result->achieved_pose = task.achieved_pose;
-    if constexpr (std::is_same_v<ResultT, Pick::Result>|| std::is_same_v<ResultT, Place::Result>) {
+    if constexpr (
+      std::is_same_v<ResultT, Pick::Result> || std::is_same_v<ResultT, Place::Result> ||
+      std::is_same_v<ResultT, MoveCarryPose::Result>)
+    {
       result->object_held = task.object_held;
     }
     if (goal->is_canceling()) {
@@ -1365,6 +1568,35 @@ private:
     finishGoal(goal, task, std::make_shared<Place::Result>());
   }
 
+  void executeMoveCarryPose(const std::shared_ptr<MoveCarryPoseGoalHandle> & goal)
+  {
+    ScopeExit release([this]() {releaseOperation();});
+    const FeedbackFunction feedback = [goal](
+      const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
+        auto message = std::make_shared<MoveCarryPose::Feedback>();
+        message->stage = stage;
+        message->progress = progress;
+        message->box_pose = pose;
+        goal->publish_feedback(message);
+      };
+    TaskOutcome task;
+    try {
+      task = runMoveCarryPose(
+        goal->get_goal()->target_pose, goal->get_goal()->plan_only, feedback,
+        [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested();});
+    } catch (const std::exception & exception) {
+      move_group_.stop();
+      if (!goal->get_goal()->plan_only) {
+        setState(ManipulationState::RECOVERY_REQUIRED, "unexpected carry transition exception");
+      }
+      task = outcome(
+        false, goal->get_goal()->plan_only ? kSafetyAbort : kRecoveryRequired,
+        "MoveCarryPose failed with exception: " + std::string(exception.what()), held_pose_);
+    }
+    release.run();
+    finishGoal(goal, task, std::make_shared<MoveCarryPose::Result>());
+  }
+
   void executePickPlace(const std::shared_ptr<PickPlaceGoalHandle> & goal)
   {
     ScopeExit release([this]() {releaseOperation();});
@@ -1445,6 +1677,7 @@ private:
   rclcpp_action::Server<Pick>::SharedPtr pick_action_server_;
   rclcpp_action::Server<Place>::SharedPtr place_action_server_;
   rclcpp_action::Server<PickPlace>::SharedPtr pick_place_action_server_;
+  rclcpp_action::Server<MoveCarryPose>::SharedPtr move_carry_pose_action_server_;
   rclcpp_action::Server<ResetManipulation>::SharedPtr reset_action_server_;
   rclcpp::CallbackGroup::SharedPtr recovery_callback_group_;
   rclcpp::Service<RecoverManipulationState>::SharedPtr recovery_service_;

@@ -36,6 +36,12 @@ PLANNING_SCENE_MANAGER_FILE = (
     / "pick_place"
     / "planning_scene_manager.cpp"
 )
+MOVE_CARRY_POSE_ACTION_FILE = (
+    Path(__file__).parents[2]
+    / "agibot_x2_manipulation_msgs"
+    / "action"
+    / "MoveCarryPose.action"
+)
 
 
 def load_launch_module():
@@ -56,6 +62,18 @@ def test_launch_controls_perception_source_selection():
     assert '"arm_state_topic": arm_state_topic' in LAUNCH_FILE.read_text(
         encoding="utf-8"
     )
+
+
+def test_carry_pose_configuration_and_manual_transition_action_are_available():
+    with CONFIG_FILE.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
+
+    assert len(config["carry_box_pose_a"]) == 7
+    assert len(config["carry_box_pose_b"]) == 7
+    action = MOVE_CARRY_POSE_ACTION_FILE.read_text(encoding="utf-8")
+    assert "uint8 CARRY_A=0" in action
+    assert "uint8 CARRY_B=1" in action
+    assert "bool plan_only" in action
 
 
 def test_local_scene_monitor_skips_octomap_without_3d_perception():

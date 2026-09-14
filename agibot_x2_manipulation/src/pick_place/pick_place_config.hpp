@@ -93,7 +93,10 @@ struct PickPlaceConfig
   bool allow_execution{false};
   double velocity_scaling{0.0};
   double acceleration_scaling{0.0};
+  // Carry A is kept in carry_pose because existing adaptive-pick and recovery
+  // code use it as their nominal pose.
   Eigen::Isometry3d carry_pose{Eigen::Isometry3d::Identity()};
+  Eigen::Isometry3d carry_pose_b{Eigen::Isometry3d::Identity()};
   double recovery_position_tolerance{0.0};
   double recovery_angular_tolerance{0.0};
   double place_start_state_bounds_tolerance{0.0};

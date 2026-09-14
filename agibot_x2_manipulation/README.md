@@ -10,7 +10,8 @@ calibrate them before hardware execution.
 ## Pick/place server
 
 `pick_place_server` is the manipulation workflow node. It owns the
-`/pick_box`, `/place_box`, `/pick_place`, and `/reset_manipulation` actions,
+`/pick_box`, `/place_box`, `/pick_place`, `/move_carry_pose`, and
+`/reset_manipulation` actions,
 and the `/recover_manipulation_state` service. It validates the latest box
 pose, maintains the collision object and attachment state, plans synchronized
 dual-arm motion, and verifies direct HAL feedback after execution. It persists
@@ -360,8 +361,11 @@ the robot and planning-host clocks, and use `plan_only` first.
 Use separate actions when the robot must navigate while holding the box:
 
 1. Send `/pick_box`; wait for `success: true` and `object_held: true`.
-2. Confirm `/manipulation_state` reports `HOLDING` (`state: 2`), then navigate.
-3. Once navigation and TF are stable, send `/place_box` with the desired box
+2. Confirm `/manipulation_state` reports `HOLDING` (`state: 2`). To test a
+   configured Carry B pose, send `/move_carry_pose` with `target_pose: 1`.
+3. Navigate or undock outside this package.
+4. Once navigation and TF are stable, send `/move_carry_pose` with
+   `target_pose: 0`, then send `/place_box` with the desired box
    center pose. A `map`-frame pose is resolved at Place start.
 
 ```bash
@@ -372,6 +376,23 @@ ros2 action send_goal /place_box agibot_x2_manipulation_msgs/action/Place \
   "{plan_only: true}" \
   --feedback
 ```
+
+`/move_carry_pose` uses `MoveCarryPose`: `target_pose: 0` is Carry A and
+`target_pose: 1` is Carry B. It is accepted only while the server is
+`HOLDING`; it retains the current attached-box contact transforms and plans an
+exact collision-checked transition from the measured box pose. A plan-only
+goal does not change the held pose. For a simulated or otherwise verified held
+object, test Carry B before executing it:
+
+```bash
+ros2 action send_goal /move_carry_pose \
+  agibot_x2_manipulation_msgs/action/MoveCarryPose \
+  "{target_pose: 1, plan_only: true}" --feedback
+```
+
+An interrupted executed carry transition leaves the object attached but marks
+the server `RECOVERY_REQUIRED`; use the existing recovery/reset process before
+sending another manipulation action. The action never commands the mobile base.
 
 `/pick_place` (`PickPlace`) remains available for the immediate Pick-then-Place
 workflow. After a successful Place, the arms retreat and return to
@@ -422,14 +443,22 @@ If a waypoint fails, the server reports its segment, index, box position, and
 whether IK, bounds, joint continuity, or collision was responsible, then tries
 the next grasp candidate.
 
-`/pick_box` searches for an achievable carry pose around `carry_box_pose` and
-tests direct, translate-then-rotate, and rotate-then-translate routes. The
+`/pick_box` searches for an achievable Carry A pose around `carry_box_pose_a`
+and tests direct, translate-then-rotate, and rotate-then-translate routes. The
 default pelvis-relative envelope is X +/-5 cm, Y +/-3 cm, Z -12/+3 cm, and
 orientation within 10 degrees. `/place_box` and plan-only `/pick_place` may
 adjust the requested place by X/Y +/-15 mm, Z +/-5 mm, and yaw +/-5 degrees.
 The action's `achieved_pose` reports the selected adaptive pose. Treat these as
 calibration/error allowances, not permission to bypass workspace or collision
 limits.
+
+`carry_box_pose_b` is an exact operator-selected target used only by
+`/move_carry_pose`; it does not receive the adaptive Carry A correction. Both
+poses are `[x, y, z, qx, qy, qz, qw]` in `base_link` (pelvis-relative). The
+default Carry B equals Carry A so upgrading does not introduce a new motion.
+Calibrate Carry B before enabling execution. Older configurations may retain
+`carry_box_pose`; it remains a fallback for Carry A when `carry_box_pose_a` is
+absent.
 
 IK candidates are normalized and revalidated against the `dual_arm` bounds and
 planning scene before assignment. Only the 14 planning-group values are sent

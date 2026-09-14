@@ -213,12 +213,18 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.allow_execution = parameter<bool>(node, "allow_execution", false);
   config.velocity_scaling = parameter<double>(node, "velocity_scaling", 0.10);
   config.acceleration_scaling = parameter<double>(node, "acceleration_scaling", 0.10);
-  const auto carry_pose = parameter<std::vector<double>>(
+  const auto legacy_carry_pose = parameter<std::vector<double>>(
     node, "carry_box_pose", {0.35, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0});
-  if (carry_pose.size() != 7U) {
-    throw std::runtime_error("carry_box_pose must contain [x, y, z, qx, qy, qz, qw]");
+  const auto carry_pose_a = parameter<std::vector<double>>(
+    node, "carry_box_pose_a", legacy_carry_pose);
+  const auto carry_pose_b = parameter<std::vector<double>>(
+    node, "carry_box_pose_b", carry_pose_a);
+  if (carry_pose_a.size() != 7U || carry_pose_b.size() != 7U) {
+    throw std::runtime_error(
+            "carry_box_pose_a and carry_box_pose_b must contain [x, y, z, qx, qy, qz, qw]");
   }
-  config.carry_pose = poseFromParameter(carry_pose);
+  config.carry_pose = poseFromParameter(carry_pose_a);
+  config.carry_pose_b = poseFromParameter(carry_pose_b);
   config.recovery_position_tolerance = parameter<double>(
     node, "recovery_position_tolerance", 0.04);
   config.recovery_angular_tolerance = parameter<double>(
