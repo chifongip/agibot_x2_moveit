@@ -148,6 +148,55 @@ std::vector<ClosedChainWaypoint> makePlaceRouteWaypoints(
   return controls;
 }
 
+std::vector<ClosedChainWaypoint> makeCarryTransitionWaypoints(
+  const Eigen::Isometry3d & from, const Eigen::Isometry3d & target,
+  double lift_height, double dogleg_y, ClosedChainRoute route)
+{
+  if (lift_height < 0.0 || dogleg_y < 0.0) {
+    throw std::invalid_argument("carry-transition route distances must be nonnegative");
+  }
+  std::vector<ClosedChainWaypoint> controls{{from, false, "carry_start"}};
+  const auto add = [&controls](const Eigen::Isometry3d & pose, const char * segment) {
+      controls.push_back({pose, true, segment});
+    };
+  if (route == ClosedChainRoute::DIRECT) {
+    add(target, "carry_direct");
+  } else if (route == ClosedChainRoute::LOW_XY_THEN_LIFT) {
+    Eigen::Isometry3d low = target;
+    low.translation().z() = from.translation().z();
+    low.linear() = from.linear();
+    add(low, "carry_low_xy_translation");
+    add(target, "carry_lift_at_target");
+  } else if (route == ClosedChainRoute::LIFT_THEN_XY) {
+    Eigen::Isometry3d lift = from;
+    lift.translation().z() += lift_height;
+    Eigen::Isometry3d high_target = target;
+    high_target.translation().z() = std::max(
+      lift.translation().z(), target.translation().z() + lift_height);
+    high_target.linear() = lift.linear();
+    add(lift, "carry_lift_before_translation");
+    add(high_target, "carry_high_xy_translation");
+    add(target, "carry_descent_rotation");
+  } else if (route == ClosedChainRoute::ROTATE_BEFORE_TRANSLATION) {
+    Eigen::Isometry3d rotated = from;
+    rotated.linear() = target.linear();
+    add(rotated, "carry_rotate_before_translation");
+    add(target, "carry_translation");
+  } else if (route == ClosedChainRoute::ROTATE_AFTER_TRANSLATION) {
+    Eigen::Isometry3d translated = target;
+    translated.linear() = from.linear();
+    add(translated, "carry_translation");
+    add(target, "carry_rotate_after_translation");
+  } else {
+    Eigen::Isometry3d dogleg = interpolate(from, target, 0.5);
+    dogleg.translation().y() +=
+      route == ClosedChainRoute::DOGLEG_NEGATIVE_Y ? -dogleg_y : dogleg_y;
+    add(dogleg, "carry_dogleg");
+    add(target, "carry_dogleg_target");
+  }
+  return controls;
+}
+
 ClosedChainPathPlanner::ClosedChainPathPlanner(ClosedChainPlannerConfig config)
 : config_(std::move(config))
 {

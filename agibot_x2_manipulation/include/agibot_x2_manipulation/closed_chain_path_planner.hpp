@@ -74,6 +74,10 @@ std::vector<ClosedChainWaypoint> makePlaceRouteWaypoints(
   const Eigen::Isometry3d & from, const Eigen::Isometry3d & place,
   double lift_height, double dogleg_y, bool from_pick, ClosedChainRoute route);
 
+std::vector<ClosedChainWaypoint> makeCarryTransitionWaypoints(
+  const Eigen::Isometry3d & from, const Eigen::Isometry3d & target,
+  double lift_height, double dogleg_y, ClosedChainRoute route);
+
 struct ClosedChainPath
 {
   std::vector<ClosedChainSolution> states;

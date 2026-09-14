@@ -54,7 +54,7 @@ TEST_F(ManipulationStateStoreTest, MissingAndLegacyStatesRemainCompatible)
   EXPECT_FALSE(holding.held_object.valid);
 }
 
-TEST_F(ManipulationStateStoreTest, VersionTwoHoldingGeometryRoundTrips)
+TEST_F(ManipulationStateStoreTest, VersionThreeHoldingGeometryAndCarryPosesRoundTrip)
 {
   ManipulationStateStore store(path_.string());
   PersistedHeldObject expected;
@@ -63,6 +63,12 @@ TEST_F(ManipulationStateStoreTest, VersionTwoHoldingGeometryRoundTrips)
   expected.pose.linear() = Eigen::AngleAxisd(0.3, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   expected.box_to_left_contact.translation() = Eigen::Vector3d(0.0, 0.16, 0.0);
   expected.box_to_right_contact.translation() = Eigen::Vector3d(0.0, -0.16, 0.0);
+  expected.carry_pose_a_valid = true;
+  expected.carry_pose_a.translation() = Eigen::Vector3d(0.34, -0.01, 0.42);
+  expected.carry_pose_b_valid = true;
+  expected.carry_pose_b.translation() = Eigen::Vector3d(0.29, 0.04, 0.40);
+  expected.carry_pose_b.linear() =
+    Eigen::AngleAxisd(-0.2, Eigen::Vector3d::UnitZ()).toRotationMatrix();
 
   store.write(PersistedManipulationState::HOLDING, expected);
   const auto actual = store.read();
@@ -76,6 +82,29 @@ TEST_F(ManipulationStateStoreTest, VersionTwoHoldingGeometryRoundTrips)
   EXPECT_TRUE(
     actual.held_object.box_to_right_contact.matrix().isApprox(
       expected.box_to_right_contact.matrix(), 1e-12));
+  ASSERT_TRUE(actual.held_object.carry_pose_a_valid);
+  EXPECT_TRUE(
+    actual.held_object.carry_pose_a.matrix().isApprox(expected.carry_pose_a.matrix(), 1e-12));
+  ASSERT_TRUE(actual.held_object.carry_pose_b_valid);
+  EXPECT_TRUE(
+    actual.held_object.carry_pose_b.matrix().isApprox(expected.carry_pose_b.matrix(), 1e-12));
+}
+
+TEST_F(ManipulationStateStoreTest, VersionTwoHoldingGeometryRemainsReadable)
+{
+  {
+    std::ofstream output(path_);
+    output << "VERSION 2\nSTATE HOLDING\n"
+           << "POSE 0.35 -0.02 0.41 0 0 0 1\n"
+           << "LEFT_CONTACT 0 0.16 0 0 0 0 1\n"
+           << "RIGHT_CONTACT 0 -0.16 0 0 0 0 1\n";
+  }
+  const auto record = ManipulationStateStore(path_.string()).read();
+
+  ASSERT_EQ(record.state, PersistedManipulationState::HOLDING);
+  EXPECT_TRUE(record.held_object.valid);
+  EXPECT_FALSE(record.held_object.carry_pose_a_valid);
+  EXPECT_FALSE(record.held_object.carry_pose_b_valid);
 }
 
 TEST_F(ManipulationStateStoreTest, IncompleteVersionTwoGeometryIsRejected)

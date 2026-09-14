@@ -380,9 +380,14 @@ ros2 action send_goal /place_box agibot_x2_manipulation_msgs/action/Place \
 `/move_carry_pose` uses `MoveCarryPose`: `target_pose: 0` is Carry A and
 `target_pose: 1` is Carry B. It is accepted only while the server is
 `HOLDING`; it retains the current attached-box contact transforms and plans an
-exact collision-checked transition from the measured box pose. A plan-only
-goal does not change the held pose. For a simulated or otherwise verified held
-object, test Carry B before executing it:
+adaptive collision-checked transition from the measured box pose. It first
+uses a previously selected endpoint for that carry pose (for example Carry A′
+selected during Pick), then searches the configured local carry envelope around
+the nominal pose when that endpoint is unavailable. A successful executed move
+remembers its selected A′/B′ endpoint, so the reverse move returns to that same
+endpoint. A plan-only goal does not change the held pose or remembered
+endpoints. For a simulated or otherwise verified held object, test Carry B
+before executing it:
 
 ```bash
 ros2 action send_goal /move_carry_pose \
@@ -393,6 +398,9 @@ ros2 action send_goal /move_carry_pose \
 An interrupted executed carry transition leaves the object attached but marks
 the server `RECOVERY_REQUIRED`; use the existing recovery/reset process before
 sending another manipulation action. The action never commands the mobile base.
+For each adaptive endpoint it tries direct and rotation/translation-only
+transition routes before using a lift route, so Carry A/B transitions do not
+repeat Pick's mandatory lift.
 
 `/pick_place` (`PickPlace`) remains available for the immediate Pick-then-Place
 workflow. After a successful Place, the arms retreat and return to
@@ -452,13 +460,15 @@ The action's `achieved_pose` reports the selected adaptive pose. Treat these as
 calibration/error allowances, not permission to bypass workspace or collision
 limits.
 
-`carry_box_pose_b` is an exact operator-selected target used only by
-`/move_carry_pose`; it does not receive the adaptive Carry A correction. Both
-poses are `[x, y, z, qx, qy, qz, qw]` in `base_link` (pelvis-relative). The
-default Carry B equals Carry A so upgrading does not introduce a new motion.
-Calibrate Carry B before enabling execution. Older configurations may retain
-`carry_box_pose`; it remains a fallback for Carry A when `carry_box_pose_a` is
-absent.
+`carry_box_pose_a` and `carry_box_pose_b` are nominal operator-selected
+targets used by `/move_carry_pose`. Both receive the bounded adaptive correction
+used for Carry A during Pick. A selected endpoint, such as A′ when nominal A is
+unreachable, is remembered for the reverse transition and in the holding-state
+record. Both poses are `[x, y, z, qx, qy, qz, qw]` in `base_link`
+(pelvis-relative). The default Carry B equals Carry A so upgrading does not
+introduce a new motion. Calibrate Carry B before enabling execution. Older
+configurations may retain `carry_box_pose`; it remains a fallback for Carry A
+when `carry_box_pose_a` is absent.
 
 IK candidates are normalized and revalidated against the `dual_arm` bounds and
 planning scene before assignment. Only the 14 planning-group values are sent

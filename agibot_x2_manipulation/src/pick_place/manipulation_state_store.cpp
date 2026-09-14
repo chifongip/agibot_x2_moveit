@@ -54,7 +54,7 @@ PersistedManipulationRecord ManipulationStateStore::read() const
     int version = 0;
     std::string label;
     input >> version >> label >> saved;
-    if (version == 2 && label == "STATE" && saved == "HOLDING") {
+    if ((version == 2 || version == 3) && label == "STATE" && saved == "HOLDING") {
       std::string pose_label;
       std::string left_label;
       std::string right_label;
@@ -68,6 +68,22 @@ PersistedManipulationRecord ManipulationStateStore::read() const
       const bool right_ok = right_label == "RIGHT_CONTACT" &&
         readTransform(input, record.held_object.box_to_right_contact);
       record.held_object.valid = pose_ok && left_ok && right_ok;
+      if (version == 3 && record.held_object.valid) {
+        std::string carry_a_label;
+        std::string carry_b_label;
+        int carry_a_valid = 0;
+        int carry_b_valid = 0;
+        input >> carry_a_label >> carry_a_valid;
+        const bool carry_a_ok = carry_a_label == "CARRY_A" &&
+          (carry_a_valid == 0 || carry_a_valid == 1) &&
+          (carry_a_valid == 0 || readTransform(input, record.held_object.carry_pose_a));
+        input >> carry_b_label >> carry_b_valid;
+        const bool carry_b_ok = carry_b_label == "CARRY_B" &&
+          (carry_b_valid == 0 || carry_b_valid == 1) &&
+          (carry_b_valid == 0 || readTransform(input, record.held_object.carry_pose_b));
+        record.held_object.carry_pose_a_valid = carry_a_ok && carry_a_valid == 1;
+        record.held_object.carry_pose_b_valid = carry_b_ok && carry_b_valid == 1;
+      }
     }
   }
   if (saved == "EMPTY") {
@@ -91,7 +107,7 @@ void ManipulationStateStore::write(
     if (!output) {
       throw std::runtime_error("cannot open state file");
     }
-    output << "VERSION 2\nSTATE " <<
+    output << "VERSION 3\nSTATE " <<
       (state == PersistedManipulationState::EMPTY ? "EMPTY\n" : "HOLDING\n");
     if (state != PersistedManipulationState::EMPTY && held_object.valid) {
       output << "POSE ";
@@ -100,6 +116,20 @@ void ManipulationStateStore::write(
       writeTransform(output, held_object.box_to_left_contact);
       output << "RIGHT_CONTACT ";
       writeTransform(output, held_object.box_to_right_contact);
+      output << "CARRY_A " << (held_object.carry_pose_a_valid ? 1 : 0);
+      if (held_object.carry_pose_a_valid) {
+        output << ' ';
+        writeTransform(output, held_object.carry_pose_a);
+      } else {
+        output << '\n';
+      }
+      output << "CARRY_B " << (held_object.carry_pose_b_valid ? 1 : 0);
+      if (held_object.carry_pose_b_valid) {
+        output << ' ';
+        writeTransform(output, held_object.carry_pose_b);
+      } else {
+        output << '\n';
+      }
     }
   }
   std::filesystem::rename(temporary, path);

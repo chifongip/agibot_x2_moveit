@@ -1116,11 +1116,13 @@ public:
   }
 
   std::vector<Eigen::Isometry3d> carryPoseCandidates(
-    const Eigen::Isometry3d & pick_pose) const
+    const Eigen::Isometry3d & nominal_pose, const Eigen::Isometry3d & reference_pose,
+    const Eigen::Isometry3d * preferred_pose = nullptr) const
   {
-    const Eigen::Quaterniond configured(config_.carry_pose.linear());
-    const Eigen::Quaterniond measured(pick_pose.linear());
-    const double yaw = std::atan2(pick_pose.linear()(1, 0), pick_pose.linear()(0, 0));
+    const Eigen::Quaterniond configured(nominal_pose.linear());
+    const Eigen::Quaterniond measured(reference_pose.linear());
+    const double yaw = std::atan2(
+      reference_pose.linear()(1, 0), reference_pose.linear()(0, 0));
     const Eigen::Quaterniond upright_yaw(Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()));
     const auto bounded_orientation = [this, &configured](const Eigen::Quaterniond & target) {
         const double angle = 2.0 * std::acos(
@@ -1154,7 +1156,7 @@ public:
       for (const double z : z_offsets) {
         for (const double x : x_offsets) {
           for (const double y : y_offsets) {
-            Eigen::Isometry3d pose = config_.carry_pose;
+            Eigen::Isometry3d pose = nominal_pose;
             pose.translation() += Eigen::Vector3d(x, y, z);
             pose.linear() = orientations[orientation_index].toRotationMatrix();
             const double cost = std::abs(x) / std::max(0.001, config_.carry_search_x_range) +
@@ -1170,6 +1172,9 @@ public:
       scored.begin(), scored.end(),
       [](const ScoredPose & lhs, const ScoredPose & rhs) {return lhs.cost < rhs.cost;});
     std::vector<Eigen::Isometry3d> result;
+    if (preferred_pose) {
+      result.push_back(*preferred_pose);
+    }
     for (const auto & candidate : scored) {
       bool duplicate = false;
       for (const auto & existing : result) {
@@ -1297,17 +1302,77 @@ public:
     return true;
   }
 
-  bool planAdaptiveCarry(
-    const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
+  bool buildCarryTransitionRoute(
+    const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
+    const Eigen::Isometry3d & target_pose, CarryRoute route,
+    const Eigen::Isometry3d & box_to_left_contact,
+    const Eigen::Isometry3d & box_to_right_contact,
+    moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
+    std::string & error, const std::chrono::steady_clock::time_point & deadline,
+    const CancelFunction & canceled)
+  {
+    robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
+    trajectory.addSuffixWayPoint(start, 0.0);
+    moveit::core::RobotState state(start);
+    const auto controls = makeCarryTransitionWaypoints(
+      from_pose, target_pose, config_.lift_height, config_.carry_search_y_range, route);
+    const std::string route_name = std::string("carry_transition_") + carryRouteName(route);
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+      if (!appendPoseToPoseObjectPath(
+          trajectory, state, controls, box_to_left_contact, box_to_right_contact,
+          route_name, canceled, error))
+      {
+        return false;
+      }
+    } else if (!appendObjectPath(
+        trajectory, state, controls, false, box_to_left_contact, box_to_right_contact,
+        route_name, deadline, canceled, error))
+    {
+      return false;
+    }
+    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
+      error = canceled() ? "carry transition time parameterization canceled" :
+        "carry transition route deadline reached before time parameterization";
+      return false;
+    }
+    trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization;
+    if (!time_parameterization.computeTimeStamps(
+        trajectory, config_.velocity_scaling, config_.acceleration_scaling))
+    {
+      error = "carry transition time parameterization failed";
+      return false;
+    }
+    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
+      error = canceled() ? "carry transition time parameterization canceled" :
+        "carry transition route deadline reached during time parameterization";
+      return false;
+    }
+    trajectory.getRobotTrajectoryMsg(output);
+    end_state = state;
+    return true;
+  }
+
+  bool planAdaptiveCarryToPose(
+    const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
+    const Eigen::Isometry3d & nominal_target_pose,
+    const Eigen::Isometry3d * preferred_target_pose, bool transition,
     bool plan_only, const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
     std::string & error, const CancelFunction & canceled)
   {
+    const std::string search_name = transition ?
+      "adaptive carry transition" : "adaptive carry";
     const std::chrono::steady_clock::time_point deadline =
       std::chrono::steady_clock::now() +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(config_.carry_search_timeout));
-    const std::array<CarryRoute, 7> routes{
+    const std::array<CarryRoute, 7> routes = transition ?
+      std::array<CarryRoute, 7>{
+      CarryRoute::DIRECT, CarryRoute::ROTATE_BEFORE_TRANSLATION,
+      CarryRoute::ROTATE_AFTER_TRANSLATION, CarryRoute::DOGLEG_NEGATIVE_Y,
+      CarryRoute::DOGLEG_POSITIVE_Y, CarryRoute::LOW_XY_THEN_LIFT,
+      CarryRoute::LIFT_THEN_XY} :
+      std::array<CarryRoute, 7>{
       CarryRoute::DIRECT, CarryRoute::LOW_XY_THEN_LIFT, CarryRoute::LIFT_THEN_XY,
       CarryRoute::ROTATE_BEFORE_TRANSLATION, CarryRoute::ROTATE_AFTER_TRANSLATION,
       CarryRoute::DOGLEG_NEGATIVE_Y, CarryRoute::DOGLEG_POSITIVE_Y};
@@ -1318,6 +1383,7 @@ public:
       double margin;
       double distance;
       std::size_t order;
+      bool preferred;
     };
     std::vector<Endpoint> endpoints;
     const auto * dual_group = start.getJointModelGroup(move_group_.getName());
@@ -1325,9 +1391,10 @@ public:
     const auto precheck_deadline = std::chrono::steady_clock::now() +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(config_.carry_search_timeout * 0.15));
-    for (const auto & pose : carryPoseCandidates(pick_pose)) {
+    for (const auto & pose : carryPoseCandidates(
+        nominal_target_pose, from_pose, preferred_target_pose)) {
       if (canceled()) {
-        error = "adaptive carry endpoint precheck canceled";
+        error = search_name + " endpoint precheck canceled";
         return false;
       }
       if (std::chrono::steady_clock::now() >= precheck_deadline ||
@@ -1348,29 +1415,38 @@ public:
         continue;
       }
       endpoint.update();
-      if (!endpoint.satisfiesBounds(dual_group) ||
-        !(plan_only ? planning_scene_.collisionFreeWithBox(endpoint, pose, true) :
-        planning_scene_.collisionFree(endpoint, true, false)))
+      const bool collision_free = transition ?
+        planning_scene_.collisionFree(endpoint, true, false) :
+        (plan_only ? planning_scene_.collisionFreeWithBox(endpoint, pose, true) :
+        planning_scene_.collisionFree(endpoint, true, false));
+      if (!endpoint.satisfiesBounds(dual_group) || !collision_free)
       {
         ++endpoint_order;
         continue;
       }
+      const bool preferred = preferred_target_pose &&
+        (pose.translation() - preferred_target_pose->translation()).norm() < 1e-9 &&
+        std::abs(Eigen::Quaterniond(pose.linear()).dot(
+          Eigen::Quaterniond(preferred_target_pose->linear()))) > 1.0 - 1e-9;
       endpoints.push_back(
         {
           pose,
-          (pose.translation() - config_.carry_pose.translation()).norm() +
-          0.1 * poseAngularError(pose, config_.carry_pose),
+          (pose.translation() - nominal_target_pose.translation()).norm() +
+          0.1 * poseAngularError(pose, nominal_target_pose),
           endpoint.getMinDistanceToPositionBounds(dual_group).first,
-          endpoint.distance(start, dual_group), endpoint_order++});
+          endpoint.distance(start, dual_group), endpoint_order++, preferred});
     }
     std::stable_sort(
       endpoints.begin(), endpoints.end(), [](const Endpoint & a, const Endpoint & b) {
+        if (a.preferred != b.preferred) {
+          return a.preferred;
+        }
         const double score_a = 4.0 * a.correction + 0.1 * a.distance - 0.2 * a.margin;
         const double score_b = 4.0 * b.correction + 0.1 * b.distance - 0.2 * b.margin;
         return score_a < score_b || (score_a == score_b && a.order < b.order);
       });
     if (endpoints.empty()) {
-      error = "no carry endpoint passed IK, bounds, and collision precheck";
+      error = "no " + search_name + " endpoint passed IK, bounds, and collision precheck";
       return false;
     }
 
@@ -1381,11 +1457,11 @@ public:
     for (const auto route : routes) {
       for (const auto & endpoint : endpoints) {
         if (canceled()) {
-          error = "adaptive carry search canceled";
+          error = search_name + " canceled";
           return false;
         }
         if (std::chrono::steady_clock::now() >= deadline) {
-          error = "adaptive carry search timed out; last failure: " + last_error;
+          error = search_name + " timed out; last failure: " + last_error;
           return false;
         }
         try {
@@ -1396,10 +1472,16 @@ public:
           moveit_msgs::msg::RobotTrajectory trajectory;
           moveit::core::RobotState end(start);
           std::string candidate_error;
-          if (!buildCarryRoute(
-              start, pick_pose, endpoint.pose, route, plan_only,
-              box_to_left_contact, box_to_right_contact,
-              trajectory, end, candidate_error, route_deadline, canceled))
+          const bool planned = transition ?
+            buildCarryTransitionRoute(
+            start, from_pose, endpoint.pose, route,
+            box_to_left_contact, box_to_right_contact,
+            trajectory, end, candidate_error, route_deadline, canceled) :
+            buildCarryRoute(
+            start, from_pose, endpoint.pose, route, plan_only,
+            box_to_left_contact, box_to_right_contact,
+            trajectory, end, candidate_error, route_deadline, canceled);
+          if (!planned)
           {
             last_error = candidate_error;
             continue;
@@ -1410,7 +1492,8 @@ public:
           selected.end_state = std::make_shared<moveit::core::RobotState>(end);
           RCLCPP_INFO(
             node_->get_logger(),
-            "Selected adaptive carry pose [%.3f, %.3f, %.3f] using route %s",
+            "Selected %s pose [%.3f, %.3f, %.3f] using route %s",
+            search_name.c_str(),
             endpoint.pose.translation().x(), endpoint.pose.translation().y(),
             endpoint.pose.translation().z(),
             carryRouteName(route));
@@ -1420,9 +1503,33 @@ public:
         }
       }
     }
-    error = "no feasible carry pose inside the configured safety envelope; last failure: " +
+    error = "no feasible " + search_name + " pose inside the configured safety envelope; last failure: " +
       last_error;
     return false;
+  }
+
+  bool planAdaptiveCarry(
+    const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
+    bool plan_only, const Eigen::Isometry3d & box_to_left_contact,
+    const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
+    std::string & error, const CancelFunction & canceled)
+  {
+    return planAdaptiveCarryToPose(
+      start, pick_pose, config_.carry_pose, nullptr, false, plan_only,
+      box_to_left_contact, box_to_right_contact, selected, error, canceled);
+  }
+
+  bool planAdaptiveCarryTransition(
+    const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
+    const Eigen::Isometry3d & nominal_target_pose,
+    const Eigen::Isometry3d * preferred_target_pose,
+    const Eigen::Isometry3d & box_to_left_contact,
+    const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
+    std::string & error, const CancelFunction & canceled)
+  {
+    return planAdaptiveCarryToPose(
+      start, from_pose, nominal_target_pose, preferred_target_pose, true, false,
+      box_to_left_contact, box_to_right_contact, selected, error, canceled);
   }
 
   bool buildPlaceRoute(
@@ -2202,6 +2309,20 @@ bool DualArmMotionPlanner::buildCarryRoute(
     box_to_right_contact, output, end_state, error, deadline, canceled);
 }
 
+bool DualArmMotionPlanner::buildCarryTransitionRoute(
+  const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
+  const Eigen::Isometry3d & target_pose, CarryRoute route,
+  const Eigen::Isometry3d & box_to_left_contact,
+  const Eigen::Isometry3d & box_to_right_contact,
+  moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
+  std::string & error, const std::chrono::steady_clock::time_point & deadline,
+  const CancelFunction & canceled)
+{
+  return impl_->buildCarryTransitionRoute(
+    start, from_pose, target_pose, route, box_to_left_contact, box_to_right_contact,
+    output, end_state, error, deadline, canceled);
+}
+
 bool DualArmMotionPlanner::planAdaptiveCarry(
   const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
   bool plan_only, const Eigen::Isometry3d & box_to_left_contact,
@@ -2211,6 +2332,19 @@ bool DualArmMotionPlanner::planAdaptiveCarry(
   return impl_->planAdaptiveCarry(
     start, pick_pose, plan_only, box_to_left_contact, box_to_right_contact,
     selected, error, canceled);
+}
+
+bool DualArmMotionPlanner::planAdaptiveCarryTransition(
+  const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
+  const Eigen::Isometry3d & nominal_target_pose,
+  const Eigen::Isometry3d * preferred_target_pose,
+  const Eigen::Isometry3d & box_to_left_contact,
+  const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
+  std::string & error, const CancelFunction & canceled)
+{
+  return impl_->planAdaptiveCarryTransition(
+    start, from_pose, nominal_target_pose, preferred_target_pose,
+    box_to_left_contact, box_to_right_contact, selected, error, canceled);
 }
 
 bool DualArmMotionPlanner::planAdaptivePlace(

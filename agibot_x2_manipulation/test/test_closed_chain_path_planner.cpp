@@ -283,5 +283,34 @@ TEST(ClosedChainPathPlanner, PlaceDoglegsAreBoundedAndDeterministic)
     std::invalid_argument);
 }
 
+TEST(ClosedChainPathPlanner, CarryTransitionsDoNotRequireAnInitialPickLift)
+{
+  Eigen::Isometry3d from = Eigen::Isometry3d::Identity();
+  from.translation() = Eigen::Vector3d(0.30, -0.05, 0.20);
+  Eigen::Isometry3d target = Eigen::Isometry3d::Identity();
+  target.translation() = Eigen::Vector3d(0.42, 0.08, 0.28);
+  target.linear() = Eigen::AngleAxisd(0.20, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+
+  const auto direct = makeCarryTransitionWaypoints(
+    from, target, 0.05, 0.03, ClosedChainRoute::DIRECT);
+  ASSERT_EQ(direct.size(), 2U);
+  EXPECT_EQ(direct.front().segment, "carry_start");
+  EXPECT_EQ(direct.back().segment, "carry_direct");
+  EXPECT_TRUE(direct.front().pose.matrix().isApprox(from.matrix()));
+  EXPECT_TRUE(direct.back().pose.matrix().isApprox(target.matrix()));
+
+  const auto rotate_first = makeCarryTransitionWaypoints(
+    from, target, 0.05, 0.03, ClosedChainRoute::ROTATE_BEFORE_TRANSLATION);
+  ASSERT_EQ(rotate_first.size(), 3U);
+  EXPECT_EQ(rotate_first[1].segment, "carry_rotate_before_translation");
+  EXPECT_TRUE(rotate_first[1].pose.linear().isApprox(target.linear()));
+
+  const auto lift = makeCarryTransitionWaypoints(
+    from, target, 0.05, 0.03, ClosedChainRoute::LIFT_THEN_XY);
+  ASSERT_EQ(lift.size(), 4U);
+  EXPECT_EQ(lift[1].segment, "carry_lift_before_translation");
+  EXPECT_NEAR(lift[1].pose.translation().z(), from.translation().z() + 0.05, 1e-12);
+}
+
 }  // namespace
 }  // namespace agibot_x2_manipulation

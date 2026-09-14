@@ -26,7 +26,6 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -34,6 +33,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -460,6 +460,12 @@ private:
         held_box_to_left_contact_ = saved.held_object.box_to_left_contact;
         held_box_to_right_contact_ = saved.held_object.box_to_right_contact;
         held_geometry_valid_ = true;
+        if (saved.held_object.carry_pose_a_valid) {
+          selected_carry_pose_a_ = saved.held_object.carry_pose_a;
+        }
+        if (saved.held_object.carry_pose_b_valid) {
+          selected_carry_pose_b_ = saved.held_object.carry_pose_b;
+        }
       } else {
         RCLCPP_WARN(
           node_->get_logger(),
@@ -491,6 +497,14 @@ private:
         held_object.pose = toEigen(held_pose_.pose);
         held_object.box_to_left_contact = held_box_to_left_contact_;
         held_object.box_to_right_contact = held_box_to_right_contact_;
+        if (selected_carry_pose_a_) {
+          held_object.carry_pose_a_valid = true;
+          held_object.carry_pose_a = *selected_carry_pose_a_;
+        }
+        if (selected_carry_pose_b_) {
+          held_object.carry_pose_b_valid = true;
+          held_object.carry_pose_b = *selected_carry_pose_b_;
+        }
       }
       state_store_.write(
         state == ManipulationState::EMPTY ? PersistedManipulationState::EMPTY :
@@ -530,6 +544,8 @@ private:
     state_.store(state);
     if (state == ManipulationState::EMPTY) {
       held_geometry_valid_ = false;
+      selected_carry_pose_a_.reset();
+      selected_carry_pose_b_.reset();
     }
     if (persist && state != ManipulationState::UNKNOWN) {
       persistState(state);
@@ -683,59 +699,19 @@ private:
            config_.carry_pose : config_.carry_pose_b;
   }
 
-  bool planCarryTransition(
-    const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
-    const Eigen::Isometry3d & target_pose, moveit_msgs::msg::RobotTrajectory & trajectory,
-    moveit::core::RobotState & end_state, std::string & error, const CancelFunction & canceled)
+  const std::optional<Eigen::Isometry3d> & selectedCarryPose(uint8_t target_pose) const
   {
-    const auto deadline = std::chrono::steady_clock::now() +
-      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-      std::chrono::duration<double>(config_.carry_search_timeout));
-    const std::array<CarryRoute, 7> routes{
-      CarryRoute::DIRECT, CarryRoute::LIFT_THEN_XY, CarryRoute::LOW_XY_THEN_LIFT,
-      CarryRoute::ROTATE_BEFORE_TRANSLATION, CarryRoute::ROTATE_AFTER_TRANSLATION,
-      CarryRoute::DOGLEG_NEGATIVE_Y, CarryRoute::DOGLEG_POSITIVE_Y};
-    std::string last_error = "no carry route evaluated";
-    for (const auto route : routes) {
-      if (canceled()) {
-        error = "carry transition planning canceled";
-        return false;
-      }
-      const auto now = std::chrono::steady_clock::now();
-      if (now >= deadline) {
-        error = "carry transition planning timed out; last failure: " + last_error;
-        return false;
-      }
-      const auto route_deadline = std::min(
-        deadline, now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-          std::chrono::duration<double>(3.25)));
-      moveit_msgs::msg::RobotTrajectory candidate_trajectory;
-      moveit::core::RobotState candidate_end(start);
-      std::string candidate_error;
-      try {
-        // The box is already attached in the planning scene while HOLDING, so
-        // this is an execution-equivalent collision check even for plan_only.
-        if (!motion_planner_.buildCarryRoute(
-            start, from_pose, target_pose, route, false,
-            held_box_to_left_contact_, held_box_to_right_contact_,
-            candidate_trajectory, candidate_end, candidate_error, route_deadline, canceled))
-        {
-          last_error = candidate_error;
-          continue;
-        }
-      } catch (const std::exception & exception) {
-        last_error = exception.what();
-        continue;
-      }
-      trajectory = std::move(candidate_trajectory);
-      end_state = std::move(candidate_end);
-      RCLCPP_INFO(
-        node_->get_logger(), "Selected carry transition route %s",
-        closedChainRouteName(route));
-      return true;
+    return target_pose == MoveCarryPose::Goal::CARRY_A ?
+           selected_carry_pose_a_ : selected_carry_pose_b_;
+  }
+
+  void setSelectedCarryPose(uint8_t target_pose, const Eigen::Isometry3d & pose)
+  {
+    if (target_pose == MoveCarryPose::Goal::CARRY_A) {
+      selected_carry_pose_a_ = pose;
+    } else {
+      selected_carry_pose_b_ = pose;
     }
-    error = "no feasible carry transition route; last failure: " + last_error;
-    return false;
   }
 
   TaskOutcome runMoveCarryPose(
@@ -763,7 +739,10 @@ private:
     } catch (const std::exception & exception) {
       return outcome(false, kRecoveryRequired, exception.what(), held_pose_);
     }
-    const Eigen::Isometry3d & target_pose = carryPose(target);
+    const Eigen::Isometry3d & nominal_target_pose = carryPose(target);
+    const auto & preferred_target_pose = selectedCarryPose(target);
+    const Eigen::Isometry3d & target_pose = preferred_target_pose ?
+      *preferred_target_pose : nominal_target_pose;
     const Eigen::Quaterniond from_rotation(from_pose.linear());
     const Eigen::Quaterniond target_rotation(target_pose.linear());
     const double angular_error = 2.0 * std::acos(
@@ -788,25 +767,27 @@ private:
     if (!current) {
       return outcome(false, kSafetyAbort, "current robot state unavailable", held_pose_);
     }
-    moveit_msgs::msg::RobotTrajectory trajectory;
-    moveit::core::RobotState end_state(*current);
-    if (!planCarryTransition(
-        *current, from_pose, target_pose, trajectory, end_state, error, canceled))
+    AdaptiveCarryPlan carry_plan;
+    if (!motion_planner_.planAdaptiveCarryTransition(
+        *current, from_pose, nominal_target_pose,
+        preferred_target_pose ? &*preferred_target_pose : nullptr,
+        held_box_to_left_contact_, held_box_to_right_contact_, carry_plan, error, canceled))
     {
       return outcome(
         false, kPlanningFailed, "carry transition planning failed: " + error, held_pose_);
     }
+    const auto selected_target_message = stampedPose(carry_plan.pose);
     if (canceled()) {
       return outcome(false, kSafetyAbort, "carry transition canceled after planning", held_pose_);
     }
     if (plan_only) {
       return outcome(
         true, kSuccess, "carry transition to pose " + std::string(carryPoseName(target)) +
-        " is feasible", target_message);
+        " is feasible", selected_target_message);
     }
 
     feedback("moving_to_carry_" + std::string(carryPoseName(target)), 0.50F, held_pose_);
-    if (!trajectory_executor_.execute(trajectory, canceled)) {
+    if (!trajectory_executor_.execute(carry_plan.trajectory, canceled)) {
       motion_planner_.updateHeldPoseFromRobot();
       setState(ManipulationState::RECOVERY_REQUIRED, "carry transition execution failed");
       return outcome(
@@ -820,7 +801,8 @@ private:
       return outcome(
         false, kRecoveryRequired, "carry transition canceled; object remains held", held_pose_);
     }
-    held_pose_ = target_message;
+    held_pose_ = selected_target_message;
+    setSelectedCarryPose(target, carry_plan.pose);
     setState(
       ManipulationState::HOLDING,
       "box moved to carry pose " + std::string(carryPoseName(target)));
@@ -1042,6 +1024,7 @@ private:
       return outcome(false, kRecoveryRequired, "pick canceled; object remains held", held_pose_);
     }
     held_pose_ = stampedPose(carry_plan.pose);
+    setSelectedCarryPose(MoveCarryPose::Goal::CARRY_A, carry_plan.pose);
     setState(ManipulationState::HOLDING, "box held at carry pose");
     feedback("holding", 1.0F, held_pose_);
     return outcome(true, kSuccess, "box picked and moved to carry pose", held_pose_);
@@ -1659,6 +1642,8 @@ private:
   Eigen::Isometry3d held_box_to_left_contact_{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d held_box_to_right_contact_{Eigen::Isometry3d::Identity()};
   bool held_geometry_valid_{false};
+  std::optional<Eigen::Isometry3d> selected_carry_pose_a_;
+  std::optional<Eigen::Isometry3d> selected_carry_pose_b_;
   std::map<std::string, double> reset_target_values_;
   bool reset_physical_detach_done_{false};
   bool reset_scene_cleanup_done_{false};
