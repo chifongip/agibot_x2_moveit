@@ -4,10 +4,10 @@ box_localizer:
     tag_frame: tag0
     detections_topic: /detections
     tag_id: 0
-    box_dimensions: [0.15, 0.32, 0.32]  # length X, width Y, height Z [m]
+    box_dimensions: [0.15, 0.36, 0.32]  # length X, width Y, height Z [m]
     tag_to_box_yaw: 0.0
     # Additional [x, y, z] correction from the centered top-tag model, in tag coordinates [m].
-    tag_to_box_offset: [0.0, 0.0, 0.0]
+    tag_to_box_offset: [0.04, 0.0, 0.1]
     stable_sample_count: 3
     maximum_pose_age: 1.5
     maximum_position_spread: 0.005
@@ -25,12 +25,12 @@ pick_place_server:
     left_tcp: left_hand_tcp_link
     right_tcp: right_hand_tcp_link
     box_id: grasp_box
-    box_dimensions: [0.15, 0.32, 0.32]
+    box_dimensions: [0.15, 0.36, 0.32]
     pregrasp_distance: 0.08
     contact_height_offset: 0.0
-    lift_height: 0.05
+    lift_height: 0.08
     cartesian_step: 0.01
-    maximum_box_pose_age: 1.5
+    maximum_box_pose_age: 2.5
     ik_timeout: 0.05
     # Coordinated dual-arm search. These are shared grasp hypotheses, not
     # independent per-hand pose tolerances.
@@ -76,12 +76,12 @@ pick_place_server:
     use_tag_derived_place_pose: true
     table_tag_frame: tag9
     table_tag_height_above_tabletop: 0.55
-    table_tag_place_offset: [0.0, 0.15]
+    table_tag_place_offset: [0.0, 0.2]
     table_tag_to_box_yaw: 0.0
     # Keep these pickup-tag calibration values equal to box_localizer's. They
     # are re-expressed for tag9 so the table target remains the box center.
     tag_to_box_yaw: 0.0
-    tag_to_box_offset: [0.0, 0.0, 0.0]
+    tag_to_box_offset: [0.04, 0.0, 0.1]
     maximum_table_tag_pose_age: 2.5
     table_tag_detections_topic: /front_center_rectify/detections
     table_tag_id: 9
@@ -96,7 +96,7 @@ pick_place_server:
     acceleration_scaling: 0.10
     # Simulation-tested pelvis-relative box pose used while the base navigates.
     # Recalibrate this pose before real-robot navigation.
-    carry_box_pose: [0.35, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
+    carry_box_pose: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
     recovery_position_tolerance: 0.1
     recovery_angular_tolerance: 0.1745329252  # 10 degrees
     # Permit a small measured encoder/model discrepancy before Place. This is
