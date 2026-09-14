@@ -30,6 +30,12 @@ PACKAGE_FILE = Path(__file__).parents[1] / "package.xml"
 RECORDED_LAUNCH_FILE = (
     Path(__file__).parents[1] / "launch" / "recorded_planning_failure.launch.py"
 )
+PLANNING_SCENE_MANAGER_FILE = (
+    Path(__file__).parents[1]
+    / "src"
+    / "pick_place"
+    / "planning_scene_manager.cpp"
+)
 
 
 def load_launch_module():
@@ -50,6 +56,14 @@ def test_launch_controls_perception_source_selection():
     assert '"arm_state_topic": arm_state_topic' in LAUNCH_FILE.read_text(
         encoding="utf-8"
     )
+
+
+def test_local_scene_monitor_skips_octomap_without_3d_perception():
+    source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
+
+    assert "config_.perception_source != Perception3dSource::NONE" in source
+    assert "startWorldGeometryMonitor(" in source
+    assert "load_octomap_monitor);" in source
 
 
 def test_pose_to_pose_mode_is_selectable_and_closed_chain_remains_default():

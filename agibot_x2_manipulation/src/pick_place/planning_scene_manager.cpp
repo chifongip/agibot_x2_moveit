@@ -38,7 +38,12 @@ PlanningSceneManager::PlanningSceneManager(
   }
   scene_monitor_->startStateMonitor();
   scene_monitor_->startSceneMonitor();
-  scene_monitor_->startWorldGeometryMonitor();
+  const bool load_octomap_monitor =
+    config_.perception_source != Perception3dSource::NONE;
+  scene_monitor_->startWorldGeometryMonitor(
+    planning_scene_monitor::PlanningSceneMonitor::DEFAULT_COLLISION_OBJECT_TOPIC,
+    planning_scene_monitor::PlanningSceneMonitor::DEFAULT_PLANNING_SCENE_WORLD_TOPIC,
+    load_octomap_monitor);
 
   scene_audit_sub_ = node_->create_subscription<moveit_msgs::msg::PlanningScene>(
     "/planning_scene", 10,
