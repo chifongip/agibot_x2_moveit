@@ -156,7 +156,8 @@ public:
         config_.table_tag_place_offset.y(), config_.table_tag_to_box_yaw,
         static_cast<std::size_t>(config_.table_tag_stable_sample_count),
         config_.maximum_table_tag_pose_age, config_.table_tag_maximum_position_spread,
-        config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap);
+        config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap,
+        config_.pickup_tag_to_box_yaw, config_.pickup_tag_to_box_offset);
     }
     move_group_.setPoseReferenceFrame(config_.planning_frame);
     move_group_.setMaxVelocityScalingFactor(config_.velocity_scaling);

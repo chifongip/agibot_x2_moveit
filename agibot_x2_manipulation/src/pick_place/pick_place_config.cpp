@@ -157,6 +157,15 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.table_tag_place_offset = Eigen::Vector2d(
     table_tag_place_offset[0], table_tag_place_offset[1]);
   config.table_tag_to_box_yaw = parameter<double>(node, "table_tag_to_box_yaw", 0.0);
+  config.pickup_tag_to_box_yaw = parameter<double>(node, "tag_to_box_yaw", 0.0);
+  const auto pickup_tag_to_box_offset = parameter<std::vector<double>>(
+    node, "tag_to_box_offset", {0.0, 0.0, 0.0});
+  if (pickup_tag_to_box_offset.size() != 3U) {
+    throw std::runtime_error("tag_to_box_offset must contain [x, y, z]");
+  }
+  config.pickup_tag_to_box_offset = Eigen::Vector3d(
+    pickup_tag_to_box_offset[0], pickup_tag_to_box_offset[1],
+    pickup_tag_to_box_offset[2]);
   config.maximum_table_tag_pose_age = parameter<double>(
     node, "maximum_table_tag_pose_age", config.max_pose_age);
   config.table_tag_detections_topic = parameter<std::string>(
@@ -180,6 +189,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     config.table_tag_height_above_tabletop < 0.0 ||
     !config.table_tag_place_offset.allFinite() ||
     !std::isfinite(config.table_tag_to_box_yaw) ||
+    !std::isfinite(config.pickup_tag_to_box_yaw) ||
+    !config.pickup_tag_to_box_offset.allFinite() ||
     !std::isfinite(config.maximum_table_tag_pose_age) ||
     config.maximum_table_tag_pose_age <= 0.0 ||
     config.table_tag_detections_topic.empty() || config.table_tag_id < 0 ||

@@ -78,6 +78,8 @@ struct PickPlaceConfig
   double table_tag_height_above_tabletop{0.0};
   Eigen::Vector2d table_tag_place_offset{Eigen::Vector2d::Zero()};
   double table_tag_to_box_yaw{0.0};
+  double pickup_tag_to_box_yaw{0.0};
+  Eigen::Vector3d pickup_tag_to_box_offset{Eigen::Vector3d::Zero()};
   double maximum_table_tag_pose_age{0.0};
   std::string table_tag_detections_topic;
   int table_tag_id{0};

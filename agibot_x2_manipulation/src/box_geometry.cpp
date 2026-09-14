@@ -121,26 +121,35 @@ Eigen::Isometry3d boxPoseFromTopTag(
 Eigen::Isometry3d boxPoseFromVerticalTableTag(
   const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
   double tag_height_above_tabletop, double table_x_offset,
-  double table_z_offset, double tag_to_box_yaw)
+  double table_z_offset, double table_tag_to_box_yaw,
+  double pickup_tag_to_box_yaw,
+  const Eigen::Vector3d & pickup_tag_to_box_offset)
 {
   validate(dimensions);
   if (!std::isfinite(tag_height_above_tabletop) || tag_height_above_tabletop < 0.0 ||
     !std::isfinite(table_x_offset) || !std::isfinite(table_z_offset) ||
-    !std::isfinite(tag_to_box_yaw))
+    !std::isfinite(table_tag_to_box_yaw) || !std::isfinite(pickup_tag_to_box_yaw) ||
+    !pickup_tag_to_box_offset.allFinite())
   {
     throw std::invalid_argument("vertical table-tag calibration values must be finite and valid");
   }
 
-  Eigen::Isometry3d tag_to_box = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d table_tag_to_box = Eigen::Isometry3d::Identity();
   // Box +X, +Y, and +Z align with tag -Z, -X, and +Y respectively.
-  tag_to_box.linear() =
+  table_tag_to_box.linear() =
     Eigen::AngleAxisd(-kHalfPi, Eigen::Vector3d::UnitX()).toRotationMatrix() *
     Eigen::AngleAxisd(kHalfPi, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
-    Eigen::AngleAxisd(tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-  tag_to_box.translation() = Eigen::Vector3d(
+    Eigen::AngleAxisd(table_tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  table_tag_to_box.translation() = Eigen::Vector3d(
     table_x_offset, -tag_height_above_tabletop + dimensions.height / 2.0,
     table_z_offset);
-  return tag_pose * tag_to_box;
+
+  const Eigen::Matrix3d pickup_tag_to_box_rotation =
+    Eigen::AngleAxisd(pickup_tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const Eigen::Vector3d pickup_offset_in_box =
+    pickup_tag_to_box_rotation.transpose() * pickup_tag_to_box_offset;
+  table_tag_to_box.translation() += table_tag_to_box.linear() * pickup_offset_in_box;
+  return tag_pose * table_tag_to_box;
 }
 
 GraspGeometry computeGraspGeometry(

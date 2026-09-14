@@ -142,6 +142,7 @@ def test_tag9_derives_the_default_table_place_pose():
     assert config["table_tag_frame"] == "tag9"
     assert config["table_tag_height_above_tabletop"] > 0.0
     assert config["table_tag_place_offset"] == [0.0, 0.15]
+    assert config["tag_to_box_offset"] == [0.0, 0.0, 0.0]
     assert config["maximum_table_tag_pose_age"] > 0.0
     assert config["table_tag_detections_topic"] == "/front_center_rectify/detections"
     assert config["table_tag_id"] == 9
@@ -251,12 +252,14 @@ def test_recorded_failure_launch_allows_isolated_execution_by_default():
     assert '"manipulation_state_file": manipulation_state_file' in source
 
 
-def test_pickup_tag_offset_defaults_to_zero():
+def test_table_placement_uses_the_pickup_tag_calibration():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         document = yaml.safe_load(stream)
 
     localizer = document["box_localizer"]["ros__parameters"]
-    assert localizer["tag_to_box_offset"] == [0.0, 0.0, 0.0]
+    server = document["pick_place_server"]["ros__parameters"]
+    assert server["tag_to_box_yaw"] == localizer["tag_to_box_yaw"]
+    assert server["tag_to_box_offset"] == localizer["tag_to_box_offset"]
 
 
 def test_coordinated_grasp_search_has_conservative_limits():

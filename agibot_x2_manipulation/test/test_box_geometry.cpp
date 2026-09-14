@@ -72,6 +72,27 @@ TEST(BoxGeometry, VerticalTableTagAppliesTabletopOffsetsAndBoxYaw)
     1e-12);
 }
 
+TEST(BoxGeometry, VerticalTableTagAppliesPickupTagCalibrationOffset)
+{
+  Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();
+  tag.translation() = Eigen::Vector3d(1.0, 2.0, 3.0);
+  const Eigen::Vector3d pickup_offset(0.10, -0.20, 0.05);
+  const auto box = boxPoseFromVerticalTableTag(
+    tag, {0.4, 0.2, 0.3}, 0.55, 0.0, 0.0, kPi / 2.0, -kPi / 2.0,
+    pickup_offset);
+
+  const Eigen::Matrix3d table_tag_to_box =
+    Eigen::AngleAxisd(-kPi / 2.0, Eigen::Vector3d::UnitX()).toRotationMatrix() *
+    Eigen::AngleAxisd(kPi / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+    Eigen::AngleAxisd(kPi / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const Eigen::Matrix3d pickup_tag_to_box =
+    Eigen::AngleAxisd(-kPi / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const Eigen::Vector3d expected_in_tag =
+    Eigen::Vector3d(0.0, -0.4, 0.0) +
+    table_tag_to_box * pickup_tag_to_box.transpose() * pickup_offset;
+  EXPECT_LT((box.translation() - tag * expected_in_tag).norm(), 1e-12);
+}
+
 TEST(BoxGeometry, AlignedBoxUsesLocalYFaces)
 {
   const auto grasp = computeGraspGeometry(boxAtYaw(0.0), {0.4, 0.2, 0.3}, 0.08);

@@ -90,9 +90,10 @@ public:
     std::string tag_frame, std::string detections_topic, int tag_id,
     double minimum_decision_margin, const BoxDimensions & dimensions,
     double tag_height_above_tabletop, double table_x_offset, double table_z_offset,
-    double tag_to_box_yaw, std::size_t stable_sample_count, double maximum_age,
+    double table_tag_to_box_yaw, std::size_t stable_sample_count, double maximum_age,
     double maximum_position_spread, double maximum_angular_spread,
-    double maximum_sample_gap);
+    double maximum_sample_gap, double pickup_tag_to_box_yaw = 0.0,
+    const Eigen::Vector3d & pickup_tag_to_box_offset = Eigen::Vector3d::Zero());
 
   bool waitForStablePose(
     double timeout, const std::function<bool()> & canceled,
@@ -112,7 +113,9 @@ private:
   double tag_height_above_tabletop_;
   double table_x_offset_;
   double table_z_offset_;
-  double tag_to_box_yaw_;
+  double table_tag_to_box_yaw_;
+  double pickup_tag_to_box_yaw_;
+  Eigen::Vector3d pickup_tag_to_box_offset_;
   double maximum_age_;
   mutable std::mutex mutex_;
   mutable std::condition_variable stable_pose_condition_;

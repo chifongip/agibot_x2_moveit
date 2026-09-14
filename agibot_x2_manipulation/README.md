@@ -120,6 +120,10 @@ PickPlace operation. Set
 keep an explicit action `place_pose` when a caller must override the calibrated
 target. The server waits up to `table_tag_stability_timeout` (6 seconds by
 default) for a fresh stable table-tag pose before rejecting the goal.
+`pick_place_server.tag_to_box_yaw` and `tag_to_box_offset` must match the
+`box_localizer` calibration. The placement transform re-expresses that pickup
+tag-frame correction in the tag9 frame, so a non-centered pickup tag still
+places the physical box center at the calibrated table target.
 `box_pick_place.launch.py` starts the front-center tag9 pipeline at 1 Hz by
 default. It is independent of `use_apriltag`, which controls the tag0 pickup
 detector. `use_dummy_apriltag:=true` always disables both real-camera
