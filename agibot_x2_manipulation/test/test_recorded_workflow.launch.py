@@ -75,11 +75,13 @@ class TestRecordedWorkflow(unittest.TestCase):
 
     def test_recorded_pick_place_and_pick_place(self):
         pick_goal = Pick.Goal()
+        pick_goal.instance_id = "tag:0"
         pick_goal.plan_only = True
         pick_result = self.send_goal(Pick, "/pick_box", pick_goal, 45.0)
         self.assertFalse(pick_result.object_held)
 
         pick_place_goal = PickPlace.Goal()
+        pick_place_goal.instance_id = "tag:0"
         self.place_pose(pick_place_goal)
         pick_place_goal.plan_only = True
         self.send_goal(PickPlace, "/pick_place", pick_place_goal, 45.0)

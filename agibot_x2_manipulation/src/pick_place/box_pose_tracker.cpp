@@ -106,49 +106,90 @@ TableTagPoseStabilityUpdate TableTagPoseStabilityFilter::addSample(
 
 BoxPoseTracker::BoxPoseTracker(
   const rclcpp::Node::SharedPtr & node, std::string planning_frame,
-  std::string topic, double maximum_age, double position_tolerance,
+  std::string legacy_topic, std::string states_topic, double maximum_age,
+  double position_tolerance,
   double orientation_tolerance)
 : node_(node), planning_frame_(std::move(planning_frame)), maximum_age_(maximum_age),
   position_tolerance_(position_tolerance), orientation_tolerance_(orientation_tolerance),
   tf_buffer_(node->get_clock()), tf_listener_(tf_buffer_)
 {
-  subscription_ = node_->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-    std::move(topic), 10,
+  legacy_subscription_ = node_->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+    std::move(legacy_topic), 10,
     [this](const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr message) {
       std::lock_guard<std::mutex> lock(mutex_);
-      latest_pose_ = *message;
-      have_pose_ = true;
+      latest_poses_["legacy"] = TrackedBoxPose{"legacy", "", *message};
+    });
+  states_subscription_ = node_->create_subscription<
+    agibot_x2_manipulation_msgs::msg::BoxStateArray>(
+    std::move(states_topic), 10,
+    [this](const agibot_x2_manipulation_msgs::msg::BoxStateArray::SharedPtr message) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      for (const auto & state : message->boxes) {
+        if (state.instance_id.empty() || state.profile_id.empty()) {
+          continue;
+        }
+        geometry_msgs::msg::PoseWithCovarianceStamped pose;
+        pose.header = state.header;
+        pose.pose = state.pose;
+        latest_poses_[state.instance_id] = TrackedBoxPose{
+          state.instance_id, state.profile_id, std::move(pose)};
+      }
     });
 }
 
-bool BoxPoseTracker::stablePose(geometry_msgs::msg::PoseStamped & pose) const
+bool BoxPoseTracker::stablePose(
+  const std::string & instance_id, TrackedBoxPose & pose) const
 {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!have_pose_ || (node_->now() - latest_pose_.header.stamp).seconds() > maximum_age_) {
+  const auto fresh = [this](const TrackedBoxPose & candidate) {
+      return candidate.pose.header.frame_id == planning_frame_ &&
+             (node_->now() - candidate.pose.header.stamp).seconds() <= maximum_age_;
+    };
+  if (!instance_id.empty()) {
+    const auto found = latest_poses_.find(instance_id);
+    if (found == latest_poses_.end() || !fresh(found->second)) {
+      return false;
+    }
+    pose = found->second;
+    return true;
+  }
+
+  const TrackedBoxPose * selected = nullptr;
+  for (const auto & entry : latest_poses_) {
+    const auto & candidate = entry.second;
+    if (!fresh(candidate)) {
+      continue;
+    }
+    if (selected) {
+      return false;
+    }
+    selected = &candidate;
+  }
+  if (!selected) {
     return false;
   }
-  pose.header = latest_pose_.header;
-  pose.pose = latest_pose_.pose.pose;
-  return pose.header.frame_id == planning_frame_;
+  pose = *selected;
+  return true;
 }
 
 bool BoxPoseTracker::stillWithinTolerance(
-  const Eigen::Isometry3d & reference, geometry_msgs::msg::PoseStamped & latest,
+  const TrackedBoxPose & reference, TrackedBoxPose & latest,
   std::string & error) const
 {
-  if (!stablePose(latest)) {
+  if (!stablePose(reference.instance_id, latest)) {
     error = "box pose became stale before approach";
     return false;
   }
   Eigen::Isometry3d current;
   try {
-    current = toEigen(latest.pose);
+    current = toEigen(latest.pose.pose.pose);
   } catch (const std::exception & exception) {
     error = exception.what();
     return false;
   }
-  const double position_error = (current.translation() - reference.translation()).norm();
-  const Eigen::Quaterniond reference_q(reference.linear());
+  const Eigen::Isometry3d reference_pose = toEigen(reference.pose.pose.pose);
+  const double position_error = (current.translation() - reference_pose.translation()).norm();
+  const Eigen::Quaterniond reference_q(reference_pose.linear());
   const Eigen::Quaterniond current_q(current.linear());
   const double angular_error = 2.0 * std::acos(
     std::clamp(std::abs(reference_q.dot(current_q)), 0.0, 1.0));
@@ -324,7 +365,7 @@ bool TableTagPlacePoseTracker::waitForStablePose(
 void BoxPoseTracker::clear()
 {
   std::lock_guard<std::mutex> lock(mutex_);
-  have_pose_ = false;
+  latest_poses_.clear();
 }
 
 }  // namespace agibot_x2_manipulation

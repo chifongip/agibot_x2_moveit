@@ -83,16 +83,50 @@ option when the controller is inactive or unconfigured.
 
 ## Box and grasp calibration
 
-`config/box_manipulation.yaml` defines the box dimensions as
+The legacy fallback in `config/box_manipulation.yaml` defines box dimensions as
 `[length_x, width_y, height_z]` in metres, in the aligned box frame. Its origin
 is the box center; +Z is up. The localizer converts the top-tag pose into that
-frame. `tag_to_box_yaw` describes their fixed yaw offset.
+frame. `tag_to_box_yaw` describes their fixed yaw offset. These values apply
+only when no profile catalog is loaded.
 `tag_to_box_offset: [x, y, z]` adds a translation in tag-frame coordinates to
 the nominal centered-top-tag transform; its default `[0, 0, 0]` preserves the
 box-center position of half the box height below the tag. Use it to calibrate a
 tag that is not centered on the box top, or to apply a measured pickup-pose
 correction. Keep the `box_dimensions` values for `box_localizer` and
-`pick_place_server` identical.
+`pick_place_server` identical when using the legacy single-box fallback.
+
+## Runtime box profiles
+
+`config/box_profiles.yaml` is the single source of truth for box geometry and
+top-tag/grasp calibration. `box_pick_place.launch.py` passes the same
+`box_profiles_file` to `box_localizer` and `pick_place_server`, so a profile is
+configured only once. Each profile lists its `tag_ids`; tag frames are resolved
+as `box_profiles_tag_frame_prefix` plus the tag ID (the default is `tag0`,
+`tag1`, and so on). Add every physical tag ID to `config/apriltag.yaml` too.
+
+To add a type, copy a profile in that catalog and calibrate all of its values.
+Several tag IDs may identify instances of the same type:
+
+```yaml
+box_profiles:
+  large_carton:
+    tag_ids: [17, 18]
+    dimensions: [0.30, 0.40, 0.25]
+    tag_to_box_yaw: 0.0
+    tag_to_box_offset: [0.0, 0.0, 0.0]
+    pregrasp_distance: 0.08
+    contact_height_offset: 0.0
+```
+
+The localizer publishes `/box_states` with a stable `instance_id` such as
+`tag:17` and the resolved profile ID. Set `instance_id: "tag:17"` in Pick or
+PickPlace goals to choose that physical box. An empty `instance_id` remains
+compatible with legacy single-box deployments, but is rejected if more than
+one fresh box state is available. The server snapshots the selected profile before
+planning, applies its dimensions to grasp and collision geometry, and uses a
+per-instance MoveIt object ID. A persisted holding state also records this
+profile identity; if the matching profile is absent after a restart, recovery
+as holding is refused rather than using different geometry.
 
 ## Table-tag placement calibration
 

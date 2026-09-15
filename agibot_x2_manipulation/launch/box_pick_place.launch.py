@@ -126,10 +126,14 @@ def generate_launch_description():
     allow_execution = LaunchConfiguration("allow_execution")
     motion_planning_mode = LaunchConfiguration("motion_planning_mode")
     manipulation_state_file = LaunchConfiguration("manipulation_state_file")
+    box_profiles_file = LaunchConfiguration("box_profiles_file")
 
     config_share = get_package_share_directory("agibot_x2_moveit_config")
     manipulation_share = get_package_share_directory("agibot_x2_manipulation")
     params_file = os.path.join(manipulation_share, "config", "box_manipulation.yaml")
+    default_box_profiles_file = os.path.join(
+        manipulation_share, "config", "box_profiles.yaml"
+    )
     tag_params = os.path.join(manipulation_share, "config", "apriltag.yaml")
     dummy_tag_params = os.path.join(
         manipulation_share, "config", "dummy_apriltag.yaml"
@@ -154,6 +158,14 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "box_profiles_file",
+                default_value=default_box_profiles_file,
+                description=(
+                    "Shared box-profile catalog used by box_localizer and "
+                    "pick_place_server"
+                ),
+            ),
             DeclareLaunchArgument(
                 "command_transport", default_value="zmq", choices=["ros_topic", "zmq"]
             ),
@@ -451,7 +463,7 @@ def generate_launch_description():
                 executable="box_localizer_node",
                 name="box_localizer",
                 output="screen",
-                parameters=[params_file],
+                parameters=[params_file, box_profiles_file],
             ),
             Node(
                 package="agibot_x2_manipulation",
@@ -461,6 +473,7 @@ def generate_launch_description():
                 parameters=[
                     moveit_config.to_dict(),
                     params_file,
+                    box_profiles_file,
                     {
                         "perception_3d_source": perception_3d_source,
                         "allow_execution": ParameterValue(

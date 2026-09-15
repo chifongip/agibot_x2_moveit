@@ -24,6 +24,7 @@ struct PickPlaceConfig
 {
   std::string planning_frame;
   std::string box_pose_topic;
+  std::string box_states_topic;
   std::string planning_group;
   std::string left_group_name;
   std::string right_group_name;

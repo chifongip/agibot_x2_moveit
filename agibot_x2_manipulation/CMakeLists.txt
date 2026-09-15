@@ -49,6 +49,13 @@ target_include_directories(box_geometry PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(box_geometry Eigen3::Eigen)
 
+add_library(box_profile_registry src/box_profile_registry.cpp)
+target_include_directories(box_profile_registry PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(box_profile_registry box_geometry Eigen3::Eigen)
+ament_target_dependencies(box_profile_registry rclcpp)
+
 add_library(perception_readiness src/perception_readiness.cpp)
 target_include_directories(perception_readiness PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -90,14 +97,14 @@ target_include_directories(pick_place_core PRIVATE
 target_link_libraries(pick_place_core
   box_geometry closed_chain_path_planner perception_readiness planning_budget Eigen3::Eigen)
 ament_target_dependencies(pick_place_core
-  aimdk_msgs apriltag_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
+  agibot_x2_manipulation_msgs aimdk_msgs apriltag_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
   moveit_ros_planning_interface nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs
   std_srvs tf2_eigen tf2_geometry_msgs tf2_ros visualization_msgs)
 
 add_executable(box_localizer_node src/box_localizer_node.cpp)
-target_link_libraries(box_localizer_node box_geometry)
+target_link_libraries(box_localizer_node box_geometry box_profile_registry)
 ament_target_dependencies(box_localizer_node
-  apriltag_msgs geometry_msgs rclcpp tf2_eigen tf2_geometry_msgs tf2_ros visualization_msgs)
+  agibot_x2_manipulation_msgs apriltag_msgs geometry_msgs rclcpp tf2_eigen tf2_geometry_msgs tf2_ros visualization_msgs)
 
 add_executable(dummy_apriltag_node src/dummy_apriltag_node.cpp)
 target_link_libraries(dummy_apriltag_node box_geometry)
@@ -106,14 +113,14 @@ ament_target_dependencies(dummy_apriltag_node apriltag_msgs geometry_msgs rclcpp
 add_executable(pick_place_server src/pick_place_server.cpp)
 target_include_directories(pick_place_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pick_place_server
-  box_geometry closed_chain_path_planner perception_readiness pick_place_core planning_budget
+  box_geometry box_profile_registry closed_chain_path_planner perception_readiness pick_place_core planning_budget
   reset_coordinator reset_utils)
 ament_target_dependencies(pick_place_server
   agibot_x2_manipulation_msgs aimdk_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
   moveit_ros_planning_interface nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs std_srvs tf2_eigen
   tf2_geometry_msgs trajectory_msgs visualization_msgs)
 
-install(TARGETS box_geometry closed_chain_path_planner perception_readiness planning_budget reset_coordinator reset_utils box_localizer_node
+install(TARGETS box_geometry box_profile_registry closed_chain_path_planner perception_readiness planning_budget reset_coordinator reset_utils box_localizer_node
   dummy_apriltag_node pick_place_server
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -136,6 +143,9 @@ if(BUILD_TESTING)
   find_package(launch_testing_ament_cmake REQUIRED)
   ament_add_gtest(test_box_geometry test/test_box_geometry.cpp)
   target_link_libraries(test_box_geometry box_geometry)
+  ament_add_gtest(test_box_profile_registry test/test_box_profile_registry.cpp)
+  target_link_libraries(test_box_profile_registry box_profile_registry)
+  ament_target_dependencies(test_box_profile_registry rclcpp)
   ament_add_gtest(test_perception_readiness test/test_perception_readiness.cpp)
   target_link_libraries(test_perception_readiness perception_readiness)
   ament_add_gtest(test_planning_budget test/test_planning_budget.cpp)
@@ -165,5 +175,5 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_include_directories(include)
-ament_export_libraries(box_geometry closed_chain_path_planner perception_readiness planning_budget reset_coordinator reset_utils)
+ament_export_libraries(box_geometry box_profile_registry closed_chain_path_planner perception_readiness planning_budget reset_coordinator reset_utils)
 ament_package()

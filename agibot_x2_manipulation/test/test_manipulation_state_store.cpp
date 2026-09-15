@@ -54,11 +54,13 @@ TEST_F(ManipulationStateStoreTest, MissingAndLegacyStatesRemainCompatible)
   EXPECT_FALSE(holding.held_object.valid);
 }
 
-TEST_F(ManipulationStateStoreTest, VersionThreeHoldingGeometryAndCarryPosesRoundTrip)
+TEST_F(ManipulationStateStoreTest, VersionFourHoldingGeometryCarryPosesAndIdentityRoundTrip)
 {
   ManipulationStateStore store(path_.string());
   PersistedHeldObject expected;
   expected.valid = true;
+  expected.instance_id = "tag:42";
+  expected.profile_id = "large_carton";
   expected.pose.translation() = Eigen::Vector3d(0.35, -0.02, 0.41);
   expected.pose.linear() = Eigen::AngleAxisd(0.3, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   expected.box_to_left_contact.translation() = Eigen::Vector3d(0.0, 0.16, 0.0);
@@ -75,6 +77,8 @@ TEST_F(ManipulationStateStoreTest, VersionThreeHoldingGeometryAndCarryPosesRound
 
   ASSERT_EQ(actual.state, PersistedManipulationState::HOLDING);
   ASSERT_TRUE(actual.held_object.valid);
+  EXPECT_EQ(actual.held_object.instance_id, expected.instance_id);
+  EXPECT_EQ(actual.held_object.profile_id, expected.profile_id);
   EXPECT_TRUE(actual.held_object.pose.matrix().isApprox(expected.pose.matrix(), 1e-12));
   EXPECT_TRUE(
     actual.held_object.box_to_left_contact.matrix().isApprox(

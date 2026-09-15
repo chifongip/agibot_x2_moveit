@@ -4,6 +4,7 @@ box_localizer:
     tag_frame: tag0
     detections_topic: /detections
     tag_id: 0
+    box_states_topic: /box_states
     box_dimensions: [0.15, 0.36, 0.32]  # length X, width Y, height Z [m]
     tag_to_box_yaw: 0.0
     # Additional [x, y, z] correction from the centered top-tag model, in tag coordinates [m].
@@ -19,6 +20,7 @@ pick_place_server:
   ros__parameters:
     planning_frame: base_link
     box_pose_topic: /box_pose
+    box_states_topic: /box_states
     planning_group: dual_arm
     left_group: left_arm
     right_group: right_arm

@@ -1,3 +1,4 @@
+string instance_id
 geometry_msgs/PoseStamped place_pose
 bool plan_only
 ---

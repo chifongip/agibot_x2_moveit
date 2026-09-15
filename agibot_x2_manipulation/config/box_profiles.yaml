@@ -1,0 +1,21 @@
+/**:
+  ros__parameters:
+    # Each profile is loaded by both box_localizer and pick_place_server. The
+    # localizer resolves AprilTag IDs to profile IDs; the server resolves the
+    # profile ID to collision and grasp geometry at goal acceptance.
+    box_profiles_tag_frame_prefix: tag
+    box_profiles:
+      small_carton:
+        tag_ids: [0]
+        dimensions: [0.15, 0.36, 0.32]  # length X, width Y, height Z [m]
+        tag_to_box_yaw: 0.0
+        tag_to_box_offset: [0.04, 0.0, 0.1]
+        pregrasp_distance: 0.08
+        contact_height_offset: 0.0
+      grey_box:
+        tag_ids: [180]
+        dimensions: [0.30, 0.40, 0.12]
+        tag_to_box_yaw: 0.0
+        tag_to_box_offset: [0.0, 0.0, 0.0]
+        pregrasp_distance: 0.08
+        contact_height_offset: 0.0

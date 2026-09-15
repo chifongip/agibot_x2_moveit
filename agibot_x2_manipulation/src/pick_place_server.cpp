@@ -1,4 +1,5 @@
 #include "agibot_x2_manipulation/box_geometry.hpp"
+#include "agibot_x2_manipulation/box_profile_registry.hpp"
 #include "agibot_x2_manipulation/reset_coordinator.hpp"
 #include "agibot_x2_manipulation/reset_utils.hpp"
 #include "pick_place/attachment_controller.hpp"
@@ -27,6 +28,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -140,9 +142,11 @@ class PickPlaceServer
 {
 public:
   explicit PickPlaceServer(const rclcpp::Node::SharedPtr & node)
-  : node_(node), config_(loadPickPlaceConfig(node)), state_store_(config_.state_file),
+  : node_(node), config_(loadPickPlaceConfig(node)),
+    profiles_(BoxProfileRegistry::fromParameters(*node)), state_store_(config_.state_file),
     box_pose_tracker_(
-      node, config_.planning_frame, config_.box_pose_topic, config_.max_pose_age,
+      node, config_.planning_frame, config_.box_pose_topic, config_.box_states_topic,
+      config_.max_pose_age,
       config_.grasp_position_tolerance, config_.grasp_orientation_tolerance),
     move_group_(node, config_.planning_group), planning_scene_(node, config_),
     perception_(node, config_, planning_scene_), attachment_(node, config_),
@@ -151,6 +155,7 @@ public:
       node, config_, move_group_, planning_scene_, held_box_to_left_contact_,
       held_box_to_right_contact_, held_geometry_valid_, held_pose_)
   {
+    box_id_prefix_ = config_.box_id;
     if (config_.use_tag_derived_place_pose) {
       table_tag_pose_tracker_ = std::make_unique<TableTagPlacePoseTracker>(
         node_, config_.planning_frame, config_.table_tag_frame,
@@ -264,6 +269,94 @@ private:
   void releaseOperation()
   {
     reset_coordinator_.releaseOperation();
+  }
+
+  static std::string collisionObjectSuffix(const std::string & instance_id)
+  {
+    std::string suffix;
+    suffix.reserve(instance_id.size());
+    for (const unsigned char character : instance_id) {
+      suffix.push_back(std::isalnum(character) ? static_cast<char>(character) : '_');
+    }
+    return suffix;
+  }
+
+  static geometry_msgs::msg::PoseStamped stampedBoxPose(const TrackedBoxPose & box)
+  {
+    geometry_msgs::msg::PoseStamped result;
+    result.header = box.pose.header;
+    result.pose = box.pose.pose.pose;
+    return result;
+  }
+
+  void rebuildTableTagPoseTracker()
+  {
+    table_tag_pose_tracker_.reset();
+    if (!config_.use_tag_derived_place_pose) {
+      return;
+    }
+    table_tag_pose_tracker_ = std::make_unique<TableTagPlacePoseTracker>(
+      node_, config_.planning_frame, config_.table_tag_frame,
+      config_.table_tag_detections_topic, config_.table_tag_id,
+      config_.table_tag_minimum_decision_margin, config_.dimensions,
+      config_.table_tag_height_above_tabletop, config_.table_tag_place_offset.x(),
+      config_.table_tag_place_offset.y(), config_.table_tag_to_box_yaw,
+      static_cast<std::size_t>(config_.table_tag_stable_sample_count),
+      config_.maximum_table_tag_pose_age, config_.table_tag_maximum_position_spread,
+      config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap,
+      config_.pickup_tag_to_box_yaw, config_.pickup_tag_to_box_offset);
+  }
+
+  bool activateBoxProfile(const TrackedBoxPose & box, std::string & error)
+  {
+    if (box.profile_id.empty()) {
+      if (!profiles_.empty()) {
+        error = "box state has no profile while box_profiles are configured";
+        return false;
+      }
+      active_box_instance_id_ = box.instance_id.empty() ? "legacy" : box.instance_id;
+      active_profile_id_.clear();
+      return true;
+    }
+    if (box.instance_id.empty()) {
+      error = "profiled box state has no instance_id";
+      return false;
+    }
+    const BoxProfile * profile = profiles_.find(box.profile_id);
+    if (!profile) {
+      error = "box state references an unknown profile: " + box.profile_id;
+      return false;
+    }
+    const auto state = state_.load();
+    if (state != ManipulationState::EMPTY && state != ManipulationState::UNKNOWN &&
+      active_box_instance_id_ != box.instance_id)
+    {
+      error = "cannot change the active box while an object is held";
+      return false;
+    }
+
+    config_.dimensions = profile->dimensions;
+    config_.pregrasp_distance = profile->pregrasp_distance;
+    config_.contact_height_offset = profile->contact_height_offset;
+    config_.pickup_tag_to_box_yaw = profile->tag_to_box_yaw;
+    config_.pickup_tag_to_box_offset = profile->tag_to_box_offset;
+    config_.box_id = box_id_prefix_ + "_" + collisionObjectSuffix(box.instance_id);
+    active_box_instance_id_ = box.instance_id;
+    active_profile_id_ = profile->id;
+    rebuildTableTagPoseTracker();
+    return true;
+  }
+
+  bool selectBox(
+    const std::string & instance_id, TrackedBoxPose & box, std::string & error)
+  {
+    if (!box_pose_tracker_.stablePose(instance_id, box)) {
+      error = instance_id.empty() ?
+        "no uniquely selectable fresh box state; specify instance_id" :
+        "no fresh stable pose for box instance: " + instance_id;
+      return false;
+    }
+    return activateBoxProfile(box, error);
   }
 
   bool resolvePlacePose(
@@ -456,15 +549,42 @@ private:
     const auto saved = state_store_.read();
     if (saved.state == PersistedManipulationState::HOLDING) {
       if (saved.held_object.valid) {
-        held_pose_ = stampedPose(saved.held_object.pose);
-        held_box_to_left_contact_ = saved.held_object.box_to_left_contact;
-        held_box_to_right_contact_ = saved.held_object.box_to_right_contact;
-        held_geometry_valid_ = true;
-        if (saved.held_object.carry_pose_a_valid) {
-          selected_carry_pose_a_ = saved.held_object.carry_pose_a;
+        bool profile_ready = true;
+        if (saved.held_object.profile_id.empty()) {
+          if (!profiles_.empty()) {
+            RCLCPP_WARN(
+              node_->get_logger(),
+              "Ignoring persisted holding geometry in '%s': its box profile is unavailable",
+              config_.state_file.c_str());
+            profile_ready = false;
+          } else {
+            active_box_instance_id_ = saved.held_object.instance_id.empty() ?
+              "legacy" : saved.held_object.instance_id;
+            active_profile_id_.clear();
+          }
+        } else {
+          TrackedBoxPose persisted_box;
+          persisted_box.instance_id = saved.held_object.instance_id;
+          persisted_box.profile_id = saved.held_object.profile_id;
+          std::string error;
+          if (!activateBoxProfile(persisted_box, error)) {
+            RCLCPP_WARN(
+              node_->get_logger(), "Ignoring persisted holding geometry in '%s': %s",
+              config_.state_file.c_str(), error.c_str());
+            profile_ready = false;
+          }
         }
-        if (saved.held_object.carry_pose_b_valid) {
-          selected_carry_pose_b_ = saved.held_object.carry_pose_b;
+        if (profile_ready) {
+          held_pose_ = stampedPose(saved.held_object.pose);
+          held_box_to_left_contact_ = saved.held_object.box_to_left_contact;
+          held_box_to_right_contact_ = saved.held_object.box_to_right_contact;
+          held_geometry_valid_ = true;
+          if (saved.held_object.carry_pose_a_valid) {
+            selected_carry_pose_a_ = saved.held_object.carry_pose_a;
+          }
+          if (saved.held_object.carry_pose_b_valid) {
+            selected_carry_pose_b_ = saved.held_object.carry_pose_b;
+          }
         }
       } else {
         RCLCPP_WARN(
@@ -494,6 +614,8 @@ private:
       held_object.valid = state != ManipulationState::EMPTY && held_geometry_valid_ &&
         !held_pose_.header.frame_id.empty();
       if (held_object.valid) {
+        held_object.instance_id = active_box_instance_id_;
+        held_object.profile_id = active_profile_id_;
         held_object.pose = toEigen(held_pose_.pose);
         held_object.box_to_left_contact = held_box_to_left_contact_;
         held_object.box_to_right_contact = held_box_to_right_contact_;
@@ -564,6 +686,10 @@ private:
 
   bool recoverHolding(std::string & error)
   {
+    if (!profiles_.empty() && active_profile_id_.empty()) {
+      error = "cannot recover a profiled box without its persisted profile identity";
+      return false;
+    }
     auto current = move_group_.getCurrentState(2.0);
     if (!current) {
       error = "current robot state unavailable";
@@ -813,7 +939,8 @@ private:
 
 
   TaskOutcome runPick(
-    bool plan_only, const FeedbackFunction & feedback, const CancelFunction & canceled,
+    bool plan_only, const std::string & instance_id, const FeedbackFunction & feedback,
+    const CancelFunction & canceled,
     const geometry_msgs::msg::PoseStamped * requested_place = nullptr)
   {
     if (canceled()) {
@@ -822,10 +949,12 @@ private:
     if (state_.load() != ManipulationState::EMPTY) {
       return outcome(false, kInvalidState, "Pick requires manipulation state EMPTY");
     }
-    geometry_msgs::msg::PoseStamped box_message;
-    if (!box_pose_tracker_.stablePose(box_message)) {
-      return outcome(false, kNoStableBoxPose, "no fresh stable box pose");
+    TrackedBoxPose tracked_box;
+    std::string selection_error;
+    if (!selectBox(instance_id, tracked_box, selection_error)) {
+      return outcome(false, kNoStableBoxPose, selection_error);
     }
+    const geometry_msgs::msg::PoseStamped box_message = stampedBoxPose(tracked_box);
     Eigen::Isometry3d pick_pose;
     Eigen::Isometry3d pick_place_target = Eigen::Isometry3d::Identity();
     try {
@@ -907,8 +1036,8 @@ private:
     if (canceled()) {
       return outcome(false, kSafetyAbort, "pick canceled before pregrasp execution");
     }
-    geometry_msgs::msg::PoseStamped revalidated_box;
-    if (!box_pose_tracker_.stillWithinTolerance(pick_pose, revalidated_box, error)) {
+    TrackedBoxPose revalidated_box;
+    if (!box_pose_tracker_.stillWithinTolerance(tracked_box, revalidated_box, error)) {
       return outcome(false, kSafetyAbort, error);
     }
     if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
@@ -919,7 +1048,7 @@ private:
     if (canceled()) {
       return outcome(false, kExecutionFailed, "pick canceled before approach");
     }
-    if (!box_pose_tracker_.stillWithinTolerance(pick_pose, revalidated_box, error)) {
+    if (!box_pose_tracker_.stillWithinTolerance(tracked_box, revalidated_box, error)) {
       return outcome(false, kSafetyAbort, error);
     }
     const auto & pick_grasp = selected_grasp.candidate.grasp;
@@ -1211,7 +1340,8 @@ private:
   }
 
   TaskOutcome planCompletePath(
-    const geometry_msgs::msg::PoseStamped & requested_place, const CancelFunction & canceled)
+    const std::string & instance_id, const geometry_msgs::msg::PoseStamped & requested_place,
+    const CancelFunction & canceled)
   {
     if (canceled()) {
       return outcome(false, kSafetyAbort, "PickPlace planning canceled before validation");
@@ -1219,10 +1349,12 @@ private:
     if (state_.load() != ManipulationState::EMPTY) {
       return outcome(false, kInvalidState, "PickPlace requires manipulation state EMPTY");
     }
-    geometry_msgs::msg::PoseStamped box_message;
-    if (!box_pose_tracker_.stablePose(box_message)) {
-      return outcome(false, kNoStableBoxPose, "no fresh stable box pose");
+    TrackedBoxPose tracked_box;
+    std::string selection_error;
+    if (!selectBox(instance_id, tracked_box, selection_error)) {
+      return outcome(false, kNoStableBoxPose, selection_error);
     }
+    const geometry_msgs::msg::PoseStamped box_message = stampedBoxPose(tracked_box);
     geometry_msgs::msg::PoseStamped place_message;
     std::string error;
     if (!resolvePlacePose(requested_place, place_message, error, canceled)) {
@@ -1507,7 +1639,7 @@ private:
     TaskOutcome task;
     try {
       task = runPick(
-        goal->get_goal()->plan_only, feedback,
+        goal->get_goal()->plan_only, goal->get_goal()->instance_id, feedback,
         [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested();});
     } catch (const std::exception & exception) {
       move_group_.stop();
@@ -1589,10 +1721,13 @@ private:
     try {
       geometry_msgs::msg::PoseStamped place_pose;
       std::string place_error;
-      if (!resolvePlacePose(goal->get_goal()->place_pose, place_pose, place_error, canceled)) {
+      TrackedBoxPose selected_box;
+      if (!selectBox(goal->get_goal()->instance_id, selected_box, place_error)) {
+        task = outcome(false, kNoStableBoxPose, place_error);
+      } else if (!resolvePlacePose(goal->get_goal()->place_pose, place_pose, place_error, canceled)) {
         task = outcome(false, kInvalidGoal, place_error);
       } else if (goal->get_goal()->plan_only) {
-        task = planCompletePath(place_pose, canceled);
+        task = planCompletePath(goal->get_goal()->instance_id, place_pose, canceled);
       } else {
         const FeedbackFunction pick_feedback = [goal](
           const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
@@ -1602,7 +1737,8 @@ private:
             message->box_pose = pose;
             goal->publish_feedback(message);
           };
-        task = runPick(false, pick_feedback, canceled, &place_pose);
+        task = runPick(
+          false, goal->get_goal()->instance_id, pick_feedback, canceled, &place_pose);
         if (task.success) {
           const FeedbackFunction place_feedback = [goal](
             const std::string & stage, float progress,
@@ -1635,7 +1771,11 @@ private:
   }
 
   rclcpp::Node::SharedPtr node_;
-  const PickPlaceConfig config_;
+  PickPlaceConfig config_;
+  BoxProfileRegistry profiles_;
+  std::string box_id_prefix_;
+  std::string active_box_instance_id_;
+  std::string active_profile_id_;
   ManipulationStateStore state_store_;
   BoxPoseTracker box_pose_tracker_;
   std::unique_ptr<TableTagPlacePoseTracker> table_tag_pose_tracker_;

@@ -54,7 +54,9 @@ PersistedManipulationRecord ManipulationStateStore::read() const
     int version = 0;
     std::string label;
     input >> version >> label >> saved;
-    if ((version == 2 || version == 3) && label == "STATE" && saved == "HOLDING") {
+    if ((version == 2 || version == 3 || version == 4) && label == "STATE" &&
+      saved == "HOLDING")
+    {
       std::string pose_label;
       std::string left_label;
       std::string right_label;
@@ -68,7 +70,7 @@ PersistedManipulationRecord ManipulationStateStore::read() const
       const bool right_ok = right_label == "RIGHT_CONTACT" &&
         readTransform(input, record.held_object.box_to_right_contact);
       record.held_object.valid = pose_ok && left_ok && right_ok;
-      if (version == 3 && record.held_object.valid) {
+      if (version >= 3 && record.held_object.valid) {
         std::string carry_a_label;
         std::string carry_b_label;
         int carry_a_valid = 0;
@@ -83,6 +85,15 @@ PersistedManipulationRecord ManipulationStateStore::read() const
           (carry_b_valid == 0 || readTransform(input, record.held_object.carry_pose_b));
         record.held_object.carry_pose_a_valid = carry_a_ok && carry_a_valid == 1;
         record.held_object.carry_pose_b_valid = carry_b_ok && carry_b_valid == 1;
+      }
+      if (version >= 4 && record.held_object.valid) {
+        std::string instance_label;
+        std::string profile_label;
+        input >> instance_label >> std::quoted(record.held_object.instance_id);
+        const bool instance_ok = input && instance_label == "INSTANCE_ID";
+        input >> profile_label >> std::quoted(record.held_object.profile_id);
+        const bool profile_ok = input && profile_label == "PROFILE_ID";
+        record.held_object.valid = instance_ok && profile_ok;
       }
     }
   }
@@ -107,7 +118,7 @@ void ManipulationStateStore::write(
     if (!output) {
       throw std::runtime_error("cannot open state file");
     }
-    output << "VERSION 3\nSTATE " <<
+    output << "VERSION 4\nSTATE " <<
       (state == PersistedManipulationState::EMPTY ? "EMPTY\n" : "HOLDING\n");
     if (state != PersistedManipulationState::EMPTY && held_object.valid) {
       output << "POSE ";
@@ -130,6 +141,8 @@ void ManipulationStateStore::write(
       } else {
         output << '\n';
       }
+      output << "INSTANCE_ID " << std::quoted(held_object.instance_id) << '\n';
+      output << "PROFILE_ID " << std::quoted(held_object.profile_id) << '\n';
     }
   }
   std::filesystem::rename(temporary, path);

@@ -2,6 +2,7 @@
 
 #include "agibot_x2_manipulation/box_geometry.hpp"
 
+#include <agibot_x2_manipulation_msgs/msg/box_state_array.hpp>
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
@@ -14,6 +15,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -21,17 +23,25 @@
 namespace agibot_x2_manipulation
 {
 
+struct TrackedBoxPose
+{
+  std::string instance_id;
+  std::string profile_id;
+  geometry_msgs::msg::PoseWithCovarianceStamped pose;
+};
+
 class BoxPoseTracker
 {
 public:
   BoxPoseTracker(
     const rclcpp::Node::SharedPtr & node, std::string planning_frame,
-    std::string topic, double maximum_age, double position_tolerance,
+    std::string legacy_topic, std::string states_topic, double maximum_age,
+    double position_tolerance,
     double orientation_tolerance);
 
-  bool stablePose(geometry_msgs::msg::PoseStamped & pose) const;
+  bool stablePose(const std::string & instance_id, TrackedBoxPose & pose) const;
   bool stillWithinTolerance(
-    const Eigen::Isometry3d & reference, geometry_msgs::msg::PoseStamped & latest,
+    const TrackedBoxPose & reference, TrackedBoxPose & latest,
     std::string & error) const;
   bool transformGoalPose(
     const geometry_msgs::msg::PoseStamped & input, geometry_msgs::msg::PoseStamped & output,
@@ -45,11 +55,12 @@ private:
   double position_tolerance_;
   double orientation_tolerance_;
   mutable std::mutex mutex_;
-  bool have_pose_{false};
-  geometry_msgs::msg::PoseWithCovarianceStamped latest_pose_;
+  std::map<std::string, TrackedBoxPose> latest_poses_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr subscription_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr legacy_subscription_;
+  rclcpp::Subscription<agibot_x2_manipulation_msgs::msg::BoxStateArray>::SharedPtr
+  states_subscription_;
 };
 
 struct TableTagPoseStabilityUpdate

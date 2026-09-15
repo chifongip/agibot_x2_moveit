@@ -17,6 +17,8 @@ enum class PersistedManipulationState
 struct PersistedHeldObject
 {
   bool valid{false};
+  std::string instance_id;
+  std::string profile_id;
   Eigen::Isometry3d pose{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d box_to_left_contact{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d box_to_right_contact{Eigen::Isometry3d::Identity()};

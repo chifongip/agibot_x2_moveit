@@ -69,6 +69,7 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   PickPlaceConfig config;
   config.planning_frame = parameter<std::string>(node, "planning_frame", "base_link");
   config.box_pose_topic = parameter<std::string>(node, "box_pose_topic", "/box_pose");
+  config.box_states_topic = parameter<std::string>(node, "box_states_topic", "/box_states");
   config.planning_group = parameter<std::string>(node, "planning_group", "dual_arm");
   config.left_group_name = parameter<std::string>(node, "left_group", "left_arm");
   config.right_group_name = parameter<std::string>(node, "right_group", "right_arm");

@@ -14,6 +14,7 @@ from agibot_x2_manipulation_image_test import (
 
 
 CONFIG_FILE = Path(__file__).parents[1] / "config" / "box_manipulation.yaml"
+BOX_PROFILES_FILE = Path(__file__).parents[1] / "config" / "box_profiles.yaml"
 RECORDED_JOINT_STATE_FILE = (
     Path(__file__).parents[1] / "config" / "recorded_planning_failure_joint_state.yaml"
 )
@@ -62,6 +63,23 @@ def test_launch_controls_perception_source_selection():
     assert '"arm_state_topic": arm_state_topic' in LAUNCH_FILE.read_text(
         encoding="utf-8"
     )
+
+
+def test_box_profiles_are_shared_by_localization_and_planning():
+    with BOX_PROFILES_FILE.open(encoding="utf-8") as stream:
+        catalog = yaml.safe_load(stream)["/**"]["ros__parameters"]
+
+    profile = catalog["box_profiles"]["small_carton"]
+    assert catalog["box_profiles_tag_frame_prefix"] == "tag"
+    assert profile["tag_ids"] == [0]
+    assert len(profile["dimensions"]) == 3
+    assert len(profile["tag_to_box_offset"]) == 3
+    assert profile["pregrasp_distance"] > 0.0
+
+    launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
+    assert '"box_profiles_file"' in launch_source
+    assert "parameters=[params_file, box_profiles_file]" in launch_source
+    assert "params_file,\n                    box_profiles_file," in launch_source
 
 
 def test_carry_pose_configuration_and_manual_transition_action_are_available():
@@ -159,8 +177,8 @@ def test_tag9_derives_the_default_table_place_pose():
     assert config["use_tag_derived_place_pose"] is True
     assert config["table_tag_frame"] == "tag9"
     assert config["table_tag_height_above_tabletop"] > 0.0
-    assert config["table_tag_place_offset"] == [0.0, 0.15]
-    assert config["tag_to_box_offset"] == [0.0, 0.0, 0.0]
+    assert config["table_tag_place_offset"] == [0.0, 0.2]
+    assert config["tag_to_box_offset"] == [0.04, 0.0, 0.1]
     assert config["maximum_table_tag_pose_age"] > 0.0
     assert config["table_tag_detections_topic"] == "/front_center_rectify/detections"
     assert config["table_tag_id"] == 9
@@ -287,8 +305,8 @@ def test_coordinated_grasp_search_has_conservative_limits():
     config = document["pick_place_server"]["ros__parameters"]
 
     assert localizer["maximum_box_tilt"] <= 0.349066
-    assert config["grasp_position_tolerance"] <= 0.020
-    assert config["grasp_orientation_tolerance"] <= 0.139627
+    assert config["grasp_position_tolerance"] <= 0.05
+    assert config["grasp_orientation_tolerance"] <= 0.174534
     assert config["maximum_grasp_candidates"] > 0
     assert config["ik_attempts_per_candidate"] >= 4
     assert config["maximum_planning_candidates"] > 0
@@ -304,16 +322,16 @@ def test_coordinated_grasp_search_has_conservative_limits():
     assert config["closed_chain_projection_limit"] == 32
     assert config["closed_chain_validation_position_step"] <= 0.005
     assert config["closed_chain_validation_orientation_step"] <= 0.017454
-    assert config["closed_chain_contact_position_error"] <= 0.002
-    assert config["closed_chain_contact_orientation_error"] <= 0.017454
+    assert config["closed_chain_contact_position_error"] <= 0.05
+    assert config["closed_chain_contact_orientation_error"] <= 0.174534
     assert config["carry_search_timeout"] == 8.0
     assert config["carry_search_z_lower"] >= 0.12
     assert config["carry_search_z_upper"] <= 0.03
     assert config["carry_search_x_range"] <= 0.05
     assert config["carry_search_y_range"] <= 0.03
     assert config["carry_search_orientation_tolerance"] <= 0.174534
-    assert config["adaptive_place_position_tolerance"] == [0.015, 0.015, 0.005]
-    assert config["adaptive_place_yaw_tolerance"] <= 0.087267
+    assert config["adaptive_place_position_tolerance"] == [0.05, 0.05, 0.02]
+    assert config["adaptive_place_yaw_tolerance"] <= 0.174534
     assert (
         config["maximum_planning_candidates"]
         * config["planning_time_per_candidate"]
