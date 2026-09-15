@@ -1,5 +1,6 @@
 #pragma once
 
+#include "agibot_x2_manipulation/box_geometry.hpp"
 #include "pick_place/pick_place_config.hpp"
 
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
@@ -12,10 +13,19 @@
 
 #include <Eigen/Geometry>
 
+#include <set>
 #include <string>
+#include <vector>
 
 namespace agibot_x2_manipulation
 {
+
+struct SceneBox
+{
+  std::string id;
+  BoxDimensions dimensions;
+  Eigen::Isometry3d pose{Eigen::Isometry3d::Identity()};
+};
 
 class PlanningSceneManager
 {
@@ -25,6 +35,9 @@ public:
 
   bool synchronize(std::string & error);
   bool applyBox(const Eigen::Isometry3d & pose, std::string & error);
+  bool applyObstacleBoxes(const std::vector<SceneBox> & boxes, std::string & error);
+  bool clearOwnedBoxes(std::string & error);
+  bool clearManagedBoxes(std::string & error);
   bool removeBox(std::string & error);
   bool detachBox(std::string & error);
   bool attachBox(std::string & error);
@@ -46,12 +59,20 @@ public:
     bool allow_pad_contact) const;
 
 private:
+  moveit_msgs::msg::CollisionObject makeBoxObject(
+    const std::string & id, const BoxDimensions & dimensions,
+    const Eigen::Isometry3d & pose) const;
+  bool removeOwnedBox(const std::string & id, std::string & error);
+  bool isManagedBoxId(const std::string & id) const;
   void auditCollisionObject(
     const moveit_msgs::msg::CollisionObject & object, const char * topic) const;
 
   rclcpp::Node::SharedPtr node_;
   const PickPlaceConfig & config_;
+  std::string managed_box_id_prefix_;
   moveit::planning_interface::PlanningSceneInterface scene_interface_;
+  std::set<std::string> owned_box_ids_;
+  std::set<std::string> obstacle_box_ids_;
   planning_scene_monitor::PlanningSceneMonitorPtr scene_monitor_;
   rclcpp::Subscription<moveit_msgs::msg::PlanningScene>::SharedPtr scene_audit_sub_;
   rclcpp::Subscription<moveit_msgs::msg::PlanningSceneWorld>::SharedPtr world_audit_sub_;

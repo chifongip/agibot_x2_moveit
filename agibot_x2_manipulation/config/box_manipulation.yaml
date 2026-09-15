@@ -21,6 +21,8 @@ pick_place_server:
     planning_frame: base_link
     box_pose_topic: /box_pose
     box_states_topic: /box_states
+    # Model every fresh non-target profile instance as a MoveIt obstacle.
+    visible_boxes_as_obstacles: true
     planning_group: dual_arm
     left_group: left_arm
     right_group: right_arm

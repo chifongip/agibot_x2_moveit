@@ -76,6 +76,10 @@ def test_box_profiles_are_shared_by_localization_and_planning():
     assert len(profile["tag_to_box_offset"]) == 3
     assert profile["pregrasp_distance"] > 0.0
 
+    with CONFIG_FILE.open(encoding="utf-8") as stream:
+        server_config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
+    assert server_config["visible_boxes_as_obstacles"] is True
+
     launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
     assert '"box_profiles_file"' in launch_source
     assert "parameters=[params_file, box_profiles_file]" in launch_source
@@ -100,6 +104,21 @@ def test_local_scene_monitor_skips_octomap_without_3d_perception():
     assert "config_.perception_source != Perception3dSource::NONE" in source
     assert "startWorldGeometryMonitor(" in source
     assert "load_octomap_monitor);" in source
+
+
+def test_managed_box_objects_are_removed_after_empty_operations_and_restart():
+    scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
+    server_source = (
+        Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "bool PlanningSceneManager::clearManagedBoxes" in scene_source
+    assert "managed_box_id_prefix_" in scene_source
+    assert "scene_interface_.getObjects()" in scene_source
+    assert "scene_interface_.getAttachedObjects()" in scene_source
+    assert "clearManagedBoxes(error)" in scene_source
+    assert "clearSceneAfterEmptyOperation(task);" in server_source
+    assert "planning_scene_.clearManagedBoxes(error)" in server_source
 
 
 def test_pose_to_pose_mode_is_selectable_and_closed_chain_remains_default():

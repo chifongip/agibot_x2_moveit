@@ -172,12 +172,31 @@ bool BoxPoseTracker::stablePose(
   return true;
 }
 
+std::map<std::string, TrackedBoxPose> BoxPoseTracker::freshPoses() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::map<std::string, TrackedBoxPose> result;
+  for (const auto & entry : latest_poses_) {
+    const auto & candidate = entry.second;
+    if (candidate.pose.header.frame_id == planning_frame_ &&
+      (node_->now() - candidate.pose.header.stamp).seconds() <= maximum_age_)
+    {
+      result.emplace(entry.first, candidate);
+    }
+  }
+  return result;
+}
+
 bool BoxPoseTracker::stillWithinTolerance(
   const TrackedBoxPose & reference, TrackedBoxPose & latest,
   std::string & error) const
 {
   if (!stablePose(reference.instance_id, latest)) {
     error = "box pose became stale before approach";
+    return false;
+  }
+  if (latest.profile_id != reference.profile_id) {
+    error = "box profile changed before approach";
     return false;
   }
   Eigen::Isometry3d current;

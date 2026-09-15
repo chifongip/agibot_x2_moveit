@@ -40,6 +40,7 @@ public:
     double orientation_tolerance);
 
   bool stablePose(const std::string & instance_id, TrackedBoxPose & pose) const;
+  std::map<std::string, TrackedBoxPose> freshPoses() const;
   bool stillWithinTolerance(
     const TrackedBoxPose & reference, TrackedBoxPose & latest,
     std::string & error) const;

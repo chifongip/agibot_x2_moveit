@@ -128,6 +128,20 @@ per-instance MoveIt object ID. A persisted holding state also records this
 profile identity; if the matching profile is absent after a restart, recovery
 as holding is refused rather than using different geometry.
 
+With `visible_boxes_as_obstacles:=true` (the default), every other fresh,
+configured instance is added to MoveIt as a collision obstacle for Pick,
+PickPlace, Place, and carry transitions. The server rechecks the visible-box
+set before each execution segment and rejects the motion if an obstacle appears,
+disappears, changes profile, or moves beyond the configured pose tolerance.
+Do not disable this on hardware when more than one box can be in the workspace.
+Each tag currently identifies one physical box; multiple tags on one box require
+an explicit tag-fusion configuration before they can be treated as one instance.
+
+The server owns collision objects named `box_id` and `box_id_<instance_id>`.
+It removes that namespace before a new EMPTY-state pick and after every terminal
+EMPTY operation, including plan-only requests. This also removes objects left by
+a restarted server without affecting collision objects outside that namespace.
+
 ## Table-tag placement calibration
 
 The default launch derives an empty action `place_pose` from `tag9`. The tag is

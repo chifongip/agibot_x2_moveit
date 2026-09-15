@@ -27,9 +27,27 @@ geometry_msgs::msg::Pose toPoseMsg(const Eigen::Isometry3d & pose)
 
 }  // namespace
 
+moveit_msgs::msg::CollisionObject PlanningSceneManager::makeBoxObject(
+  const std::string & id, const BoxDimensions & dimensions,
+  const Eigen::Isometry3d & pose) const
+{
+  moveit_msgs::msg::CollisionObject object;
+  object.header.frame_id = config_.planning_frame;
+  object.header.stamp.sec = 0;
+  object.header.stamp.nanosec = 0;
+  object.id = id;
+  shape_msgs::msg::SolidPrimitive primitive;
+  primitive.type = shape_msgs::msg::SolidPrimitive::BOX;
+  primitive.dimensions = {dimensions.length, dimensions.width, dimensions.height};
+  object.primitives.push_back(primitive);
+  object.primitive_poses.push_back(toPoseMsg(pose));
+  object.operation = moveit_msgs::msg::CollisionObject::ADD;
+  return object;
+}
+
 PlanningSceneManager::PlanningSceneManager(
   const rclcpp::Node::SharedPtr & node, const PickPlaceConfig & config)
-: node_(node), config_(config)
+: node_(node), config_(config), managed_box_id_prefix_(config.box_id)
 {
   scene_monitor_ = std::make_shared<planning_scene_monitor::PlanningSceneMonitor>(
     node_, "robot_description", "x2_pick_place_scene_monitor");
@@ -104,27 +122,143 @@ bool PlanningSceneManager::synchronize(std::string & error)
 bool PlanningSceneManager::applyBox(const Eigen::Isometry3d & pose, std::string & error)
 {
   try {
-    moveit_msgs::msg::CollisionObject object;
-    object.header.frame_id = config_.planning_frame;
-    object.header.stamp.sec = 0;
-    object.header.stamp.nanosec = 0;
-    object.id = config_.box_id;
-    shape_msgs::msg::SolidPrimitive primitive;
-    primitive.type = shape_msgs::msg::SolidPrimitive::BOX;
-    primitive.dimensions = {
-      config_.dimensions.length, config_.dimensions.width, config_.dimensions.height};
-    object.primitives.push_back(primitive);
-    object.primitive_poses.push_back(toPoseMsg(pose));
-    object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    const auto object = makeBoxObject(config_.box_id, config_.dimensions, pose);
     if (!scene_interface_.applyCollisionObject(object)) {
       error = "MoveIt rejected the box collision object";
       return false;
     }
+    owned_box_ids_.insert(config_.box_id);
     return true;
   } catch (const std::exception & exception) {
     error = "failed to apply the box collision object: " + std::string(exception.what());
     return false;
   }
+}
+
+bool PlanningSceneManager::removeOwnedBox(const std::string & id, std::string & error)
+{
+  try {
+    if (!scene_interface_.getAttachedObjects({id}).empty()) {
+      moveit_msgs::msg::AttachedCollisionObject attached;
+      attached.object.id = id;
+      attached.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+      if (!scene_interface_.applyAttachedCollisionObject(attached)) {
+        error = "MoveIt rejected removal of owned attached box '" + id + "'";
+        return false;
+      }
+    }
+    if (!scene_interface_.getObjects({id}).empty()) {
+      moveit_msgs::msg::CollisionObject object;
+      object.header.frame_id = config_.planning_frame;
+      object.id = id;
+      object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+      if (!scene_interface_.applyCollisionObject(object)) {
+        error = "MoveIt rejected removal of owned box '" + id + "'";
+        return false;
+      }
+    }
+    return true;
+  } catch (const std::exception & exception) {
+    error = "failed to remove owned box '" + id + "': " + exception.what();
+    return false;
+  }
+}
+
+bool PlanningSceneManager::applyObstacleBoxes(
+  const std::vector<SceneBox> & boxes, std::string & error)
+{
+  std::set<std::string> requested_ids;
+  for (const auto & box : boxes) {
+    if (box.id.empty() || box.id == config_.box_id ||
+      box.dimensions.length <= 0.0 || box.dimensions.width <= 0.0 ||
+      box.dimensions.height <= 0.0 || !box.pose.matrix().allFinite())
+    {
+      error = "invalid visible-box obstacle";
+      return false;
+    }
+    if (!requested_ids.insert(box.id).second) {
+      error = "duplicate visible-box obstacle ID: " + box.id;
+      return false;
+    }
+  }
+
+  for (auto it = obstacle_box_ids_.begin(); it != obstacle_box_ids_.end();) {
+    if (requested_ids.count(*it) != 0U) {
+      ++it;
+      continue;
+    }
+    if (!removeOwnedBox(*it, error)) {
+      return false;
+    }
+    owned_box_ids_.erase(*it);
+    it = obstacle_box_ids_.erase(it);
+  }
+
+  for (const auto & box : boxes) {
+    try {
+      if (!scene_interface_.applyCollisionObject(
+          makeBoxObject(box.id, box.dimensions, box.pose)))
+      {
+        error = "MoveIt rejected visible-box obstacle '" + box.id + "'";
+        return false;
+      }
+    } catch (const std::exception & exception) {
+      error = "failed to apply visible-box obstacle '" + box.id + "': " + exception.what();
+      return false;
+    }
+    owned_box_ids_.insert(box.id);
+    obstacle_box_ids_.insert(box.id);
+  }
+  return true;
+}
+
+bool PlanningSceneManager::clearOwnedBoxes(std::string & error)
+{
+  for (const auto & id : owned_box_ids_) {
+    if (!removeOwnedBox(id, error)) {
+      return false;
+    }
+  }
+  owned_box_ids_.clear();
+  obstacle_box_ids_.clear();
+  return true;
+}
+
+bool PlanningSceneManager::isManagedBoxId(const std::string & id) const
+{
+  return id == managed_box_id_prefix_ ||
+         id.rfind(managed_box_id_prefix_ + "_", 0) == 0;
+}
+
+bool PlanningSceneManager::clearManagedBoxes(std::string & error)
+{
+  std::set<std::string> managed_ids = owned_box_ids_;
+  managed_ids.insert(config_.box_id);
+  try {
+    for (const auto & entry : scene_interface_.getObjects()) {
+      if (isManagedBoxId(entry.first)) {
+        managed_ids.insert(entry.first);
+      }
+    }
+    for (const auto & entry : scene_interface_.getAttachedObjects()) {
+      if (isManagedBoxId(entry.first)) {
+        managed_ids.insert(entry.first);
+      }
+    }
+  } catch (const std::exception & exception) {
+    error = "failed to discover managed collision objects: " +
+      std::string(exception.what());
+    return false;
+  }
+
+  for (const auto & id : managed_ids) {
+    if (!removeOwnedBox(id, error)) {
+      return false;
+    }
+  }
+  owned_box_ids_.clear();
+  obstacle_box_ids_.clear();
+  return true;
 }
 
 bool PlanningSceneManager::removeBox(std::string & error)
@@ -226,7 +360,7 @@ bool PlanningSceneManager::verifyBoxState(
 
 bool PlanningSceneManager::clearBox(std::string & error)
 {
-  return detachBox(error) && removeBox(error) && verifyBoxState(false, false, error);
+  return clearManagedBoxes(error) && verifyBoxState(false, false, error);
 }
 
 bool PlanningSceneManager::placeBox(const Eigen::Isometry3d & pose, std::string & error)

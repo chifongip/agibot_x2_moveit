@@ -9,7 +9,9 @@
 #include <array>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <thread>
+#include <vector>
 
 namespace agibot_x2_manipulation
 {
@@ -137,6 +139,96 @@ protected:
   std::unique_ptr<tf2_ros::TransformBroadcaster> transform_broadcaster_;
   rclcpp::Publisher<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_publisher_;
 };
+
+class BoxPoseTrackerTest : public ::testing::Test
+{
+protected:
+  static void SetUpTestSuite()
+  {
+    if (!rclcpp::ok()) {
+      rclcpp::init(0, nullptr);
+    }
+  }
+
+  static void TearDownTestSuite()
+  {
+    rclcpp::shutdown();
+  }
+
+  void SetUp() override
+  {
+    node_ = std::make_shared<rclcpp::Node>("box_pose_tracker_test");
+    tracker_ = std::make_unique<BoxPoseTracker>(
+      node_, "base_link", "/box_pose_tracker_test/legacy",
+      "/box_pose_tracker_test/states", 5.0, 0.01, 0.1);
+    publisher_ = node_->create_publisher<agibot_x2_manipulation_msgs::msg::BoxStateArray>(
+      "/box_pose_tracker_test/states", 10);
+    executor_.add_node(node_);
+    spinFor(std::chrono::milliseconds(50));
+  }
+
+  void TearDown() override
+  {
+    publisher_.reset();
+    tracker_.reset();
+    executor_.remove_node(node_);
+    node_.reset();
+  }
+
+  void spinFor(std::chrono::milliseconds duration)
+  {
+    const auto deadline = std::chrono::steady_clock::now() + duration;
+    while (std::chrono::steady_clock::now() < deadline) {
+      executor_.spin_some();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+
+  agibot_x2_manipulation_msgs::msg::BoxState box(
+    const std::string & instance_id, const std::string & profile_id, double x) const
+  {
+    agibot_x2_manipulation_msgs::msg::BoxState result;
+    result.header.frame_id = "base_link";
+    result.header.stamp = node_->now();
+    result.instance_id = instance_id;
+    result.profile_id = profile_id;
+    result.pose.pose.position.x = x;
+    result.pose.pose.orientation.w = 1.0;
+    return result;
+  }
+
+  void publish(const std::vector<agibot_x2_manipulation_msgs::msg::BoxState> & boxes)
+  {
+    agibot_x2_manipulation_msgs::msg::BoxStateArray states;
+    states.header.frame_id = "base_link";
+    states.header.stamp = node_->now();
+    states.boxes = boxes;
+    publisher_->publish(states);
+    spinFor(std::chrono::milliseconds(50));
+  }
+
+  rclcpp::Node::SharedPtr node_;
+  rclcpp::executors::SingleThreadedExecutor executor_;
+  std::unique_ptr<BoxPoseTracker> tracker_;
+  rclcpp::Publisher<agibot_x2_manipulation_msgs::msg::BoxStateArray>::SharedPtr publisher_;
+};
+
+TEST_F(BoxPoseTrackerTest, RetainsMultipleVisibleBoxesAndRejectsProfileChanges)
+{
+  publish({box("tag:0", "small_carton", 0.2), box("tag:180", "grey_box", 0.5)});
+
+  const auto visible = tracker_->freshPoses();
+  ASSERT_EQ(visible.size(), 2U);
+  ASSERT_EQ(visible.at("tag:0").profile_id, "small_carton");
+  ASSERT_EQ(visible.at("tag:180").profile_id, "grey_box");
+
+  const auto reference = visible.at("tag:0");
+  publish({box("tag:0", "grey_box", 0.2), box("tag:180", "grey_box", 0.5)});
+  TrackedBoxPose latest;
+  std::string error;
+  EXPECT_FALSE(tracker_->stillWithinTolerance(reference, latest, error));
+  EXPECT_EQ(error, "box profile changed before approach");
+}
 
 TEST_F(TableTagPoseTrackerTest, UsesLatestTransformWhenDetectionTfArrivesLater)
 {

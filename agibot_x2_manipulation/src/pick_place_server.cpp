@@ -40,6 +40,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace agibot_x2_manipulation
 {
@@ -281,6 +282,11 @@ private:
     return suffix;
   }
 
+  std::string collisionObjectId(const std::string & instance_id) const
+  {
+    return box_id_prefix_ + "_" + collisionObjectSuffix(instance_id);
+  }
+
   static geometry_msgs::msg::PoseStamped stampedBoxPose(const TrackedBoxPose & box)
   {
     geometry_msgs::msg::PoseStamped result;
@@ -340,7 +346,7 @@ private:
     config_.contact_height_offset = profile->contact_height_offset;
     config_.pickup_tag_to_box_yaw = profile->tag_to_box_yaw;
     config_.pickup_tag_to_box_offset = profile->tag_to_box_offset;
-    config_.box_id = box_id_prefix_ + "_" + collisionObjectSuffix(box.instance_id);
+    config_.box_id = collisionObjectId(box.instance_id);
     active_box_instance_id_ = box.instance_id;
     active_profile_id_ = profile->id;
     rebuildTableTagPoseTracker();
@@ -357,6 +363,124 @@ private:
       return false;
     }
     return activateBoxProfile(box, error);
+  }
+
+  bool updateVisibleBoxScene(
+    const std::string & target_instance_id, bool require_target, bool clear_owned_boxes,
+    std::vector<TrackedBoxPose> & visible_boxes, std::string & error)
+  {
+    visible_boxes.clear();
+    const auto fresh_boxes = box_pose_tracker_.freshPoses();
+    const auto target = fresh_boxes.find(target_instance_id);
+    if (require_target && target == fresh_boxes.end()) {
+      error = "selected box is no longer a fresh visible instance: " + target_instance_id;
+      return false;
+    }
+    if (require_target && target->second.profile_id != active_profile_id_) {
+      error = "selected box profile changed before planning";
+      return false;
+    }
+    if (clear_owned_boxes && !planning_scene_.clearManagedBoxes(error)) {
+      return false;
+    }
+    if (!config_.visible_boxes_as_obstacles) {
+      if (target != fresh_boxes.end()) {
+        visible_boxes.push_back(target->second);
+      }
+      return true;
+    }
+
+    std::vector<SceneBox> obstacles;
+    for (const auto & entry : fresh_boxes) {
+      const auto & tracked = entry.second;
+      visible_boxes.push_back(tracked);
+      if (tracked.instance_id == target_instance_id) {
+        continue;
+      }
+      const BoxProfile * profile = profiles_.find(tracked.profile_id);
+      if (!profile) {
+        error = "visible box instance '" + tracked.instance_id +
+          "' references an unknown profile: " + tracked.profile_id;
+        return false;
+      }
+      try {
+        obstacles.push_back(
+          {collisionObjectId(tracked.instance_id), profile->dimensions,
+            toEigen(stampedBoxPose(tracked).pose)});
+      } catch (const std::exception & exception) {
+        error = "invalid pose for visible box instance '" + tracked.instance_id +
+          "': " + exception.what();
+        return false;
+      }
+    }
+    return planning_scene_.applyObstacleBoxes(obstacles, error);
+  }
+
+  bool refreshSelectedBoxFromSnapshot(
+    TrackedBoxPose & selected_box, const std::vector<TrackedBoxPose> & visible_boxes,
+    std::string & error) const
+  {
+    const auto snapshot = std::find_if(
+      visible_boxes.begin(), visible_boxes.end(), [&selected_box](const auto & box) {
+        return box.instance_id == selected_box.instance_id;
+      });
+    if (snapshot == visible_boxes.end()) {
+      error = "selected box is missing from the visible-box snapshot";
+      return false;
+    }
+    if (snapshot->profile_id != selected_box.profile_id) {
+      error = "selected box profile changed before planning";
+      return false;
+    }
+    selected_box = *snapshot;
+    return true;
+  }
+
+  bool validateVisibleBoxScene(
+    const std::vector<TrackedBoxPose> & expected_boxes,
+    const std::string & ignored_instance_id, std::string & error) const
+  {
+    std::map<std::string, TrackedBoxPose> expected;
+    for (const auto & box : expected_boxes) {
+      if (box.instance_id != ignored_instance_id) {
+        expected.emplace(box.instance_id, box);
+      }
+    }
+    if (!config_.visible_boxes_as_obstacles) {
+      for (const auto & entry : expected) {
+        TrackedBoxPose latest;
+        if (!box_pose_tracker_.stillWithinTolerance(entry.second, latest, error)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    const auto fresh_boxes = box_pose_tracker_.freshPoses();
+    std::map<std::string, TrackedBoxPose> actual;
+    for (const auto & entry : fresh_boxes) {
+      if (entry.first != ignored_instance_id) {
+        actual.emplace(entry.first, entry.second);
+      }
+    }
+    if (actual.size() != expected.size()) {
+      error = "visible-box set changed after planning; replan before motion";
+      return false;
+    }
+    for (const auto & entry : expected) {
+      const auto actual_box = actual.find(entry.first);
+      if (actual_box == actual.end()) {
+        error = "visible box instance became stale before motion: " + entry.first;
+        return false;
+      }
+      TrackedBoxPose latest;
+      std::string tolerance_error;
+      if (!box_pose_tracker_.stillWithinTolerance(entry.second, latest, tolerance_error)) {
+        error = "visible box instance '" + entry.first + "' changed before motion: " +
+          tolerance_error;
+        return false;
+      }
+    }
+    return true;
   }
 
   bool resolvePlacePose(
@@ -814,6 +938,29 @@ private:
     return result;
   }
 
+  void clearSceneAfterEmptyOperation(TaskOutcome & task)
+  {
+    if (state_.load() != ManipulationState::EMPTY) {
+      return;
+    }
+    std::string error;
+    if (planning_scene_.clearManagedBoxes(error)) {
+      active_visible_boxes_.clear();
+      return;
+    }
+    const std::string cleanup_error =
+      "failed to remove server-managed collision objects: " + error;
+    RCLCPP_ERROR(node_->get_logger(), "%s", cleanup_error.c_str());
+    if (task.success) {
+      task.success = false;
+      task.code = kSafetyAbort;
+    }
+    if (!task.message.empty()) {
+      task.message += "; ";
+    }
+    task.message += cleanup_error;
+  }
+
   const char * carryPoseName(uint8_t target_pose) const
   {
     return target_pose == MoveCarryPose::Goal::CARRY_A ? "A" : "B";
@@ -855,6 +1002,16 @@ private:
     }
 
     std::string error;
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+      return outcome(false, kSafetyAbort, error, held_pose_);
+    }
+    std::vector<TrackedBoxPose> visible_boxes;
+    if (!updateVisibleBoxScene(
+        active_box_instance_id_, false, false, visible_boxes, error))
+    {
+      return outcome(false, kSafetyAbort, error, held_pose_);
+    }
+    active_visible_boxes_ = visible_boxes;
     if (!motion_planner_.validateHeldClosure(error)) {
       setState(ManipulationState::RECOVERY_REQUIRED, error);
       return outcome(false, kRecoveryRequired, error, held_pose_);
@@ -913,6 +1070,9 @@ private:
     }
 
     feedback("moving_to_carry_" + std::string(carryPoseName(target)), 0.50F, held_pose_);
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+      return outcome(false, kSafetyAbort, error, held_pose_);
+    }
     if (!trajectory_executor_.execute(carry_plan.trajectory, canceled)) {
       motion_planner_.updateHeldPoseFromRobot();
       setState(ManipulationState::RECOVERY_REQUIRED, "carry transition execution failed");
@@ -954,6 +1114,17 @@ private:
     if (!selectBox(instance_id, tracked_box, selection_error)) {
       return outcome(false, kNoStableBoxPose, selection_error);
     }
+    active_visible_boxes_.clear();
+    std::vector<TrackedBoxPose> visible_boxes;
+    std::string error;
+    if (!updateVisibleBoxScene(
+        tracked_box.instance_id, true, true, visible_boxes, error))
+    {
+      return outcome(false, kSafetyAbort, error);
+    }
+    if (!refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, error)) {
+      return outcome(false, kSafetyAbort, error);
+    }
     const geometry_msgs::msg::PoseStamped box_message = stampedBoxPose(tracked_box);
     Eigen::Isometry3d pick_pose;
     Eigen::Isometry3d pick_place_target = Eigen::Isometry3d::Identity();
@@ -974,7 +1145,6 @@ private:
       return outcome(false, kInvalidGoal, exception.what());
     }
 
-    std::string error;
     if (!planning_scene_.applyBox(pick_pose, error)) {
       return outcome(false, kSafetyAbort, error);
     }
@@ -1036,8 +1206,7 @@ private:
     if (canceled()) {
       return outcome(false, kSafetyAbort, "pick canceled before pregrasp execution");
     }
-    TrackedBoxPose revalidated_box;
-    if (!box_pose_tracker_.stillWithinTolerance(tracked_box, revalidated_box, error)) {
+    if (!validateVisibleBoxScene(visible_boxes, "", error)) {
       return outcome(false, kSafetyAbort, error);
     }
     if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
@@ -1048,7 +1217,7 @@ private:
     if (canceled()) {
       return outcome(false, kExecutionFailed, "pick canceled before approach");
     }
-    if (!box_pose_tracker_.stillWithinTolerance(tracked_box, revalidated_box, error)) {
+    if (!validateVisibleBoxScene(visible_boxes, "", error)) {
       return outcome(false, kSafetyAbort, error);
     }
     const auto & pick_grasp = selected_grasp.candidate.grasp;
@@ -1083,6 +1252,7 @@ private:
         held_box_to_left_contact_ = selected_grasp.candidate.box_to_left_contact;
         held_box_to_right_contact_ = selected_grasp.candidate.box_to_right_contact;
         held_geometry_valid_ = true;
+        active_visible_boxes_ = visible_boxes;
         setState(
           ManipulationState::RECOVERY_REQUIRED,
           "attachment request was dispatched but its result is uncertain");
@@ -1097,6 +1267,7 @@ private:
     held_box_to_left_contact_ = selected_grasp.candidate.box_to_left_contact;
     held_box_to_right_contact_ = selected_grasp.candidate.box_to_right_contact;
     held_geometry_valid_ = true;
+    active_visible_boxes_ = visible_boxes;
     if (canceled()) {
       setState(
         ManipulationState::RECOVERY_REQUIRED,
@@ -1140,6 +1311,10 @@ private:
       setState(ManipulationState::RECOVERY_REQUIRED, "pick canceled before carry execution");
       return outcome(false, kRecoveryRequired, "pick canceled; object remains held", held_pose_);
     }
+    if (!validateVisibleBoxScene(visible_boxes, active_box_instance_id_, error)) {
+      setState(ManipulationState::RECOVERY_REQUIRED, error);
+      return outcome(false, kRecoveryRequired, error + "; object remains held", held_pose_);
+    }
     if (!trajectory_executor_.execute(carry_plan.trajectory, canceled)) {
       motion_planner_.updateHeldPoseFromRobot();
       setState(ManipulationState::RECOVERY_REQUIRED, "carry execution failed");
@@ -1172,6 +1347,16 @@ private:
     }
     geometry_msgs::msg::PoseStamped place_message;
     std::string error;
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+      return outcome(false, kSafetyAbort, error, held_pose_);
+    }
+    std::vector<TrackedBoxPose> visible_boxes;
+    if (!updateVisibleBoxScene(
+        active_box_instance_id_, false, false, visible_boxes, error))
+    {
+      return outcome(false, kSafetyAbort, error, held_pose_);
+    }
+    active_visible_boxes_ = visible_boxes;
     if (!resolvePlacePose(requested_pose, place_message, error, canceled)) {
       return outcome(false, kInvalidGoal, error);
     }
@@ -1225,6 +1410,9 @@ private:
       return outcome(false, kExecutionFailed, "place canceled before motion", held_pose_);
     }
     feedback("moving_to_place", 0.45F, held_pose_);
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+      return outcome(false, kSafetyAbort, error, held_pose_);
+    }
     if (!trajectory_executor_.execute(transport, canceled)) {
       motion_planner_.updateHeldPoseFromRobot();
       setState(ManipulationState::RECOVERY_REQUIRED, "place motion failed");
@@ -1283,6 +1471,9 @@ private:
         false, kExecutionFailed, "box placed, but retreat was canceled",
         place_message);
     }
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+      return outcome(false, kSafetyAbort, error, place_message);
+    }
     if (!trajectory_executor_.execute(retreat, canceled)) {
       return outcome(
         false, kExecutionFailed, trajectory_executor_.error(
@@ -1321,6 +1512,9 @@ private:
       return outcome(
         false, kExecutionFailed, "box placed, but return to zero was canceled", place_message);
     }
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+      return outcome(false, kSafetyAbort, error, place_message);
+    }
     if (!trajectory_executor_.execute(zero_plan, canceled)) {
       setState(ManipulationState::EMPTY, "box placed; return-to-zero execution failed");
       return outcome(
@@ -1354,9 +1548,19 @@ private:
     if (!selectBox(instance_id, tracked_box, selection_error)) {
       return outcome(false, kNoStableBoxPose, selection_error);
     }
+    active_visible_boxes_.clear();
+    std::vector<TrackedBoxPose> visible_boxes;
+    std::string error;
+    if (!updateVisibleBoxScene(
+        tracked_box.instance_id, true, true, visible_boxes, error))
+    {
+      return outcome(false, kSafetyAbort, error);
+    }
+    if (!refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, error)) {
+      return outcome(false, kSafetyAbort, error);
+    }
     const geometry_msgs::msg::PoseStamped box_message = stampedBoxPose(tracked_box);
     geometry_msgs::msg::PoseStamped place_message;
-    std::string error;
     if (!resolvePlacePose(requested_place, place_message, error, canceled)) {
       return outcome(false, kInvalidGoal, error);
     }
@@ -1652,6 +1856,7 @@ private:
         false, goal->get_goal()->plan_only ? kSafetyAbort : kRecoveryRequired,
         "Pick failed with exception: " + std::string(exception.what()));
     }
+    clearSceneAfterEmptyOperation(task);
     release.run();
     finishGoal(goal, task, std::make_shared<Pick::Result>());
   }
@@ -1679,6 +1884,7 @@ private:
         false, kRecoveryRequired, "Place failed with exception: " + std::string(exception.what()),
         held_pose_);
     }
+    clearSceneAfterEmptyOperation(task);
     release.run();
     finishGoal(goal, task, std::make_shared<Place::Result>());
   }
@@ -1766,6 +1972,7 @@ private:
         false, goal->get_goal()->plan_only ? kSafetyAbort : kRecoveryRequired,
         "PickPlace failed with exception: " + std::string(exception.what()), held_pose_);
     }
+    clearSceneAfterEmptyOperation(task);
     release.run();
     finishGoal(goal, task, std::make_shared<PickPlace::Result>());
   }
@@ -1784,6 +1991,7 @@ private:
   bool held_geometry_valid_{false};
   std::optional<Eigen::Isometry3d> selected_carry_pose_a_;
   std::optional<Eigen::Isometry3d> selected_carry_pose_b_;
+  std::vector<TrackedBoxPose> active_visible_boxes_;
   std::map<std::string, double> reset_target_values_;
   bool reset_physical_detach_done_{false};
   bool reset_scene_cleanup_done_{false};

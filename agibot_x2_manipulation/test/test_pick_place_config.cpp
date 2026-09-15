@@ -42,6 +42,7 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_EQ(config.planning_group, "dual_arm");
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::CLOSED_CHAIN);
   EXPECT_FALSE(config.allow_execution);
+  EXPECT_TRUE(config.visible_boxes_as_obstacles);
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, config.reset_state_timeout);
   EXPECT_DOUBLE_EQ(config.execution_joint_tolerance, config.reset_joint_tolerance);
   EXPECT_DOUBLE_EQ(config.place_start_state_bounds_tolerance, 0.02);
