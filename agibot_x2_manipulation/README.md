@@ -142,6 +142,28 @@ It removes that namespace before a new EMPTY-state pick and after every terminal
 EMPTY operation, including plan-only requests. This also removes objects left by
 a restarted server without affecting collision objects outside that namespace.
 
+## Recording a failed manipulation state
+
+Start the passive recorder before reproducing a failure. It listens for aborted
+Pick, Place, PickPlace, and carry actions, then writes the last measured
+`/joint_states`, the current `base_link -> tag*` TFs, raw tag detections, and
+localized `/box_states`. It sends no commands and does not alter MoveIt.
+
+```bash
+ros2 run agibot_x2_manipulation capture_failure_snapshot \
+  --output /tmp/pick_failure.yaml \
+  --tag-id 0 --tag-id 180 --tag-id 9
+```
+
+The command stays running until one of those actions reaches `STATUS_ABORTED`.
+Use `Ctrl-C` to create a manual snapshot instead. Specify repeated
+`--detections-topic` or `--action-status-topic` options if the deployment uses
+non-default topics. When `/joint_states` contains all 31 X2 joints, the
+top-level `joint_positions` mapping is directly usable as
+`fake_zmq_joint_states --initial-state-file`; the rest of the YAML preserves
+the planning-frame tag poses and localized visible-box context needed for
+analysis. It never overwrites an existing output path.
+
 ## Table-tag placement calibration
 
 The default launch derives an empty action `place_pose` from `tag9`. The tag is

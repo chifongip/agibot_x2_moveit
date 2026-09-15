@@ -130,6 +130,10 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
   RENAME best_effort_image_decompressor)
 install(PROGRAMS
+  scripts/capture_failure_snapshot.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME capture_failure_snapshot)
+install(PROGRAMS
   scripts/raw_image_throttler.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME raw_image_throttler)
@@ -169,6 +173,7 @@ if(BUILD_TESTING)
   target_include_directories(test_table_tag_pose_tracker PRIVATE src include)
   target_link_libraries(test_table_tag_pose_tracker pick_place_core)
   ament_target_dependencies(test_table_tag_pose_tracker apriltag_msgs geometry_msgs rclcpp tf2_ros)
+  ament_add_pytest_test(test_capture_failure_snapshot test/test_capture_failure_snapshot.py)
   ament_add_pytest_test(test_manipulation_config test/test_manipulation_config.py)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
   add_launch_test(test/test_dummy_workflow.launch.py TIMEOUT 240)
