@@ -11,8 +11,8 @@
 
 namespace agibot_x2_manipulation {
 
-/// Immutable geometry and grasp calibration shared by localization and
-/// planning.
+/// Immutable geometry, grasp, and carry calibration shared by localization
+/// and planning. Carry poses are expressed in the manipulation planning frame.
 struct BoxProfile {
   std::string id;
   BoxDimensions dimensions;
@@ -20,6 +20,8 @@ struct BoxProfile {
   Eigen::Vector3d tag_to_box_offset{Eigen::Vector3d::Zero()};
   double pregrasp_distance{0.0};
   double contact_height_offset{0.0};
+  Eigen::Isometry3d carry_pose_a{Eigen::Isometry3d::Identity()};
+  Eigen::Isometry3d carry_pose_b{Eigen::Isometry3d::Identity()};
   std::vector<int> tag_ids;
 };
 
@@ -27,8 +29,10 @@ struct BoxProfile {
 ///
 /// Parameters are named `box_profiles.<profile_id>.<field>`. Each profile must
 /// supply tag_ids, dimensions, tag_to_box_yaw, tag_to_box_offset,
-/// pregrasp_distance, and contact_height_offset. Tag frames are resolved as
-/// `<box_profiles_tag_frame_prefix><tag_id>`; the prefix defaults to `tag`.
+/// pregrasp_distance, contact_height_offset, and carry_pose_a.
+/// carry_pose_b is optional and defaults to carry_pose_a. Tag frames are
+/// resolved as `<box_profiles_tag_frame_prefix><tag_id>`; the prefix defaults
+/// to `tag`.
 class BoxProfileRegistry {
 public:
   static BoxProfileRegistry

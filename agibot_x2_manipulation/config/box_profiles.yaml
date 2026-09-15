@@ -12,6 +12,10 @@
         tag_to_box_offset: [0.04, 0.0, 0.1]
         pregrasp_distance: 0.08
         contact_height_offset: 0.0
+        # These migration baselines preserve the former legacy carry target.
+        # Validate and calibrate this profile on hardware with plan_only before execution.
+        carry_pose_a: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
+        carry_pose_b: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
       grey_box:
         tag_ids: [180]
         dimensions: [0.30, 0.40, 0.12]
@@ -19,3 +23,8 @@
         tag_to_box_offset: [0.0, 0.0, 0.0]
         pregrasp_distance: 0.08
         contact_height_offset: 0.0
+        # Default migration baseline. Validate this profile on hardware with
+        # plan_only before allowing execution.
+        carry_pose_a: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
+        # Carry B has not yet been calibrated independently for this profile.
+        carry_pose_b: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]

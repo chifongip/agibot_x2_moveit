@@ -1199,7 +1199,8 @@ public:
 
   bool buildCarryRoute(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
-    const Eigen::Isometry3d & target_pose, CarryRoute route, bool plan_only,
+    const Eigen::Isometry3d & target_pose, const Eigen::Isometry3d & nominal_target_pose,
+    CarryRoute route, bool plan_only,
     const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
@@ -1249,8 +1250,8 @@ public:
       dogleg.translation().y() += sign * config_.carry_search_y_range;
       dogleg.translation().x() = std::clamp(
         dogleg.translation().x(),
-        config_.carry_pose.translation().x() - config_.carry_search_x_range,
-        config_.carry_pose.translation().x() + config_.carry_search_x_range);
+        nominal_target_pose.translation().x() - config_.carry_search_x_range,
+        nominal_target_pose.translation().x() + config_.carry_search_x_range);
       add(lift, "pick_lift");
       add(dogleg, "bounded_dogleg");
       add(target_pose, "dogleg_to_carry");
@@ -1388,6 +1389,9 @@ public:
     std::vector<Endpoint> endpoints;
     const auto * dual_group = start.getJointModelGroup(move_group_.getName());
     std::size_t endpoint_order = 0;
+    std::size_t ik_rejected = 0;
+    std::size_t bounds_rejected = 0;
+    std::size_t collision_rejected = 0;
     const auto precheck_deadline = std::chrono::steady_clock::now() +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(config_.carry_search_timeout * 0.15));
@@ -1411,6 +1415,7 @@ public:
           endpoint, grasp.left_contact, grasp.right_contact, false,
           std::max(1e-4, std::min(0.02, remaining))))
       {
+        ++ik_rejected;
         ++endpoint_order;
         continue;
       }
@@ -1419,8 +1424,13 @@ public:
         planning_scene_.collisionFree(endpoint, true, false) :
         (plan_only ? planning_scene_.collisionFreeWithBox(endpoint, pose, true) :
         planning_scene_.collisionFree(endpoint, true, false));
-      if (!endpoint.satisfiesBounds(dual_group) || !collision_free)
-      {
+      if (!endpoint.satisfiesBounds(dual_group)) {
+        ++bounds_rejected;
+        ++endpoint_order;
+        continue;
+      }
+      if (!collision_free) {
+        ++collision_rejected;
         ++endpoint_order;
         continue;
       }
@@ -1446,7 +1456,11 @@ public:
         return score_a < score_b || (score_a == score_b && a.order < b.order);
       });
     if (endpoints.empty()) {
-      error = "no " + search_name + " endpoint passed IK, bounds, and collision precheck";
+      error = "no " + search_name +
+        " endpoint passed IK, bounds, and collision precheck (nominal_pose=" +
+        formatPose(nominal_target_pose) + ", IK=" + std::to_string(ik_rejected) +
+        ", bounds=" + std::to_string(bounds_rejected) + ", collision=" +
+        std::to_string(collision_rejected) + ")";
       return false;
     }
 
@@ -1478,7 +1492,7 @@ public:
             box_to_left_contact, box_to_right_contact,
             trajectory, end, candidate_error, route_deadline, canceled) :
             buildCarryRoute(
-            start, from_pose, endpoint.pose, route, plan_only,
+            start, from_pose, endpoint.pose, nominal_target_pose, route, plan_only,
             box_to_left_contact, box_to_right_contact,
             trajectory, end, candidate_error, route_deadline, canceled);
           if (!planned)
@@ -1510,12 +1524,13 @@ public:
 
   bool planAdaptiveCarry(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
-    bool plan_only, const Eigen::Isometry3d & box_to_left_contact,
+    const Eigen::Isometry3d & nominal_target_pose, bool plan_only,
+    const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
     std::string & error, const CancelFunction & canceled)
   {
     return planAdaptiveCarryToPose(
-      start, pick_pose, config_.carry_pose, nullptr, false, plan_only,
+      start, pick_pose, nominal_target_pose, nullptr, false, plan_only,
       box_to_left_contact, box_to_right_contact, selected, error, canceled);
   }
 
@@ -2297,7 +2312,8 @@ GraspGeometry DualArmMotionPlanner::graspFromBoxToTcp(
 
 bool DualArmMotionPlanner::buildCarryRoute(
   const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
-  const Eigen::Isometry3d & target_pose, CarryRoute route, bool plan_only,
+  const Eigen::Isometry3d & target_pose, const Eigen::Isometry3d & nominal_target_pose,
+  CarryRoute route, bool plan_only,
   const Eigen::Isometry3d & box_to_left_contact,
   const Eigen::Isometry3d & box_to_right_contact,
   moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
@@ -2305,7 +2321,7 @@ bool DualArmMotionPlanner::buildCarryRoute(
   const CancelFunction & canceled)
 {
   return impl_->buildCarryRoute(
-    start, pick_pose, target_pose, route, plan_only, box_to_left_contact,
+    start, pick_pose, target_pose, nominal_target_pose, route, plan_only, box_to_left_contact,
     box_to_right_contact, output, end_state, error, deadline, canceled);
 }
 
@@ -2325,12 +2341,13 @@ bool DualArmMotionPlanner::buildCarryTransitionRoute(
 
 bool DualArmMotionPlanner::planAdaptiveCarry(
   const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
-  bool plan_only, const Eigen::Isometry3d & box_to_left_contact,
+  const Eigen::Isometry3d & nominal_target_pose, bool plan_only,
+  const Eigen::Isometry3d & box_to_left_contact,
   const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
   std::string & error, const CancelFunction & canceled)
 {
   return impl_->planAdaptiveCarry(
-    start, pick_pose, plan_only, box_to_left_contact, box_to_right_contact,
+    start, pick_pose, nominal_target_pose, plan_only, box_to_left_contact, box_to_right_contact,
     selected, error, canceled);
 }
 

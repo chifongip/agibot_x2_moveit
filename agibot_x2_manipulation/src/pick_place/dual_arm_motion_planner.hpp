@@ -67,7 +67,8 @@ public:
     double pregrasp_distance) const;
   bool buildCarryRoute(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
-    const Eigen::Isometry3d & target_pose, CarryRoute route, bool plan_only,
+    const Eigen::Isometry3d & target_pose, const Eigen::Isometry3d & nominal_target_pose,
+    CarryRoute route, bool plan_only,
     const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
@@ -83,7 +84,8 @@ public:
     const CancelFunction & canceled);
   bool planAdaptiveCarry(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
-    bool plan_only, const Eigen::Isometry3d & box_to_left_contact,
+    const Eigen::Isometry3d & nominal_target_pose, bool plan_only,
+    const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
     std::string & error, const CancelFunction & canceled);
   bool planAdaptiveCarryTransition(

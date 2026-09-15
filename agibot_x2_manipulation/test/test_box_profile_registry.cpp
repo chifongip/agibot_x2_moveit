@@ -30,6 +30,9 @@ protected:
                           std::vector<double>{0.01, 0.02, 0.03}),
         rclcpp::Parameter("box_profiles.small.pregrasp_distance", 0.08),
         rclcpp::Parameter("box_profiles.small.contact_height_offset", 0.0),
+        rclcpp::Parameter(
+            "box_profiles.small.carry_pose_a",
+            std::vector<double>{0.31, -0.01, 0.42, 0.0, 0.0, 0.0, 1.0}),
         rclcpp::Parameter("box_profiles.large.tag_ids",
                           std::vector<int64_t>{9}),
         rclcpp::Parameter("box_profiles.large.dimensions",
@@ -39,6 +42,12 @@ protected:
                           std::vector<double>{0.0, 0.0, 0.0}),
         rclcpp::Parameter("box_profiles.large.pregrasp_distance", 0.1),
         rclcpp::Parameter("box_profiles.large.contact_height_offset", -0.1),
+        rclcpp::Parameter(
+            "box_profiles.large.carry_pose_a",
+            std::vector<double>{0.36, 0.02, 0.45, 0.0, 0.0, 0.0, 1.0}),
+        rclcpp::Parameter(
+            "box_profiles.large.carry_pose_b",
+            std::vector<double>{0.29, -0.04, 0.40, 0.0, 0.0, 0.1, 0.995}),
     });
     return std::make_shared<rclcpp::Node>("box_profile_registry_test", options);
   }
@@ -54,6 +63,18 @@ TEST_F(BoxProfileRegistryTest, ResolvesProfilesAndInstancesFromTagIds) {
   EXPECT_EQ(small->id, "small");
   EXPECT_DOUBLE_EQ(small->dimensions.height, 0.3);
   EXPECT_DOUBLE_EQ(small->tag_to_box_offset.y(), 0.02);
+  EXPECT_LT(
+      (small->carry_pose_a.translation() - Eigen::Vector3d(0.31, -0.01, 0.42))
+          .norm(),
+      1e-12);
+  EXPECT_TRUE(small->carry_pose_b.matrix().isApprox(
+      small->carry_pose_a.matrix(), 1e-12));
+  const auto *large = registry.find("large");
+  ASSERT_NE(large, nullptr);
+  EXPECT_LT(
+      (large->carry_pose_b.translation() - Eigen::Vector3d(0.29, -0.04, 0.40))
+          .norm(),
+      1e-12);
   EXPECT_EQ(registry.tagFrame(5), "detected_tag_5");
   EXPECT_EQ(registry.instanceId(5), "tag:5");
   EXPECT_EQ(registry.profileForTag(99), nullptr);
@@ -63,6 +84,19 @@ TEST_F(BoxProfileRegistryTest, RejectsAmbiguousTagAssignments) {
   auto node = nodeWithProfiles();
   node->set_parameter(
       rclcpp::Parameter("box_profiles.large.tag_ids", std::vector<int64_t>{5}));
+  EXPECT_THROW(BoxProfileRegistry::fromParameters(*node), std::runtime_error);
+}
+
+TEST_F(BoxProfileRegistryTest, RejectsMalformedCarryCalibration) {
+  auto node = nodeWithProfiles();
+  node->set_parameter(rclcpp::Parameter("box_profiles.large.carry_pose_a",
+                                        std::vector<double>{0.1, 0.2}));
+  EXPECT_THROW(BoxProfileRegistry::fromParameters(*node), std::runtime_error);
+
+  node = nodeWithProfiles();
+  node->set_parameter(rclcpp::Parameter(
+      "box_profiles.large.carry_pose_a",
+      std::vector<double>{0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.0}));
   EXPECT_THROW(BoxProfileRegistry::fromParameters(*node), std::runtime_error);
 }
 

@@ -98,11 +98,13 @@ pick_place_server:
     maximum_joint_step: 0.35
     velocity_scaling: 0.10
     acceleration_scaling: 0.10
-    # Pelvis-relative box poses for manual carry-transition testing. Carry A
-    # remains the nominal pick/recovery pose. Carry B intentionally starts
-    # identical to A; calibrate B before requesting an executed transition.
-    # The legacy carry_box_pose parameter remains a backward-compatible alias
-    # for Carry A when carry_box_pose_a is not supplied.
+    # Legacy-only carry targets for a deployment without box_profiles. When a
+    # profile catalog is loaded, each profile must supply carry_pose_a and may
+    # supply carry_pose_b; those profile values are used for Pick, recovery,
+    # and /move_carry_pose instead. Carry B intentionally starts identical to
+    # Carry A here so legacy deployments do not gain a new motion implicitly.
+    # carry_box_pose remains a backward-compatible alias for Carry A when
+    # carry_box_pose_a is not supplied.
     carry_box_pose_a: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
     carry_box_pose_b: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
     recovery_position_tolerance: 0.1

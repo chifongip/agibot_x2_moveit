@@ -38,6 +38,26 @@ std::set<std::string> profileIds(rclcpp::Node &node,
   return ids;
 }
 
+Eigen::Isometry3d carryPoseFromParameter(const std::vector<double> &values,
+                                         const std::string &parameter_name) {
+  if (values.size() != 7U) {
+    throw std::runtime_error(parameter_name +
+                             " must contain [x, y, z, qx, qy, qz, qw]");
+  }
+  const Eigen::Vector3d translation(values[0], values[1], values[2]);
+  Eigen::Quaterniond rotation(values[6], values[3], values[4], values[5]);
+  if (!translation.allFinite() || !rotation.coeffs().allFinite() ||
+      rotation.norm() < 1e-9) {
+    throw std::runtime_error(
+        parameter_name +
+        " must contain finite values and a nonzero quaternion");
+  }
+  Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  pose.translation() = translation;
+  pose.linear() = rotation.normalized().toRotationMatrix();
+  return pose;
+}
+
 void validateProfile(const BoxProfile &profile) {
   if (profile.id.empty() || profile.tag_ids.empty() ||
       profile.dimensions.length <= 0.0 || profile.dimensions.width <= 0.0 ||
@@ -48,7 +68,9 @@ void validateProfile(const BoxProfile &profile) {
       profile.pregrasp_distance < 0.0 ||
       !std::isfinite(profile.contact_height_offset) ||
       std::abs(profile.contact_height_offset) >=
-          profile.dimensions.height / 2.0) {
+          profile.dimensions.height / 2.0 ||
+      !profile.carry_pose_a.matrix().allFinite() ||
+      !profile.carry_pose_b.matrix().allFinite()) {
     throw std::runtime_error("invalid box profile: " + profile.id);
   }
 }
@@ -84,6 +106,13 @@ BoxProfileRegistry::fromParameters(rclcpp::Node &node,
         node, parameter_prefix + "tag_to_box_offset");
     const auto tag_ids = requiredParameter<std::vector<int64_t>>(
         node, parameter_prefix + "tag_ids");
+    const auto carry_pose_a = requiredParameter<std::vector<double>>(
+        node, parameter_prefix + "carry_pose_a");
+    const auto carry_pose_b =
+        node.has_parameter(parameter_prefix + "carry_pose_b")
+            ? requiredParameter<std::vector<double>>(node, parameter_prefix +
+                                                               "carry_pose_b")
+            : carry_pose_a;
     if (dimensions.size() != 3U || offset.size() != 3U) {
       throw std::runtime_error(
           "box profile " + id +
@@ -101,6 +130,10 @@ BoxProfileRegistry::fromParameters(rclcpp::Node &node,
         requiredParameter<double>(node, parameter_prefix + "pregrasp_distance");
     profile.contact_height_offset = requiredParameter<double>(
         node, parameter_prefix + "contact_height_offset");
+    profile.carry_pose_a =
+        carryPoseFromParameter(carry_pose_a, parameter_prefix + "carry_pose_a");
+    profile.carry_pose_b =
+        carryPoseFromParameter(carry_pose_b, parameter_prefix + "carry_pose_b");
     for (const auto tag_id : tag_ids) {
       if (tag_id < 0 || tag_id > std::numeric_limits<int>::max()) {
         throw std::runtime_error("box profile " + id +

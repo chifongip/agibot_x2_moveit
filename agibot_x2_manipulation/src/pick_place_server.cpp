@@ -157,6 +157,8 @@ public:
       held_box_to_right_contact_, held_geometry_valid_, held_pose_)
   {
     box_id_prefix_ = config_.box_id;
+    active_carry_pose_a_ = config_.carry_pose;
+    active_carry_pose_b_ = config_.carry_pose_b;
     if (config_.use_tag_derived_place_pose) {
       table_tag_pose_tracker_ = std::make_unique<TableTagPlacePoseTracker>(
         node_, config_.planning_frame, config_.table_tag_frame,
@@ -322,6 +324,8 @@ private:
       }
       active_box_instance_id_ = box.instance_id.empty() ? "legacy" : box.instance_id;
       active_profile_id_.clear();
+      active_carry_pose_a_ = config_.carry_pose;
+      active_carry_pose_b_ = config_.carry_pose_b;
       return true;
     }
     if (box.instance_id.empty()) {
@@ -349,6 +353,8 @@ private:
     config_.box_id = collisionObjectId(box.instance_id);
     active_box_instance_id_ = box.instance_id;
     active_profile_id_ = profile->id;
+    active_carry_pose_a_ = profile->carry_pose_a;
+    active_carry_pose_b_ = profile->carry_pose_b;
     rebuildTableTagPoseTracker();
     return true;
   }
@@ -852,8 +858,9 @@ private:
       recovered_pose.linear() =
         left_rotation.slerp(0.5, right_rotation).normalized().toRotationMatrix();
     } else {
+      const auto & nominal_carry_pose = carryPose(MoveCarryPose::Goal::CARRY_A);
       const auto grasp = computeGraspGeometry(
-        config_.carry_pose, config_.dimensions, 0.0, config_.contact_height_offset);
+        nominal_carry_pose, config_.dimensions, 0.0, config_.contact_height_offset);
       if (!within_tolerance(
           current->getGlobalLinkTransform(config_.left_tcp),
           grasp.left_contact) ||
@@ -863,9 +870,9 @@ private:
           "TCP poses do not match the configured legacy carry pose within recovery tolerances";
         return false;
       }
-      recovered_pose = config_.carry_pose;
-      held_box_to_left_contact_ = config_.carry_pose.inverse() * grasp.left_contact;
-      held_box_to_right_contact_ = config_.carry_pose.inverse() * grasp.right_contact;
+      recovered_pose = nominal_carry_pose;
+      held_box_to_left_contact_ = nominal_carry_pose.inverse() * grasp.left_contact;
+      held_box_to_right_contact_ = nominal_carry_pose.inverse() * grasp.right_contact;
       held_geometry_valid_ = true;
     }
     if (!planning_scene_.clearBox(error) || !planning_scene_.applyBox(recovered_pose, error)) {
@@ -969,7 +976,7 @@ private:
   const Eigen::Isometry3d & carryPose(uint8_t target_pose) const
   {
     return target_pose == MoveCarryPose::Goal::CARRY_A ?
-           config_.carry_pose : config_.carry_pose_b;
+           active_carry_pose_a_ : active_carry_pose_b_;
   }
 
   const std::optional<Eigen::Isometry3d> & selectedCarryPose(uint8_t target_pose) const
@@ -1163,16 +1170,23 @@ private:
     moveit::core::RobotState contact_end(move_group_.getRobotModel());
     AdaptiveCarryPlan carry_plan;
     PlannedGrasp selected_grasp;
+    const Eigen::Isometry3d nominal_carry_pose =
+      carryPose(MoveCarryPose::Goal::CARRY_A);
     const ContinuationFunction carry_validator =
-      [this, &pick_pose, &pick_place_target, requested_place, &carry_plan, &canceled](
+      [this, &pick_pose, &pick_place_target, requested_place, &carry_plan, &canceled,
+      nominal_carry_pose](
       const moveit::core::RobotState & candidate_contact,
       const PlannedGrasp & candidate, std::string & continuation_error) {
         if (!motion_planner_.planAdaptiveCarry(
-            candidate_contact, pick_pose, true,
+            candidate_contact, pick_pose, nominal_carry_pose, true,
             candidate.candidate.box_to_left_contact,
             candidate.candidate.box_to_right_contact,
             carry_plan, continuation_error, canceled))
         {
+          if (!active_profile_id_.empty()) {
+            continuation_error = "profile '" + active_profile_id_ + "' Carry A: " +
+              continuation_error;
+          }
           return false;
         }
         if (!requested_place) {
@@ -1295,7 +1309,8 @@ private:
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(config_.carry_search_timeout));
     if (!current || !motion_planner_.buildCarryRoute(
-        *current, pick_pose, carry_plan.pose, carry_plan.route, false,
+        *current, pick_pose, carry_plan.pose,
+        carryPose(MoveCarryPose::Goal::CARRY_A), carry_plan.route, false,
         held_box_to_left_contact_, held_box_to_right_contact_,
         carry_plan.trajectory, *carry_plan.end_state, error,
         carry_revalidation_deadline, canceled))
@@ -1592,17 +1607,23 @@ private:
     Eigen::Isometry3d selected_place_pose = place_pose;
     PlannedGrasp selected_grasp;
     AdaptiveCarryPlan carry_plan;
+    const Eigen::Isometry3d nominal_carry_pose =
+      carryPose(MoveCarryPose::Goal::CARRY_A);
     const ContinuationFunction transport_validator =
       [this, &pick_pose, &place_pose, &transport, &place_end, &selected_place_pose,
-        &carry_plan, &canceled](
+        &carry_plan, &canceled, nominal_carry_pose](
       const moveit::core::RobotState & candidate_contact,
       const PlannedGrasp & candidate, std::string & continuation_error) {
         if (!motion_planner_.planAdaptiveCarry(
-            candidate_contact, pick_pose, true,
+            candidate_contact, pick_pose, nominal_carry_pose, true,
             candidate.candidate.box_to_left_contact,
             candidate.candidate.box_to_right_contact,
             carry_plan, continuation_error, canceled))
         {
+          if (!active_profile_id_.empty()) {
+            continuation_error = "profile '" + active_profile_id_ + "' Carry A: " +
+              continuation_error;
+          }
           return false;
         }
         place_end = *carry_plan.end_state;
@@ -1983,6 +2004,8 @@ private:
   std::string box_id_prefix_;
   std::string active_box_instance_id_;
   std::string active_profile_id_;
+  Eigen::Isometry3d active_carry_pose_a_{Eigen::Isometry3d::Identity()};
+  Eigen::Isometry3d active_carry_pose_b_{Eigen::Isometry3d::Identity()};
   ManipulationStateStore state_store_;
   BoxPoseTracker box_pose_tracker_;
   std::unique_ptr<TableTagPlacePoseTracker> table_tag_pose_tracker_;

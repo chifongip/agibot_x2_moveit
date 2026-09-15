@@ -75,6 +75,8 @@ def test_box_profiles_are_shared_by_localization_and_planning():
     assert len(profile["dimensions"]) == 3
     assert len(profile["tag_to_box_offset"]) == 3
     assert profile["pregrasp_distance"] > 0.0
+    assert len(profile["carry_pose_a"]) == 7
+    assert len(profile["carry_pose_b"]) == 7
 
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         server_config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
@@ -86,12 +88,17 @@ def test_box_profiles_are_shared_by_localization_and_planning():
     assert "params_file,\n                    box_profiles_file," in launch_source
 
 
-def test_carry_pose_configuration_and_manual_transition_action_are_available():
+def test_profile_carry_pose_configuration_and_manual_transition_action_are_available():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
+    with BOX_PROFILES_FILE.open(encoding="utf-8") as stream:
+        profiles = yaml.safe_load(stream)["/**"]["ros__parameters"]["box_profiles"]
 
+    # These remain only for legacy deployments without box_profiles.
     assert len(config["carry_box_pose_a"]) == 7
     assert len(config["carry_box_pose_b"]) == 7
+    assert all(len(profile["carry_pose_a"]) == 7 for profile in profiles.values())
+    assert all(len(profile["carry_pose_b"]) == 7 for profile in profiles.values())
     action = MOVE_CARRY_POSE_ACTION_FILE.read_text(encoding="utf-8")
     assert "uint8 CARRY_A=0" in action
     assert "uint8 CARRY_B=1" in action

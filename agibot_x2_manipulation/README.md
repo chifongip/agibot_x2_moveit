@@ -116,7 +116,21 @@ box_profiles:
     tag_to_box_offset: [0.0, 0.0, 0.0]
     pregrasp_distance: 0.08
     contact_height_offset: 0.0
+    # [x, y, z, qx, qy, qz, qw] in base_link
+    carry_pose_a: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
+    # Optional; defaults to Carry A when omitted.
+    carry_pose_b: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
 ```
+
+`carry_pose_a` is required for every profile. `carry_pose_b` is optional and
+defaults to Carry A. These are nominal box-center targets in `base_link`; the
+server applies only its bounded, collision-checked adaptive correction around
+the active profile's target. It never substitutes a global carry target for a
+profiled object. `carry_box_pose_a` and `carry_box_pose_b` in
+`box_manipulation.yaml` are retained solely for a legacy deployment with no
+profile catalog. Calibrate each profile with `plan_only: true` before allowing
+execution; do not copy a carry target between physical box types without
+validation.
 
 The localizer publishes `/box_states` with a stable `instance_id` such as
 `tag:17` and the resolved profile ID. Set `instance_id: "tag:17"` in Pick or
@@ -521,24 +535,25 @@ If a waypoint fails, the server reports its segment, index, box position, and
 whether IK, bounds, joint continuity, or collision was responsible, then tries
 the next grasp candidate.
 
-`/pick_box` searches for an achievable Carry A pose around `carry_box_pose_a`
-and tests direct, translate-then-rotate, and rotate-then-translate routes. The
-default pelvis-relative envelope is X +/-5 cm, Y +/-3 cm, Z -12/+3 cm, and
-orientation within 10 degrees. `/place_box` and plan-only `/pick_place` may
-adjust the requested place by X/Y +/-15 mm, Z +/-5 mm, and yaw +/-5 degrees.
-The action's `achieved_pose` reports the selected adaptive pose. Treat these as
-calibration/error allowances, not permission to bypass workspace or collision
-limits.
+`/pick_box` searches for an achievable Carry A pose around the selected
+profile's `carry_pose_a` and tests direct, translate-then-rotate, and
+rotate-then-translate routes. Legacy deployments without a profile catalog use
+`carry_box_pose_a`. The default pelvis-relative envelope is X +/-5 cm, Y +/-3
+cm, Z -12/+3 cm, and orientation within 10 degrees. `/place_box` and plan-only
+`/pick_place` may adjust the requested place by X/Y +/-15 mm, Z +/-5 mm, and
+yaw +/-5 degrees. The action's `achieved_pose` reports the selected adaptive
+pose. Treat these as calibration/error allowances, not permission to bypass
+workspace or collision limits.
 
-`carry_box_pose_a` and `carry_box_pose_b` are nominal operator-selected
-targets used by `/move_carry_pose`. Both receive the bounded adaptive correction
-used for Carry A during Pick. A selected endpoint, such as A′ when nominal A is
-unreachable, is remembered for the reverse transition and in the holding-state
-record. Both poses are `[x, y, z, qx, qy, qz, qw]` in `base_link`
-(pelvis-relative). The default Carry B equals Carry A so upgrading does not
-introduce a new motion. Calibrate Carry B before enabling execution. Older
-configurations may retain `carry_box_pose`; it remains a fallback for Carry A
-when `carry_box_pose_a` is absent.
+For profiled objects, `carry_pose_a` and `carry_pose_b` are the nominal targets
+used by `/move_carry_pose`; the legacy `carry_box_pose_a` and
+`carry_box_pose_b` are used only when profiles are absent. Both receive the
+bounded adaptive correction used for Carry A during Pick. A selected endpoint,
+such as A′ when nominal A is unreachable, is remembered for the reverse
+transition and in the holding-state record. Both poses are
+`[x, y, z, qx, qy, qz, qw]` in `base_link` (pelvis-relative). The default Carry
+B equals Carry A so a profile does not acquire a new motion until it is
+calibrated.
 
 IK candidates are normalized and revalidated against the `dual_arm` bounds and
 planning scene before assignment. Only the 14 planning-group values are sent
