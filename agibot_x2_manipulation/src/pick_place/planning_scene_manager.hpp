@@ -52,11 +52,14 @@ public:
     moveit_msgs::msg::CollisionObject & saved_object, std::string & error);
   bool endVirtualAttachment(
     const moveit_msgs::msg::CollisionObject & saved_object, std::string & error);
+  // When collision_pairs is supplied, collect at most one contact per pair and
+  // return their names for diagnostics. Leave it null in high-rate checks.
   bool collisionFree(
-    moveit::core::RobotState & state, bool allow_pad_contact, bool ignore_box) const;
+    moveit::core::RobotState & state, bool allow_pad_contact, bool ignore_box,
+    std::string * collision_pairs = nullptr) const;
   bool collisionFreeWithBox(
     moveit::core::RobotState & state, const Eigen::Isometry3d & box_pose,
-    bool allow_pad_contact) const;
+    bool allow_pad_contact, std::string * collision_pairs = nullptr) const;
 
 private:
   moveit_msgs::msg::CollisionObject makeBoxObject(

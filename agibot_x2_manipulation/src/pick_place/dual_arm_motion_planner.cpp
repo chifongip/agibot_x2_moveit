@@ -21,6 +21,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1392,6 +1393,7 @@ public:
     std::size_t ik_rejected = 0;
     std::size_t bounds_rejected = 0;
     std::size_t collision_rejected = 0;
+    std::set<std::string> colliding_pairs;
     const auto precheck_deadline = std::chrono::steady_clock::now() +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(config_.carry_search_timeout * 0.15));
@@ -1420,10 +1422,11 @@ public:
         continue;
       }
       endpoint.update();
+      std::string collision_pairs;
       const bool collision_free = transition ?
-        planning_scene_.collisionFree(endpoint, true, false) :
-        (plan_only ? planning_scene_.collisionFreeWithBox(endpoint, pose, true) :
-        planning_scene_.collisionFree(endpoint, true, false));
+        planning_scene_.collisionFree(endpoint, true, false, &collision_pairs) :
+        (plan_only ? planning_scene_.collisionFreeWithBox(endpoint, pose, true, &collision_pairs) :
+        planning_scene_.collisionFree(endpoint, true, false, &collision_pairs));
       if (!endpoint.satisfiesBounds(dual_group)) {
         ++bounds_rejected;
         ++endpoint_order;
@@ -1431,6 +1434,7 @@ public:
       }
       if (!collision_free) {
         ++collision_rejected;
+        colliding_pairs.insert(collision_pairs);
         ++endpoint_order;
         continue;
       }
@@ -1461,6 +1465,18 @@ public:
         formatPose(nominal_target_pose) + ", IK=" + std::to_string(ik_rejected) +
         ", bounds=" + std::to_string(bounds_rejected) + ", collision=" +
         std::to_string(collision_rejected) + ")";
+      if (!colliding_pairs.empty()) {
+        error += "; colliding_pairs=[";
+        bool first_pair = true;
+        for (const auto & pair : colliding_pairs) {
+          if (!first_pair) {
+            error += "; ";
+          }
+          error += pair;
+          first_pair = false;
+        }
+        error += "]";
+      }
       return false;
     }
 

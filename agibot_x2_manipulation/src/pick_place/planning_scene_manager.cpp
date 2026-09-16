@@ -1,11 +1,13 @@
 #include "pick_place/planning_scene_manager.hpp"
 
 #include <moveit/collision_detection/collision_matrix.h>
+#include <moveit/collision_detection/collision_common.h>
 #include <moveit_msgs/msg/attached_collision_object.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
 #include <tf2_eigen/tf2_eigen.hpp>
 
 #include <exception>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -14,6 +16,35 @@ namespace agibot_x2_manipulation
 {
 namespace
 {
+
+void formatCollisionPairs(
+  const collision_detection::CollisionResult & result, std::string * collision_pairs)
+{
+  if (!collision_pairs) {
+    return;
+  }
+  collision_pairs->clear();
+  if (!result.collision) {
+    return;
+  }
+
+  std::ostringstream stream;
+  bool first_pair = true;
+  for (const auto & [pair, contacts] : result.contacts) {
+    if (contacts.empty()) {
+      continue;
+    }
+    if (!first_pair) {
+      stream << "; ";
+    }
+    stream << pair.first << " <-> " << pair.second;
+    first_pair = false;
+  }
+  if (first_pair) {
+    stream << "contact pair unavailable";
+  }
+  *collision_pairs = stream.str();
+}
 
 geometry_msgs::msg::Pose toPoseMsg(const Eigen::Isometry3d & pose)
 {
@@ -430,7 +461,8 @@ bool PlanningSceneManager::endVirtualAttachment(
 }
 
 bool PlanningSceneManager::collisionFree(
-  moveit::core::RobotState & state, bool allow_pad_contact, bool ignore_box) const
+  moveit::core::RobotState & state, bool allow_pad_contact, bool ignore_box,
+  std::string * collision_pairs) const
 {
   planning_scene_monitor::LockedPlanningSceneRO scene(scene_monitor_);
   collision_detection::AllowedCollisionMatrix acm = scene->getAllowedCollisionMatrix();
@@ -444,14 +476,20 @@ bool PlanningSceneManager::collisionFree(
   }
   collision_detection::CollisionRequest request;
   request.group_name = config_.planning_group;
+  if (collision_pairs) {
+    request.contacts = true;
+    request.max_contacts = 32;
+    request.max_contacts_per_pair = 1;
+  }
   collision_detection::CollisionResult result;
   scene->checkCollision(request, result, state, acm);
+  formatCollisionPairs(result, collision_pairs);
   return !result.collision;
 }
 
 bool PlanningSceneManager::collisionFreeWithBox(
   moveit::core::RobotState & state, const Eigen::Isometry3d & box_pose,
-  bool allow_pad_contact) const
+  bool allow_pad_contact, std::string * collision_pairs) const
 {
   planning_scene_monitor::LockedPlanningSceneRO locked(scene_monitor_);
   auto scene = locked->diff();
@@ -477,8 +515,14 @@ bool PlanningSceneManager::collisionFreeWithBox(
   }
   collision_detection::CollisionRequest request;
   request.group_name = config_.planning_group;
+  if (collision_pairs) {
+    request.contacts = true;
+    request.max_contacts = 32;
+    request.max_contacts_per_pair = 1;
+  }
   collision_detection::CollisionResult result;
   scene->checkCollision(request, result, state, acm);
+  formatCollisionPairs(result, collision_pairs);
   return !result.collision;
 }
 

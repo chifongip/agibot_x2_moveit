@@ -113,6 +113,22 @@ def test_local_scene_monitor_skips_octomap_without_3d_perception():
     assert "load_octomap_monitor);" in source
 
 
+def test_adaptive_carry_collision_rejections_report_contact_pairs():
+    scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
+    planner_source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "pick_place"
+        / "dual_arm_motion_planner.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "request.contacts = true;" in scene_source
+    assert "request.max_contacts_per_pair = 1;" in scene_source
+    assert 'pair.first << " <-> " << pair.second' in scene_source
+    assert "colliding_pairs" in planner_source
+    assert "colliding_pairs=[" in planner_source
+
+
 def test_managed_box_objects_are_removed_after_empty_operations_and_restart():
     scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
     server_source = (
