@@ -137,6 +137,10 @@ install(PROGRAMS
   scripts/raw_image_throttler.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME raw_image_throttler)
+install(PROGRAMS
+  scripts/verify_carry_pose.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME verify_carry_pose)
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
@@ -174,6 +178,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_table_tag_pose_tracker pick_place_core)
   ament_target_dependencies(test_table_tag_pose_tracker apriltag_msgs geometry_msgs rclcpp tf2_ros)
   ament_add_pytest_test(test_capture_failure_snapshot test/test_capture_failure_snapshot.py)
+  ament_add_pytest_test(test_verify_carry_pose test/test_verify_carry_pose.py)
   ament_add_pytest_test(test_manipulation_config test/test_manipulation_config.py)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
   add_launch_test(test/test_dummy_workflow.launch.py TIMEOUT 240)

@@ -650,6 +650,33 @@ cannot leave the next clean launch latched in `HOLDING` or `UNKNOWN`.
 `/mujoco_grasp/attach` and `/mujoco_grasp/detach` services that change the
 MuJoCo weld/physics, not just acknowledge the request.
 
+### Offline carry-pose verification
+
+Use `verify_carry_pose` to evaluate one profile-specific Carry A target against
+a failure snapshot without changing `box_profiles.yaml` or commanding hardware.
+The command starts fake ZMQ joint feedback and an isolated planning stack,
+publishes the captured `BoxState` directly, and sends only a plan-only Pick
+goal. Source the workspace first:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run agibot_x2_manipulation verify_carry_pose \
+  --snapshot /path/to/pick_failure.yaml \
+  --profile grey_box \
+  --carry-pose 0.25 0.0 0.20 0.0 0.0 0.0 1.0 \
+  --report /tmp/grey_box_carry_020.json
+```
+
+The snapshot must be created by `capture_failure_snapshot` and contain one
+unambiguous visible box for the selected profile; add `--instance-id tag:180`
+when it contains several. The JSON report and terminal output classify the
+result as `exact_feasible`, `adaptive_fallback`, `infeasible`, `input_error`,
+or `runtime_error`. An adaptive fallback proves that the production planner
+found a nearby bounded pose, but it does **not** verify the requested target.
+Exact matching defaults to 1 mm and 1 degree and can be adjusted with
+`--position-tolerance` and `--orientation-tolerance-degrees`.
+
 The package also provides isolated automated regressions for the dummy and
 recorded cases. Both select `motion_planning_mode:=pose_to_pose` and exercise
 plan-only Pick and PickPlace goals plus executed Pick, Place, and PickPlace
