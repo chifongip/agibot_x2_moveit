@@ -1,0 +1,9 @@
+# Absolute path to a ROS 2 parameter YAML catalog containing box_profiles.
+string profiles_file
+
+# Validate only when true; do not replace an active catalog.
+bool dry_run
+---
+bool success
+string message
+uint64 profile_version

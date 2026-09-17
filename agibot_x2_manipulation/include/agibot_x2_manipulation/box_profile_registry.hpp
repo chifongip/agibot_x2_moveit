@@ -44,6 +44,11 @@ public:
   fromParameters(rclcpp::Node &node,
                  const std::string &prefix = "box_profiles");
 
+  /// Load and validate a profile catalog from a ROS 2 parameter YAML file.
+  static BoxProfileRegistry
+  fromYamlFile(const std::string &yaml_file,
+               const std::string &prefix = "box_profiles");
+
   bool empty() const;
   const BoxProfile *find(const std::string &profile_id) const;
   const BoxProfile *profileForTag(int tag_id) const;

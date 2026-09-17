@@ -165,6 +165,35 @@ It removes that namespace before a new EMPTY-state pick and after every terminal
 EMPTY operation, including plan-only requests. This also removes objects left by
 a restarted server without affecting collision objects outside that namespace.
 
+### Reloading a profile catalog
+
+Use `/reload_box_profiles` to load a complete, validated catalog into both
+`pick_place_server` and `box_localizer` without restarting the stack. The
+request takes an absolute ROS 2 parameter-YAML path and supports a non-mutating
+validation pass. The public service applies a catalog only while the
+manipulation state is `EMPTY` and no action or reset operation is active; this
+prevents a held object or an in-flight goal from changing geometry mid-workflow.
+The localizer clears its pose samples after an applied reload, so wait for a
+fresh stable `/box_states` update before sending the next goal.
+
+First validate the catalog, then apply it and confirm the returned version:
+
+```bash
+ros2 service call /reload_box_profiles \
+  agibot_x2_manipulation_msgs/srv/ReloadBoxProfiles \
+  "{profiles_file: '/absolute/path/to/box_profiles.yaml', dry_run: true}"
+
+ros2 service call /reload_box_profiles \
+  agibot_x2_manipulation_msgs/srv/ReloadBoxProfiles \
+  "{profiles_file: '/absolute/path/to/box_profiles.yaml', dry_run: false}"
+```
+
+The private `/box_localizer/reload_box_profiles` endpoint is used only by the
+public coordinator; call `/reload_box_profiles`, not the localizer endpoint,
+so planner and localizer catalogs stay aligned. A failed request keeps the
+active catalog unchanged. For a new physical calibration, run a `plan_only:
+true` pick/place after a successful reload before enabling execution.
+
 ## Recording a failed manipulation state
 
 Start the passive recorder before reproducing a failure. It listens for aborted

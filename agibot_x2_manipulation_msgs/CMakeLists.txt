@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BoxStateArray.msg"
   "msg/ManipulationState.msg"
   "srv/RecoverManipulationState.srv"
+  "srv/ReloadBoxProfiles.srv"
   DEPENDENCIES geometry_msgs std_msgs)
 
 ament_export_dependencies(rosidl_default_runtime)

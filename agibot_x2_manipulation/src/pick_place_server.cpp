@@ -18,6 +18,7 @@
 #include <agibot_x2_manipulation_msgs/action/reset_manipulation.hpp>
 #include <agibot_x2_manipulation_msgs/msg/manipulation_state.hpp>
 #include <agibot_x2_manipulation_msgs/srv/recover_manipulation_state.hpp>
+#include <agibot_x2_manipulation_msgs/srv/reload_box_profiles.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
@@ -31,7 +32,9 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -55,6 +58,7 @@ using ResetManipulation = agibot_x2_manipulation_msgs::action::ResetManipulation
 using ManipulationState = agibot_x2_manipulation_msgs::msg::ManipulationState;
 using RecoverManipulationState =
   agibot_x2_manipulation_msgs::srv::RecoverManipulationState;
+using ReloadBoxProfiles = agibot_x2_manipulation_msgs::srv::ReloadBoxProfiles;
 using PickGoalHandle = rclcpp_action::ServerGoalHandle<Pick>;
 using PlaceGoalHandle = rclcpp_action::ServerGoalHandle<Place>;
 using PickPlaceGoalHandle = rclcpp_action::ServerGoalHandle<PickPlace>;
@@ -259,6 +263,16 @@ public:
       std::bind(
         &PickPlaceServer::recoverState, this, std::placeholders::_1, std::placeholders::_2),
       rmw_qos_profile_services_default, recovery_callback_group_);
+    reload_callback_group_ = node_->create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive);
+    reload_profiles_service_ = node_->create_service<ReloadBoxProfiles>(
+      "/reload_box_profiles",
+      std::bind(
+        &PickPlaceServer::reloadBoxProfiles, this, std::placeholders::_1,
+        std::placeholders::_2),
+      rmw_qos_profile_services_default, reload_callback_group_);
+    localizer_reload_client_ = node_->create_client<ReloadBoxProfiles>(
+      "/box_localizer/reload_box_profiles");
     publishState();
   }
 
@@ -271,6 +285,95 @@ private:
   void releaseOperation()
   {
     reset_coordinator_.releaseOperation();
+  }
+
+  bool reloadLocalizer(
+    const std::shared_ptr<ReloadBoxProfiles::Request> & request,
+    ReloadBoxProfiles::Response & response, std::string & error)
+  {
+    if (!localizer_reload_client_->wait_for_service(std::chrono::seconds(2))) {
+      error = "box_localizer reload service is unavailable";
+      return false;
+    }
+    auto future = localizer_reload_client_->async_send_request(request);
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+      error = "timed out waiting for box_localizer profile reload";
+      return false;
+    }
+    const auto result = future.get();
+    response = *result;
+    if (!response.success) {
+      error = "box_localizer rejected profile catalog: " + response.message;
+      return false;
+    }
+    return true;
+  }
+
+  void reloadBoxProfiles(
+    const std::shared_ptr<ReloadBoxProfiles::Request> request,
+    std::shared_ptr<ReloadBoxProfiles::Response> response)
+  {
+    try {
+      auto candidate = BoxProfileRegistry::fromYamlFile(request->profiles_file);
+      if (candidate.empty()) {
+        response->message = "box-profile catalog must contain at least one profile";
+        response->profile_version = profile_version_;
+        return;
+      }
+
+      if (!request->dry_run) {
+        if (reset_coordinator_.resetRequested() || reset_coordinator_.resetPending()) {
+          response->message = "manipulation reset is pending";
+          response->profile_version = profile_version_;
+          return;
+        }
+        if (state_.load() != ManipulationState::EMPTY) {
+          response->message = "box profiles can be reloaded only while manipulation state is EMPTY";
+          response->profile_version = profile_version_;
+          return;
+        }
+        if (!reserveGoal()) {
+          response->message = "manipulation server is busy";
+          response->profile_version = profile_version_;
+          return;
+        }
+      }
+      ScopeExit release([this, request]() {
+        if (!request->dry_run) {
+          releaseOperation();
+        }
+      });
+
+      ReloadBoxProfiles::Response localizer_response;
+      std::string localizer_error;
+      if (!reloadLocalizer(request, localizer_response, localizer_error)) {
+        response->message = localizer_error;
+        response->profile_version = profile_version_;
+        return;
+      }
+      if (request->dry_run) {
+        response->success = true;
+        response->profile_version = profile_version_;
+        response->message = "box-profile catalog is valid in both nodes";
+        return;
+      }
+
+      profiles_ = std::move(candidate);
+      active_box_instance_id_.clear();
+      active_profile_id_.clear();
+      active_carry_pose_a_ = config_.carry_pose;
+      active_carry_pose_b_ = config_.carry_pose_b;
+      profile_version_ = localizer_response.profile_version;
+      response->success = true;
+      response->profile_version = profile_version_;
+      response->message = "box-profile catalog reloaded in box_localizer and pick_place_server";
+      RCLCPP_INFO(
+        node_->get_logger(), "Applied box-profile catalog version %lu from '%s'",
+        static_cast<unsigned long>(profile_version_), request->profiles_file.c_str());
+    } catch (const std::exception & error) {
+      response->message = error.what();
+      response->profile_version = profile_version_;
+    }
   }
 
   static std::string collisionObjectSuffix(const std::string & instance_id)
@@ -2002,6 +2105,7 @@ private:
   std::string active_profile_id_;
   Eigen::Isometry3d active_carry_pose_a_{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d active_carry_pose_b_{Eigen::Isometry3d::Identity()};
+  uint64_t profile_version_{0};
   ManipulationStateStore state_store_;
   BoxPoseTracker box_pose_tracker_;
   std::unique_ptr<TableTagPlacePoseTracker> table_tag_pose_tracker_;
@@ -2033,6 +2137,9 @@ private:
   rclcpp_action::Server<ResetManipulation>::SharedPtr reset_action_server_;
   rclcpp::CallbackGroup::SharedPtr recovery_callback_group_;
   rclcpp::Service<RecoverManipulationState>::SharedPtr recovery_service_;
+  rclcpp::CallbackGroup::SharedPtr reload_callback_group_;
+  rclcpp::Service<ReloadBoxProfiles>::SharedPtr reload_profiles_service_;
+  rclcpp::Client<ReloadBoxProfiles>::SharedPtr localizer_reload_client_;
 };
 
 }  // namespace agibot_x2_manipulation

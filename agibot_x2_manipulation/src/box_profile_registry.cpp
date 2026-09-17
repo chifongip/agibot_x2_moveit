@@ -1,7 +1,10 @@
 #include "agibot_x2_manipulation/box_profile_registry.hpp"
 
+#include <rclcpp/parameter_map.hpp>
+
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -168,6 +171,32 @@ BoxProfileRegistry::fromParameters(rclcpp::Node &node,
     registry.profiles_.emplace(profile.id, std::move(profile));
   }
   return registry;
+}
+
+BoxProfileRegistry
+BoxProfileRegistry::fromYamlFile(const std::string &yaml_file,
+                                 const std::string &prefix)
+{
+  if (yaml_file.empty()) {
+    throw std::runtime_error("box-profile YAML file path is empty");
+  }
+  if (!std::filesystem::path(yaml_file).is_absolute()) {
+    throw std::runtime_error(
+      "box-profile YAML file path must be absolute: " + yaml_file);
+  }
+  const auto parameter_map = rclcpp::parameter_map_from_yaml_file(yaml_file);
+  std::vector<rclcpp::Parameter> overrides;
+  for (const auto & entry : parameter_map) {
+    overrides.insert(overrides.end(), entry.second.begin(), entry.second.end());
+  }
+  if (overrides.empty()) {
+    throw std::runtime_error("box-profile YAML file contains no parameters: " + yaml_file);
+  }
+  rclcpp::NodeOptions options;
+  options.automatically_declare_parameters_from_overrides(true);
+  options.parameter_overrides(overrides);
+  rclcpp::Node validation_node("box_profile_catalog_validator", options);
+  return fromParameters(validation_node, prefix);
 }
 
 bool BoxProfileRegistry::empty() const { return profiles_.empty(); }

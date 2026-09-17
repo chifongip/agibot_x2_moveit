@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 #include <rclcpp/rclcpp.hpp>
 
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -122,6 +124,42 @@ TEST_F(BoxProfileRegistryTest, RejectsMalformedCarryCalibration) {
       "box_profiles.large.carry_pose_a",
       std::vector<double>{0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.0}));
   EXPECT_THROW(BoxProfileRegistry::fromParameters(*node), std::runtime_error);
+}
+
+TEST_F(BoxProfileRegistryTest, LoadsValidatedCatalogFromYamlFile) {
+  const auto path = std::filesystem::temp_directory_path() /
+      "agibot_x2_box_profile_reload_test.yaml";
+  {
+    std::ofstream stream(path);
+    ASSERT_TRUE(stream.is_open());
+    stream << R"(/**:
+  ros__parameters:
+    box_profiles_tag_frame_prefix: tag
+    box_profiles:
+      bottom_container:
+        tag_ids: [42]
+        dimensions: [0.2, 0.3, 0.3]
+        tag_to_box_center_pose: [0.0, 0.0, 0.15, 0.0, 0.0, 0.0, 1.0]
+        pregrasp_distance: 0.08
+        contact_height_offset: 0.0
+        carry_pose_a: [0.3, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0]
+)";
+  }
+
+  const auto registry = BoxProfileRegistry::fromYamlFile(path.string());
+  EXPECT_TRUE(std::filesystem::remove(path));
+  const auto *profile = registry.profileForTag(42);
+  ASSERT_NE(profile, nullptr);
+  EXPECT_EQ(profile->id, "bottom_container");
+  EXPECT_LT(
+      (profile->tag_to_box_center.translation() -
+      Eigen::Vector3d(0.0, 0.0, 0.15)).norm(),
+      1e-12);
+}
+
+TEST_F(BoxProfileRegistryTest, RejectsRelativeCatalogPath) {
+  EXPECT_THROW(BoxProfileRegistry::fromYamlFile("box_profiles.yaml"),
+               std::runtime_error);
 }
 
 } // namespace

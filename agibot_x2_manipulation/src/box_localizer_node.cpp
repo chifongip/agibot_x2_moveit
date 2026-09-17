@@ -3,6 +3,7 @@
 
 #include <agibot_x2_manipulation_msgs/msg/box_state.hpp>
 #include <agibot_x2_manipulation_msgs/msg/box_state_array.hpp>
+#include <agibot_x2_manipulation_msgs/srv/reload_box_profiles.hpp>
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -12,6 +13,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <deque>
 #include <map>
@@ -22,6 +24,9 @@
 
 namespace agibot_x2_manipulation {
 namespace {
+
+using ReloadBoxProfiles =
+  agibot_x2_manipulation_msgs::srv::ReloadBoxProfiles;
 
 BoxProfile legacyProfile(const BoxDimensions &dimensions, double tag_to_box_yaw,
                          const Eigen::Vector3d &tag_to_box_offset, int tag_id) {
@@ -115,9 +120,40 @@ public:
             topic, rclcpp::SensorDataQoS(),
             std::bind(&BoxLocalizer::onDetections, this,
                       std::placeholders::_1));
+    reload_profiles_service_ = create_service<ReloadBoxProfiles>(
+      "~/reload_box_profiles",
+      std::bind(&BoxLocalizer::reloadProfiles, this, std::placeholders::_1,
+      std::placeholders::_2));
   }
 
 private:
+  void reloadProfiles(
+    const std::shared_ptr<ReloadBoxProfiles::Request> request,
+    std::shared_ptr<ReloadBoxProfiles::Response> response)
+  {
+    try {
+      auto candidate = BoxProfileRegistry::fromYamlFile(request->profiles_file);
+      if (candidate.empty()) {
+        response->message = "box-profile catalog must contain at least one profile";
+        response->profile_version = profile_version_;
+        return;
+      }
+      if (!request->dry_run) {
+        profiles_ = std::move(candidate);
+        legacy_mode_ = false;
+        samples_.clear();
+        ++profile_version_;
+      }
+      response->success = true;
+      response->profile_version = profile_version_;
+      response->message = request->dry_run ?
+        "box-profile catalog is valid" : "box-profile catalog reloaded";
+    } catch (const std::exception & error) {
+      response->message = error.what();
+      response->profile_version = profile_version_;
+    }
+  }
+
   const BoxProfile *profileForTag(int tag_id) const {
     if (!legacy_mode_) {
       return profiles_.profileForTag(tag_id);
@@ -273,11 +309,13 @@ private:
   double max_angular_spread_{0.0};
   double max_box_tilt_{0.0};
   double minimum_margin_{0.0};
+  uint64_t profile_version_{0};
   std::map<int, std::deque<Eigen::Isometry3d>> samples_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr
       detections_sub_;
+  rclcpp::Service<ReloadBoxProfiles>::SharedPtr reload_profiles_service_;
   rclcpp::Publisher<agibot_x2_manipulation_msgs::msg::BoxStateArray>::SharedPtr
       state_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
