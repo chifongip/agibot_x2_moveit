@@ -147,6 +147,17 @@ def test_grasped_box_may_contact_all_wrist_links_but_not_the_environment():
     assert "config_.box_id, boxTouchLinks(config_), true" in scene_source
 
 
+def test_late_visible_box_detections_do_not_interrupt_a_planned_task():
+    server_source = (
+        Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "A newly\n    // detected instance may be a late/stale tag observation" in server_source
+    assert "if (actual.size() != expected.size())" not in server_source
+    assert "visible box instance became stale before motion" in server_source
+    assert "changed before motion:" in server_source
+
+
 def test_managed_box_objects_are_removed_after_empty_operations_and_restart():
     scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
     server_source = (

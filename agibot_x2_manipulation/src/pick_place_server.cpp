@@ -567,10 +567,11 @@ private:
         actual.emplace(entry.first, entry.second);
       }
     }
-    if (actual.size() != expected.size()) {
-      error = "visible-box set changed after planning; replan before motion";
-      return false;
-    }
+    // The snapshot was already applied to the planning scene.  A newly
+    // detected instance may be a late/stale tag observation, so it must not
+    // interrupt an in-progress task.  Keep checking every obstacle that was
+    // part of the snapshot; a missing or moved planned obstacle still makes
+    // the trajectory invalid.
     for (const auto & entry : expected) {
       const auto actual_box = actual.find(entry.first);
       if (actual_box == actual.end()) {
