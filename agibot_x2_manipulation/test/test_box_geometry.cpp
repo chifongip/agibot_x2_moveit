@@ -89,6 +89,23 @@ TEST(BoxGeometry, TablePlacementIsIndependentOfPickupTagCalibration)
   EXPECT_LT((box.linear() - tag.linear() * table_tag_to_box).norm(), 1e-12);
 }
 
+TEST(BoxGeometry, VerticalTableTagBuildsTheCalibratedTableCollisionPose)
+{
+  Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();
+  tag.translation() = Eigen::Vector3d(1.0, 2.0, 3.0);
+  const auto table = tablePoseFromVerticalTag(
+    tag, {0.5, 0.3, 0.6}, Eigen::Vector3d(0.0, -0.55, 0.15));
+
+  EXPECT_LT(
+    (table.translation() - tag * Eigen::Vector3d(0.0, -0.85, 0.15)).norm(), 1e-12);
+  EXPECT_LT((table.linear() * Eigen::Vector3d::UnitX() - Eigen::Vector3d::UnitX()).norm(),
+    1e-12);
+  EXPECT_LT((table.linear() * Eigen::Vector3d::UnitY() + Eigen::Vector3d::UnitZ()).norm(),
+    1e-12);
+  EXPECT_LT((table.linear() * Eigen::Vector3d::UnitZ() - Eigen::Vector3d::UnitY()).norm(),
+    1e-12);
+}
+
 TEST(BoxGeometry, BottomTagUsesAnExplicitTagToCenterTransform)
 {
   Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();

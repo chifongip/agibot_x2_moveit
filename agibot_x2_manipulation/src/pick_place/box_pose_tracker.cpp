@@ -244,29 +244,25 @@ bool BoxPoseTracker::transformGoalPose(
   }
 }
 
-TableTagPlacePoseTracker::TableTagPlacePoseTracker(
+TableTagPoseTracker::TableTagPoseTracker(
   const rclcpp::Node::SharedPtr & node, std::string planning_frame,
   std::string tag_frame, std::string detections_topic, int tag_id,
-  double minimum_decision_margin, const BoxDimensions & dimensions,
-  double tag_height_above_tabletop, double table_x_offset, double table_z_offset,
-  double table_tag_to_box_yaw, std::size_t stable_sample_count, double maximum_age,
+  double minimum_decision_margin, std::size_t stable_sample_count, double maximum_age,
   double maximum_position_spread, double maximum_angular_spread,
-  double maximum_sample_gap)
+  double maximum_sample_gap, StablePoseCallback stable_pose_callback)
 : node_(node), planning_frame_(std::move(planning_frame)), tag_frame_(std::move(tag_frame)),
-  tag_id_(tag_id), minimum_decision_margin_(minimum_decision_margin), dimensions_(dimensions),
-  tag_height_above_tabletop_(tag_height_above_tabletop), table_x_offset_(table_x_offset),
-  table_z_offset_(table_z_offset), table_tag_to_box_yaw_(table_tag_to_box_yaw),
+  tag_id_(tag_id), minimum_decision_margin_(minimum_decision_margin),
   maximum_age_(maximum_age), stability_filter_(
     stable_sample_count, maximum_position_spread, maximum_angular_spread, maximum_sample_gap),
   tf_buffer_(node->get_clock()),
-  tf_listener_(tf_buffer_)
+  tf_listener_(tf_buffer_), stable_pose_callback_(std::move(stable_pose_callback))
 {
   detections_sub_ = node_->create_subscription<apriltag_msgs::msg::AprilTagDetectionArray>(
     std::move(detections_topic), rclcpp::SensorDataQoS(),
-    std::bind(&TableTagPlacePoseTracker::onDetections, this, std::placeholders::_1));
+    std::bind(&TableTagPoseTracker::onDetections, this, std::placeholders::_1));
 }
 
-void TableTagPlacePoseTracker::onDetections(
+void TableTagPoseTracker::onDetections(
   const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message)
 {
   const auto detection = std::find_if(
@@ -310,10 +306,7 @@ void TableTagPlacePoseTracker::onDetections(
         "Table tag TF rejected because it is older than %.3f s", maximum_age_);
       return;
     }
-    const Eigen::Isometry3d sample = boxPoseFromVerticalTableTag(
-      tf2::transformToEigen(transform), dimensions_, tag_height_above_tabletop_,
-      table_x_offset_, table_z_offset_, table_tag_to_box_yaw_);
-    updateStablePose(sample, transform.header.stamp);
+    updateStablePose(tf2::transformToEigen(transform), transform.header.stamp);
   } catch (const tf2::TransformException & error) {
     RCLCPP_WARN_THROTTLE(
       node_->get_logger(), *node_->get_clock(), 2000,
@@ -325,31 +318,38 @@ void TableTagPlacePoseTracker::onDetections(
   }
 }
 
-void TableTagPlacePoseTracker::updateStablePose(
+void TableTagPoseTracker::updateStablePose(
   const Eigen::Isometry3d & sample, const builtin_interfaces::msg::Time & stamp)
 {
-  std::lock_guard<std::mutex> lock(mutex_);
-  const auto update = stability_filter_.addSample(sample, rclcpp::Time(stamp));
-  if (!update.accepted_sample) {
-    return;
-  }
-  have_stable_pose_ = false;
-  if (!update.stable_pose) {
-    return;
-  }
+  geometry_msgs::msg::PoseStamped stable_pose;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto update = stability_filter_.addSample(sample, rclcpp::Time(stamp));
+    if (!update.accepted_sample) {
+      return;
+    }
+    have_stable_pose_ = false;
+    if (!update.stable_pose) {
+      return;
+    }
 
-  const Eigen::Isometry3d & stable_sample = *update.stable_pose;
-  stable_pose_.header.frame_id = planning_frame_;
-  stable_pose_.header.stamp = stamp;
-  stable_pose_.pose.position.x = stable_sample.translation().x();
-  stable_pose_.pose.position.y = stable_sample.translation().y();
-  stable_pose_.pose.position.z = stable_sample.translation().z();
-  stable_pose_.pose.orientation = tf2::toMsg(Eigen::Quaterniond(stable_sample.linear()));
-  have_stable_pose_ = true;
+    const Eigen::Isometry3d & stable_sample = *update.stable_pose;
+    stable_pose_.header.frame_id = planning_frame_;
+    stable_pose_.header.stamp = stamp;
+    stable_pose_.pose.position.x = stable_sample.translation().x();
+    stable_pose_.pose.position.y = stable_sample.translation().y();
+    stable_pose_.pose.position.z = stable_sample.translation().z();
+    stable_pose_.pose.orientation = tf2::toMsg(Eigen::Quaterniond(stable_sample.linear()));
+    have_stable_pose_ = true;
+    stable_pose = stable_pose_;
+  }
   stable_pose_condition_.notify_all();
+  if (stable_pose_callback_) {
+    stable_pose_callback_(stable_pose);
+  }
 }
 
-bool TableTagPlacePoseTracker::waitForStablePose(
+bool TableTagPoseTracker::waitForStablePose(
   double timeout, const std::function<bool()> & canceled,
   geometry_msgs::msg::PoseStamped & output, std::string & error) const
 {

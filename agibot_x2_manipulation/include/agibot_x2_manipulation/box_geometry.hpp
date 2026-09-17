@@ -79,6 +79,13 @@ Eigen::Isometry3d boxPoseFromVerticalTableTag(
   double tag_height_above_tabletop, double table_x_offset = 0.0,
   double table_z_offset = 0.0, double table_tag_to_box_yaw = 0.0);
 
+/// Construct the pose of a table collision box from its vertical reference tag.
+/// The tabletop center is specified in tag coordinates. Table +X, +Y, and +Z
+/// align with tag +X, -Z, and +Y respectively, so local +Z points upward.
+Eigen::Isometry3d tablePoseFromVerticalTag(
+  const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
+  const Eigen::Vector3d & tag_to_tabletop_center);
+
 /// Choose the face pair closest to base +/-Y and construct opposing TCP poses.
 GraspGeometry computeGraspGeometry(
   const Eigen::Isometry3d & box_pose, const BoxDimensions & dimensions,

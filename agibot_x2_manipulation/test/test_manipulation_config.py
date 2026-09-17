@@ -275,8 +275,11 @@ def test_tag9_derives_the_default_table_place_pose():
 
     assert config["use_tag_derived_place_pose"] is True
     assert config["table_tag_frame"] == "tag9"
-    assert config["table_tag_height_above_tabletop"] > 0.0
-    assert config["table_tag_place_offset"] == [0.0, 0.2]
+    assert config["table_tag_to_tabletop_center"] == [0.0, -0.55, 0.15]
+    assert config["table_tag_place_offset"] == [0.0, 0.05]
+    assert config["table_collision_enabled"] is True
+    assert config["table_collision_id"] == "work_table"
+    assert config["table_dimensions"] == [0.5, 0.3, 0.6]
     assert "tag_to_box_offset" not in config
     assert config["maximum_table_tag_pose_age"] > 0.0
     assert config["table_tag_detections_topic"] == "/front_center_rectify/detections"
@@ -285,6 +288,25 @@ def test_tag9_derives_the_default_table_place_pose():
     assert config["table_tag_maximum_position_spread"] == 0.005
     assert config["table_tag_maximum_angular_spread"] == 0.0523598776
     assert config["table_tag_maximum_sample_gap"] == 2.5
+
+
+def test_table_collision_is_published_as_a_latched_visualization_marker():
+    source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
+    server_source = (
+        Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert '"/table_markers", rclcpp::QoS(1).transient_local()' in source
+    assert "void PlanningSceneManager::publishTableMarker" in source
+    assert 'marker.ns = "collision_table"' in source
+    assert "marker.type = visualization_msgs::msg::Marker::CUBE" in source
+    assert "marker.pose = toPoseMsg(pose)" in source
+    assert "marker.scale.x = config_.table_dimensions.length" in source
+    assert "marker.scale.y = config_.table_dimensions.width" in source
+    assert "marker.scale.z = config_.table_dimensions.height" in source
+    assert "publishTrackedTableMarker(tag_pose);" in server_source
+    assert "tablePoseFromVerticalTag(" in server_source
+    assert "tag_pose.header.stamp" in server_source
 
 
 def test_default_launch_starts_the_table_tag_detector_at_one_hz():
@@ -297,6 +319,7 @@ def test_default_launch_starts_the_table_tag_detector_at_one_hz():
     assert "table_tag_detector_enabled = PythonExpression" in source
     assert "condition=IfCondition(table_tag_detector_enabled)" in source
     assert '"max_rate_hz": table_tag_detector_max_rate_hz' in source
+    assert '"disable_table_collision": ParameterValue(' in source
     assert "name='max_rate_hz', default_value='1.0'" in table_tag_source
 
 

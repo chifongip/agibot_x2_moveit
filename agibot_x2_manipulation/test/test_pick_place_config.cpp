@@ -49,7 +49,9 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_EQ(config.perception_source, Perception3dSource::NONE);
   EXPECT_FALSE(config.use_tag_derived_place_pose);
   EXPECT_EQ(config.table_tag_frame, "tag9");
-  EXPECT_DOUBLE_EQ(config.table_tag_height_above_tabletop, 0.55);
+  EXPECT_LT(
+    (config.table_tag_to_tabletop_center - Eigen::Vector3d(0.0, -0.55, 0.0)).norm(), 1e-12);
+  EXPECT_FALSE(config.table_collision_enabled);
   EXPECT_EQ(config.table_tag_detections_topic, "/front_center_rectify/detections");
   EXPECT_EQ(config.table_tag_id, 9);
   EXPECT_EQ(config.table_tag_stable_sample_count, 3);
@@ -70,6 +72,8 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   test_node->declare_parameter<double>("place_start_state_bounds_tolerance", 0.05);
   test_node->declare_parameter<std::string>("perception_3d_source", "both");
   test_node->declare_parameter<bool>("use_tag_derived_place_pose", true);
+  test_node->declare_parameter<std::vector<double>>(
+    "table_tag_to_tabletop_center", {0.0, -0.55, 0.15});
   test_node->declare_parameter<std::vector<double>>("table_tag_place_offset", {0.1, -0.2});
   test_node->declare_parameter<std::vector<double>>(
     "carry_box_pose_a", {0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0});
@@ -87,6 +91,8 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   EXPECT_DOUBLE_EQ(config.place_start_state_bounds_tolerance, 0.05);
   EXPECT_EQ(config.perception_source, Perception3dSource::BOTH);
   EXPECT_TRUE(config.use_tag_derived_place_pose);
+  EXPECT_LT(
+    (config.table_tag_to_tabletop_center - Eigen::Vector3d(0.0, -0.55, 0.15)).norm(), 1e-12);
   EXPECT_DOUBLE_EQ(config.table_tag_place_offset.x(), 0.1);
   EXPECT_DOUBLE_EQ(config.table_tag_place_offset.y(), -0.2);
   EXPECT_LT(
@@ -108,6 +114,16 @@ TEST_F(PickPlaceConfigTest, UsesLegacyCarryPoseForBothTargetsWhenNewPosesAreUnse
   const Eigen::Vector3d expected(0.31, -0.02, 0.36);
   EXPECT_LT((config.carry_pose.translation() - expected).norm(), 1e-12);
   EXPECT_LT((config.carry_pose_b.translation() - expected).norm(), 1e-12);
+}
+
+TEST_F(PickPlaceConfigTest, AllowsLaunchesWithoutTag9ToDisableTableCollisions)
+{
+  const auto test_node = node("disable_table_collision");
+  test_node->declare_parameter<bool>("table_collision_enabled", true);
+  test_node->declare_parameter<bool>("disable_table_collision", true);
+
+  const auto config = loadPickPlaceConfig(test_node);
+  EXPECT_FALSE(config.table_collision_enabled);
 }
 
 TEST_F(PickPlaceConfigTest, RejectsMalformedVectorParameters)
@@ -145,6 +161,12 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidModeAndUnsafeExecutionValues)
   bad_table_tag_gap->declare_parameter<bool>("use_tag_derived_place_pose", true);
   bad_table_tag_gap->declare_parameter<double>("table_tag_maximum_sample_gap", 0.0);
   EXPECT_THROW(loadPickPlaceConfig(bad_table_tag_gap), std::runtime_error);
+
+  const auto bad_table_dimensions = node("bad_table_dimensions");
+  bad_table_dimensions->declare_parameter<bool>("table_collision_enabled", true);
+  bad_table_dimensions->declare_parameter<std::vector<double>>(
+    "table_dimensions", {0.5, 0.0, 0.6});
+  EXPECT_THROW(loadPickPlaceConfig(bad_table_dimensions), std::runtime_error);
 
   const auto relative_log_file = node("relative_log_file");
   relative_log_file->declare_parameter<std::string>("planning_log_file", "trace.jsonl");

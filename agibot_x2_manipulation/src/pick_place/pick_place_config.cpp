@@ -168,8 +168,15 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.use_tag_derived_place_pose = parameter<bool>(
     node, "use_tag_derived_place_pose", false);
   config.table_tag_frame = parameter<std::string>(node, "table_tag_frame", "tag9");
-  config.table_tag_height_above_tabletop = parameter<double>(
-    node, "table_tag_height_above_tabletop", 0.55);
+  const auto table_tag_to_tabletop_center = parameter<std::vector<double>>(
+    node, "table_tag_to_tabletop_center", {0.0, -0.55, 0.0});
+  if (table_tag_to_tabletop_center.size() != 3U) {
+    throw std::runtime_error(
+            "table_tag_to_tabletop_center must contain [tag_x, tag_y, tag_z]");
+  }
+  config.table_tag_to_tabletop_center = Eigen::Vector3d(
+    table_tag_to_tabletop_center[0], table_tag_to_tabletop_center[1],
+    table_tag_to_tabletop_center[2]);
   const auto table_tag_place_offset = parameter<std::vector<double>>(
     node, "table_tag_place_offset", {0.0, 0.0});
   if (table_tag_place_offset.size() != 2U) {
@@ -178,6 +185,18 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.table_tag_place_offset = Eigen::Vector2d(
     table_tag_place_offset[0], table_tag_place_offset[1]);
   config.table_tag_to_box_yaw = parameter<double>(node, "table_tag_to_box_yaw", 0.0);
+  const bool disable_table_collision = parameter<bool>(
+    node, "disable_table_collision", false);
+  config.table_collision_enabled = parameter<bool>(node, "table_collision_enabled", false) &&
+    !disable_table_collision;
+  config.table_collision_id = parameter<std::string>(node, "table_collision_id", "work_table");
+  const auto table_dimensions = parameter<std::vector<double>>(
+    node, "table_dimensions", {0.5, 0.3, 0.6});
+  if (table_dimensions.size() != 3U) {
+    throw std::runtime_error("table_dimensions must contain [length, depth, height]");
+  }
+  config.table_dimensions = {
+    table_dimensions[0], table_dimensions[1], table_dimensions[2]};
   config.maximum_table_tag_pose_age = parameter<double>(
     node, "maximum_table_tag_pose_age", config.max_pose_age);
   config.table_tag_detections_topic = parameter<std::string>(
@@ -195,10 +214,10 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     node, "table_tag_maximum_sample_gap", 2.5);
   config.table_tag_stability_timeout = parameter<double>(
     node, "table_tag_stability_timeout", 6.0);
-  if (config.use_tag_derived_place_pose &&
+  if ((config.use_tag_derived_place_pose || config.table_collision_enabled) &&
     (config.table_tag_frame.empty() ||
-    !std::isfinite(config.table_tag_height_above_tabletop) ||
-    config.table_tag_height_above_tabletop < 0.0 ||
+    !config.table_tag_to_tabletop_center.allFinite() ||
+    config.table_tag_to_tabletop_center.y() > 0.0 ||
     !config.table_tag_place_offset.allFinite() ||
     !std::isfinite(config.table_tag_to_box_yaw) ||
     !std::isfinite(config.maximum_table_tag_pose_age) ||
@@ -217,7 +236,18 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     config.table_tag_stability_timeout <= 0.0))
   {
     throw std::runtime_error(
-            "tag-derived place pose requires valid table-tag detection and calibration values");
+            "table collision or tag-derived placement requires valid table-tag calibration values");
+  }
+  if (config.table_collision_enabled &&
+    (config.table_collision_id.empty() || config.table_collision_id == config.box_id ||
+    !std::isfinite(config.table_dimensions.length) ||
+    !std::isfinite(config.table_dimensions.width) ||
+    !std::isfinite(config.table_dimensions.height) ||
+    config.table_dimensions.length <= 0.0 || config.table_dimensions.width <= 0.0 ||
+    config.table_dimensions.height <= 0.0))
+  {
+    throw std::runtime_error(
+            "enabled table collision model requires a unique ID and positive finite dimensions");
   }
   config.max_joint_step = parameter<double>(node, "maximum_joint_step", 0.35);
   config.allow_execution = parameter<bool>(node, "allow_execution", false);

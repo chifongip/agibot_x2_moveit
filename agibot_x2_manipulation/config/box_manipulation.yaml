@@ -81,13 +81,20 @@ pick_place_server:
     adaptive_place_position_tolerance: [0.05, 0.05, 0.02]
     adaptive_place_yaw_tolerance: 0.1745329252  # 10 degrees
     # An empty action place_pose is resolved from tag9. Its frame uses +X right,
-    # +Y up, and +Z toward the robot; [x, z] offsets are in the tabletop plane.
+    # +Y up, and +Z toward the robot. The tabletop center is a single source
+    # of truth for both placement and the MoveIt table collision box.
     # At zero yaw, box +X, +Y, and +Z align with tag -Z, -X, and +Y.
     use_tag_derived_place_pose: true
     table_tag_frame: tag9
-    table_tag_height_above_tabletop: 0.55
-    table_tag_place_offset: [0.0, 0.2]
+    table_tag_to_tabletop_center: [0.0, -0.55, 0.15]
+    # [x, z] in the tabletop plane relative to the calibrated center. The z
+    # value preserves the former tag-relative target at z=0.20 m.
+    table_tag_place_offset: [0.0, 0.05]
     table_tag_to_box_yaw: 0.0
+    table_collision_enabled: true
+    table_collision_id: work_table
+    # [length along tag +X, depth along tag -Z, height along tag +Y] [m].
+    table_dimensions: [0.5, 0.3, 0.6]
     maximum_table_tag_pose_age: 2.5
     table_tag_detections_topic: /front_center_rectify/detections
     table_tag_id: 9

@@ -497,6 +497,11 @@ def generate_launch_description():
                         "allow_execution": ParameterValue(
                             allow_execution, value_type=bool
                         ),
+                        # Dummy/replay workflows publish only the pickup tag;
+                        # they intentionally have no Tag 9 table model.
+                        "disable_table_collision": ParameterValue(
+                            use_dummy_apriltag, value_type=bool
+                        ),
                         "motion_planning_mode": motion_planning_mode,
                         # The execution gate consumes direct HAL measurements,
                         # not the potentially cached joint-state broadcaster.

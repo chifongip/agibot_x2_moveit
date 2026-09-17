@@ -163,6 +163,26 @@ Eigen::Isometry3d boxPoseFromVerticalTableTag(
   return boxPoseFromTag(tag_pose, table_tag_to_box);
 }
 
+Eigen::Isometry3d tablePoseFromVerticalTag(
+  const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
+  const Eigen::Vector3d & tag_to_tabletop_center)
+{
+  validate(dimensions);
+  if (!tag_pose.matrix().allFinite() || !tag_to_tabletop_center.allFinite()) {
+    throw std::invalid_argument("table-tag transform and tabletop center must be finite");
+  }
+
+  Eigen::Isometry3d tag_to_table = Eigen::Isometry3d::Identity();
+  // Table +X, +Y, and +Z align with tag +X, -Z, and +Y.  This is a
+  // right-handed tabletop frame whose local +Z normal points upward.
+  tag_to_table.linear().col(0) = Eigen::Vector3d::UnitX();
+  tag_to_table.linear().col(1) = -Eigen::Vector3d::UnitZ();
+  tag_to_table.linear().col(2) = Eigen::Vector3d::UnitY();
+  tag_to_table.translation() = tag_to_tabletop_center +
+    tag_to_table.linear() * Eigen::Vector3d(0.0, 0.0, -dimensions.height / 2.0);
+  return boxPoseFromTag(tag_pose, tag_to_table);
+}
+
 GraspGeometry computeGraspGeometry(
   const Eigen::Isometry3d & box_pose, const BoxDimensions & dimensions,
   double pregrasp_distance, double contact_height_offset)

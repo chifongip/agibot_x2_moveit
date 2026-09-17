@@ -10,6 +10,7 @@
 #include <moveit_msgs/msg/planning_scene.hpp>
 #include <moveit_msgs/msg/planning_scene_world.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <Eigen/Geometry>
 
@@ -35,6 +36,9 @@ public:
 
   bool synchronize(std::string & error);
   bool applyBox(const Eigen::Isometry3d & pose, std::string & error);
+  bool applyTable(const Eigen::Isometry3d & pose, std::string & error);
+  void publishTableMarker(
+    const Eigen::Isometry3d & pose, const builtin_interfaces::msg::Time & stamp);
   bool applyObstacleBoxes(const std::vector<SceneBox> & boxes, std::string & error);
   bool clearOwnedBoxes(std::string & error);
   bool clearManagedBoxes(std::string & error);
@@ -79,6 +83,7 @@ private:
   planning_scene_monitor::PlanningSceneMonitorPtr scene_monitor_;
   rclcpp::Subscription<moveit_msgs::msg::PlanningScene>::SharedPtr scene_audit_sub_;
   rclcpp::Subscription<moveit_msgs::msg::PlanningSceneWorld>::SharedPtr world_audit_sub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr table_marker_pub_;
 };
 
 }  // namespace agibot_x2_manipulation

@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace agibot_x2_manipulation
@@ -102,12 +103,13 @@ protected:
     }
   }
 
-  void createTracker(double maximum_age)
+  void createTracker(
+    double maximum_age, TableTagPoseTracker::StablePoseCallback stable_pose_callback = {})
   {
-    tracker_ = std::make_unique<TableTagPlacePoseTracker>(
+    tracker_ = std::make_unique<TableTagPoseTracker>(
       node_, "base_link", "tag9", "/table_tag_test/detections", 9, 20.0,
-      BoxDimensions{0.15, 0.32, 0.32}, 0.47, 0.0, 0.15, 0.0, 3, maximum_age,
-      0.005, 0.0523598776, 2.5);
+      3, maximum_age,
+      0.005, 0.0523598776, 2.5, std::move(stable_pose_callback));
   }
 
   void publishTransform(double x, const rclcpp::Time & stamp)
@@ -135,7 +137,7 @@ protected:
 
   rclcpp::Node::SharedPtr node_;
   rclcpp::executors::SingleThreadedExecutor executor_;
-  std::unique_ptr<TableTagPlacePoseTracker> tracker_;
+  std::unique_ptr<TableTagPoseTracker> tracker_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> transform_broadcaster_;
   rclcpp::Publisher<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_publisher_;
 };
@@ -271,6 +273,36 @@ TEST_F(TableTagPoseTrackerTest, RejectsStaleLatestTransform)
   EXPECT_FALSE(tracker_->waitForStablePose(
       0.05, []() {return false;}, stable_pose, error));
   EXPECT_EQ(error, "no fresh stable table tag pose");
+}
+
+TEST_F(TableTagPoseTrackerTest, CallsCallbackForEveryFreshStablePose)
+{
+  tracker_.reset();
+  std::vector<geometry_msgs::msg::PoseStamped> stable_poses;
+  createTracker(
+    5.0,
+    [&stable_poses](const geometry_msgs::msg::PoseStamped & stable_pose) {
+      stable_poses.push_back(stable_pose);
+    });
+  const auto now = node_->now();
+  const std::array transforms{
+    now - rclcpp::Duration::from_seconds(0.30),
+    now - rclcpp::Duration::from_seconds(0.20),
+    now - rclcpp::Duration::from_seconds(0.10),
+    now - rclcpp::Duration::from_seconds(0.05),
+  };
+
+  for (const auto & transform_stamp : transforms) {
+    publishTransform(0.25, transform_stamp);
+    spinFor(std::chrono::milliseconds(10));
+    publishDetection(transform_stamp + rclcpp::Duration::from_seconds(0.01));
+    spinFor(std::chrono::milliseconds(20));
+  }
+
+  ASSERT_EQ(stable_poses.size(), 2U);
+  EXPECT_EQ(stable_poses.front().header.frame_id, "base_link");
+  EXPECT_NEAR(stable_poses.front().pose.position.x, 0.25, 1e-6);
+  EXPECT_NEAR(stable_poses.back().pose.position.x, 0.25, 1e-6);
 }
 
 }  // namespace

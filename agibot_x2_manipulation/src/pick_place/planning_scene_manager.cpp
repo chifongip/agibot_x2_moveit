@@ -123,6 +123,8 @@ PlanningSceneManager::PlanningSceneManager(
         auditCollisionObject(object, "/planning_scene_world");
       }
     });
+  table_marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
+    "/table_markers", rclcpp::QoS(1).transient_local());
 }
 
 void PlanningSceneManager::auditCollisionObject(
@@ -176,6 +178,49 @@ bool PlanningSceneManager::applyBox(const Eigen::Isometry3d & pose, std::string 
     error = "failed to apply the box collision object: " + std::string(exception.what());
     return false;
   }
+}
+
+bool PlanningSceneManager::applyTable(const Eigen::Isometry3d & pose, std::string & error)
+{
+  if (!config_.table_collision_enabled) {
+    return true;
+  }
+  try {
+    const auto object = makeBoxObject(
+      config_.table_collision_id, config_.table_dimensions, pose);
+    if (!scene_interface_.applyCollisionObject(object)) {
+      error = "MoveIt rejected the table collision object";
+      return false;
+    }
+    return true;
+  } catch (const std::exception & exception) {
+    error = "failed to apply the table collision object: " + std::string(exception.what());
+    return false;
+  }
+}
+
+void PlanningSceneManager::publishTableMarker(
+  const Eigen::Isometry3d & pose, const builtin_interfaces::msg::Time & stamp)
+{
+  visualization_msgs::msg::Marker marker;
+  marker.header.frame_id = config_.planning_frame;
+  marker.header.stamp = stamp;
+  marker.ns = "collision_table";
+  marker.id = 0;
+  marker.type = visualization_msgs::msg::Marker::CUBE;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.pose = toPoseMsg(pose);
+  marker.scale.x = config_.table_dimensions.length;
+  marker.scale.y = config_.table_dimensions.width;
+  marker.scale.z = config_.table_dimensions.height;
+  marker.color.r = 0.85F;
+  marker.color.g = 0.55F;
+  marker.color.b = 0.15F;
+  marker.color.a = 0.35F;
+
+  visualization_msgs::msg::MarkerArray markers;
+  markers.markers.push_back(marker);
+  table_marker_pub_->publish(markers);
 }
 
 bool PlanningSceneManager::removeOwnedBox(const std::string & id, std::string & error)

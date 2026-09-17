@@ -222,14 +222,15 @@ analysis. It never overwrites an existing output path.
 
 ## Table-tag placement calibration
 
-The default launch derives an empty action `place_pose` from `tag9`. The tag is
-configured as a vertical table reference: +X points right, +Y points upward,
-and +Z points toward the robot, so its X-Z plane is the tabletop.
-`table_tag_height_above_tabletop` defines the calibrated vertical distance to
-the tabletop. The desired box center is
-directly below the tag's tabletop projection, at tag-frame coordinates
-`[table_x_offset, -table_tag_height_above_tabletop + box_height / 2,
-table_z_offset]`. At zero yaw, box
+The default launch derives an empty action `place_pose` and a MoveIt table
+collision object from `tag9`. The tag is configured as a vertical table
+reference: +X points right, +Y points upward, and +Z points toward the robot,
+so its X-Z plane is the tabletop. `table_tag_to_tabletop_center: [x, y, z]`
+is the single calibrated tabletop-center offset in tag coordinates. The table
+collision box uses `table_dimensions: [length, depth, height]`, with its
+local +X, +Y, and +Z aligned to tag +X, -Z, and +Y. The desired box center is
+at tag-frame coordinates `[tabletop_x + place_x,
+tabletop_y + box_height / 2, tabletop_z + place_z]`. At zero yaw, box
 +X, +Y, and +Z align with tag -Z, -X, and +Y, preserving an upright placed box.
 
 Leave `place_pose` empty to use this stable tag-derived target. The server
@@ -243,7 +244,8 @@ derived placement poses must be within 5 mm and 3 degrees of their mean. A
 long detector outage therefore requires three new samples before placement can
 resume. Once accepted, that `base_link` target is frozen for the complete
 PickPlace operation. Set
-`table_tag_place_offset: [x, z]` to move the target in the table plane, and
+`table_tag_place_offset: [x, z]` to move the target from the calibrated table
+center in the table plane, and
 keep an explicit action `place_pose` when a caller must override the calibrated
 target. The server waits up to `table_tag_stability_timeout` (6 seconds by
 default) for a fresh stable table-tag pose before rejecting the goal.
@@ -253,6 +255,17 @@ the table geometry. Therefore changing a pickup tag from top-mounted to
 bottom-mounted changes localization only; it cannot shift the table placement
 target. Use `table_tag_place_offset` only to calibrate the desired table
 location, not to compensate for a pickup tag mount.
+Set `table_collision_enabled: true` to require a stable tag pose before every
+Pick, Place, PickPlace, carry, and reset plan. The table stays as a persistent
+world collision object while grasp-box and visible-box objects are refreshed.
+Each fresh stable Tag 9 measurement also publishes a translucent cube on the
+latched `/table_markers` `visualization_msgs/MarkerArray` topic. This updates
+continuously while the detector is running, independently of task acceptance;
+it does not change the MoveIt collision scene until a task begins planning.
+Add a MarkerArray display for that topic in RViz to inspect the same pose and
+dimensions used for collision checking.
+The bundled dummy/replay launches disable this model because they publish only
+the pickup tag; supply a simulated Tag 9 stream before enabling it there.
 `box_pick_place.launch.py` starts the front-center tag9 pipeline at 1 Hz by
 default. It is independent of `use_apriltag`, which controls the tag0 pickup
 detector. `use_dummy_apriltag:=true` always disables both real-camera
@@ -282,7 +295,7 @@ force/tactile feedback.
 Configure tag family, size, ID, and frame in `config/apriltag.yaml`. A box pose
 is published only after the detector, TF, decision-margin, freshness, spread,
 and tilt checks pass (`maximum_box_tilt` is 20 degrees by default). Inspect
-`/detections`, `/box_pose`, `/box_markers`, and
+`/detections`, `/box_pose`, `/box_markers`, `/table_markers`, and
 `/grasp_markers` before planning.
 
 The front-center table-tag launch drops compressed frames before decoding, then

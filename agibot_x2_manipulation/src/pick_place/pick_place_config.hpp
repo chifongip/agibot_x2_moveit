@@ -79,9 +79,12 @@ struct PickPlaceConfig
   double adaptive_place_yaw_tolerance{0.0};
   bool use_tag_derived_place_pose{false};
   std::string table_tag_frame;
-  double table_tag_height_above_tabletop{0.0};
+  Eigen::Vector3d table_tag_to_tabletop_center{Eigen::Vector3d::Zero()};
   Eigen::Vector2d table_tag_place_offset{Eigen::Vector2d::Zero()};
   double table_tag_to_box_yaw{0.0};
+  bool table_collision_enabled{false};
+  std::string table_collision_id;
+  BoxDimensions table_dimensions;
   double maximum_table_tag_pose_age{0.0};
   std::string table_tag_detections_topic;
   int table_tag_id{0};

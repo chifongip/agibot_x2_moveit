@@ -94,17 +94,17 @@ private:
   std::deque<Sample> samples_;
 };
 
-class TableTagPlacePoseTracker
+class TableTagPoseTracker
 {
 public:
-  TableTagPlacePoseTracker(
+  using StablePoseCallback = std::function<void(const geometry_msgs::msg::PoseStamped &)>;
+
+  TableTagPoseTracker(
     const rclcpp::Node::SharedPtr & node, std::string planning_frame,
     std::string tag_frame, std::string detections_topic, int tag_id,
-    double minimum_decision_margin, const BoxDimensions & dimensions,
-    double tag_height_above_tabletop, double table_x_offset, double table_z_offset,
-    double table_tag_to_box_yaw, std::size_t stable_sample_count, double maximum_age,
+    double minimum_decision_margin, std::size_t stable_sample_count, double maximum_age,
     double maximum_position_spread, double maximum_angular_spread,
-    double maximum_sample_gap);
+    double maximum_sample_gap, StablePoseCallback stable_pose_callback = {});
 
   bool waitForStablePose(
     double timeout, const std::function<bool()> & canceled,
@@ -120,11 +120,6 @@ private:
   std::string tag_frame_;
   int tag_id_;
   double minimum_decision_margin_;
-  BoxDimensions dimensions_;
-  double tag_height_above_tabletop_;
-  double table_x_offset_;
-  double table_z_offset_;
-  double table_tag_to_box_yaw_;
   double maximum_age_;
   mutable std::mutex mutex_;
   mutable std::condition_variable stable_pose_condition_;
@@ -134,6 +129,7 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_sub_;
+  StablePoseCallback stable_pose_callback_;
 };
 
 }  // namespace agibot_x2_manipulation

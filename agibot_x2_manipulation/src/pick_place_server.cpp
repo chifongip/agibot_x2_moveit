@@ -163,16 +163,17 @@ public:
     box_id_prefix_ = config_.box_id;
     active_carry_pose_a_ = config_.carry_pose;
     active_carry_pose_b_ = config_.carry_pose_b;
-    if (config_.use_tag_derived_place_pose) {
-      table_tag_pose_tracker_ = std::make_unique<TableTagPlacePoseTracker>(
+    if (config_.use_tag_derived_place_pose || config_.table_collision_enabled) {
+      table_tag_pose_tracker_ = std::make_unique<TableTagPoseTracker>(
         node_, config_.planning_frame, config_.table_tag_frame,
         config_.table_tag_detections_topic, config_.table_tag_id,
-        config_.table_tag_minimum_decision_margin, config_.dimensions,
-        config_.table_tag_height_above_tabletop, config_.table_tag_place_offset.x(),
-        config_.table_tag_place_offset.y(), config_.table_tag_to_box_yaw,
+        config_.table_tag_minimum_decision_margin,
         static_cast<std::size_t>(config_.table_tag_stable_sample_count),
         config_.maximum_table_tag_pose_age, config_.table_tag_maximum_position_spread,
-        config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap);
+        config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap,
+        [this](const geometry_msgs::msg::PoseStamped & tag_pose) {
+          publishTrackedTableMarker(tag_pose);
+        });
     }
     move_group_.setPoseReferenceFrame(config_.planning_frame);
     move_group_.setMaxVelocityScalingFactor(config_.velocity_scaling);
@@ -399,23 +400,6 @@ private:
     return result;
   }
 
-  void rebuildTableTagPoseTracker()
-  {
-    table_tag_pose_tracker_.reset();
-    if (!config_.use_tag_derived_place_pose) {
-      return;
-    }
-    table_tag_pose_tracker_ = std::make_unique<TableTagPlacePoseTracker>(
-      node_, config_.planning_frame, config_.table_tag_frame,
-      config_.table_tag_detections_topic, config_.table_tag_id,
-      config_.table_tag_minimum_decision_margin, config_.dimensions,
-      config_.table_tag_height_above_tabletop, config_.table_tag_place_offset.x(),
-      config_.table_tag_place_offset.y(), config_.table_tag_to_box_yaw,
-      static_cast<std::size_t>(config_.table_tag_stable_sample_count),
-      config_.maximum_table_tag_pose_age, config_.table_tag_maximum_position_spread,
-      config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap);
-  }
-
   bool activateBoxProfile(const TrackedBoxPose & box, std::string & error)
   {
     if (box.profile_id.empty()) {
@@ -454,7 +438,6 @@ private:
     active_profile_id_ = profile->id;
     active_carry_pose_a_ = profile->carry_pose_a;
     active_carry_pose_b_ = profile->carry_pose_b;
-    rebuildTableTagPoseTracker();
     return true;
   }
 
@@ -600,8 +583,81 @@ private:
       error = "place_pose.frame_id is empty";
       return false;
     }
-    return table_tag_pose_tracker_->waitForStablePose(
-      config_.table_tag_stability_timeout, canceled, output, error);
+    Eigen::Isometry3d tag_pose;
+    if (!waitForStableTableTagPose(tag_pose, error, canceled)) {
+      return false;
+    }
+    try {
+      const Eigen::Vector3d tabletop_center = config_.table_tag_to_tabletop_center +
+        Eigen::Vector3d(
+        config_.table_tag_place_offset.x(), 0.0, config_.table_tag_place_offset.y());
+      output = stampedPose(boxPoseFromVerticalTableTag(
+        tag_pose, config_.dimensions, -tabletop_center.y(), tabletop_center.x(),
+        tabletop_center.z(), config_.table_tag_to_box_yaw));
+      return true;
+    } catch (const std::exception & exception) {
+      error = "failed to derive place pose from the stable table tag: " +
+        std::string(exception.what());
+      return false;
+    }
+  }
+
+  bool waitForStableTableTagPose(
+    Eigen::Isometry3d & output, std::string & error, const CancelFunction & canceled) const
+  {
+    if (!table_tag_pose_tracker_) {
+      error = "table-tag tracking is not configured";
+      return false;
+    }
+    geometry_msgs::msg::PoseStamped tag_pose;
+    if (!table_tag_pose_tracker_->waitForStablePose(
+        config_.table_tag_stability_timeout, canceled, tag_pose, error))
+    {
+      return false;
+    }
+    try {
+      output = toEigen(tag_pose.pose);
+      return true;
+    } catch (const std::exception & exception) {
+      error = "stable table tag pose is invalid: " + std::string(exception.what());
+      return false;
+    }
+  }
+
+  bool synchronizeTableCollisionScene(
+    std::string & error, const CancelFunction & canceled)
+  {
+    if (!config_.table_collision_enabled) {
+      return true;
+    }
+    Eigen::Isometry3d tag_pose;
+    if (!waitForStableTableTagPose(tag_pose, error, canceled)) {
+      return false;
+    }
+    try {
+      return planning_scene_.applyTable(
+        tablePoseFromVerticalTag(
+          tag_pose, config_.table_dimensions, config_.table_tag_to_tabletop_center), error);
+    } catch (const std::exception & exception) {
+      error = "failed to derive table collision pose from Tag 9: " +
+        std::string(exception.what());
+      return false;
+    }
+  }
+
+  void publishTrackedTableMarker(const geometry_msgs::msg::PoseStamped & tag_pose)
+  {
+    try {
+      planning_scene_.publishTableMarker(
+        tablePoseFromVerticalTag(
+          toEigen(tag_pose.pose), config_.table_dimensions,
+          config_.table_tag_to_tabletop_center),
+        tag_pose.header.stamp);
+    } catch (const std::exception & exception) {
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "Failed to publish the stable table marker: %s", exception.what());
+    }
   }
 
   rclcpp_action::GoalResponse onPickGoal(
@@ -1149,6 +1205,9 @@ private:
     if (!perception_.refresh(error)) {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
+    if (!synchronizeTableCollisionScene(error, canceled)) {
+      return outcome(false, kSafetyAbort, error, held_pose_);
+    }
     if (canceled()) {
       return outcome(false, kSafetyAbort, "carry transition canceled before planning", held_pose_);
     }
@@ -1259,6 +1318,9 @@ private:
       return outcome(false, kSafetyAbort, "pick canceled before perception refresh");
     }
     if (!perception_.refresh(error)) {
+      return outcome(false, kSafetyAbort, error);
+    }
+    if (!synchronizeTableCollisionScene(error, canceled)) {
       return outcome(false, kSafetyAbort, error);
     }
     if (canceled()) {
@@ -1494,6 +1556,9 @@ private:
     if (!perception_.refresh(error)) {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
+    if (!synchronizeTableCollisionScene(error, canceled)) {
+      return outcome(false, kSafetyAbort, error, held_pose_);
+    }
     if (canceled()) {
       return outcome(false, kSafetyAbort, "place canceled before planning", held_pose_);
     }
@@ -1696,6 +1761,9 @@ private:
     if (!perception_.refresh(error)) {
       return outcome(false, kSafetyAbort, error);
     }
+    if (!synchronizeTableCollisionScene(error, canceled)) {
+      return outcome(false, kSafetyAbort, error);
+    }
     if (canceled()) {
       return outcome(false, kSafetyAbort, "PickPlace planning canceled before motion planning");
     }
@@ -1871,6 +1939,12 @@ private:
           return;
         }
       } else if (!perception_.refresh(error)) {
+        fail(ResetManipulation::Result::CLEANUP_FAILED, error);
+        return;
+      }
+      if (!synchronizeTableCollisionScene(
+          error, [goal]() {return goal->is_canceling();}))
+      {
         fail(ResetManipulation::Result::CLEANUP_FAILED, error);
         return;
       }
@@ -2109,7 +2183,7 @@ private:
   uint64_t profile_version_{0};
   ManipulationStateStore state_store_;
   BoxPoseTracker box_pose_tracker_;
-  std::unique_ptr<TableTagPlacePoseTracker> table_tag_pose_tracker_;
+  std::unique_ptr<TableTagPoseTracker> table_tag_pose_tracker_;
   Eigen::Isometry3d held_box_to_left_contact_{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d held_box_to_right_contact_{Eigen::Isometry3d::Identity()};
   bool held_geometry_valid_{false};
