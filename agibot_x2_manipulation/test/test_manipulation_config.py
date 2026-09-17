@@ -130,6 +130,23 @@ def test_adaptive_carry_collision_rejections_report_contact_pairs():
     assert "colliding_pairs=[" in planner_source
 
 
+def test_grasped_box_may_contact_all_wrist_links_but_not_the_environment():
+    scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
+
+    assert "std::vector<std::string> boxTouchLinks" in scene_source
+    for link in (
+        "left_wrist_yaw_link",
+        "left_wrist_pitch_link",
+        "left_wrist_roll_link",
+        "right_wrist_yaw_link",
+        "right_wrist_pitch_link",
+        "right_wrist_roll_link",
+    ):
+        assert link in scene_source
+    assert "object.touch_links = boxTouchLinks(config_);" in scene_source
+    assert "config_.box_id, boxTouchLinks(config_), true" in scene_source
+
+
 def test_managed_box_objects_are_removed_after_empty_operations_and_restart():
     scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
     server_source = (

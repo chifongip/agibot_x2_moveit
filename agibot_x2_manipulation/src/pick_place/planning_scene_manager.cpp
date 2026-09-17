@@ -56,6 +56,18 @@ geometry_msgs::msg::Pose toPoseMsg(const Eigen::Isometry3d & pose)
   return result;
 }
 
+// Allow only the held/grasped box to touch the wrist and hand geometry.  All
+// wrist collisions with the rest of the robot and the environment remain
+// enabled in the planning scene.
+std::vector<std::string> boxTouchLinks(const PickPlaceConfig & config)
+{
+  return {
+    "left_wrist_yaw_link", "left_wrist_pitch_link", "left_wrist_roll_link",
+    "left_hand_pad_link", config.left_tcp,
+    "right_wrist_yaw_link", "right_wrist_pitch_link", "right_wrist_roll_link",
+    "right_hand_pad_link", config.right_tcp};
+}
+
 }  // namespace
 
 moveit_msgs::msg::CollisionObject PlanningSceneManager::makeBoxObject(
@@ -340,9 +352,7 @@ bool PlanningSceneManager::attachBox(std::string & error)
     object.link_name = config_.left_tcp;
     object.object.id = config_.box_id;
     object.object.operation = moveit_msgs::msg::CollisionObject::ADD;
-    object.touch_links = {
-      "left_wrist_roll_link", "left_hand_pad_link", config_.left_tcp,
-      "right_wrist_roll_link", "right_hand_pad_link", config_.right_tcp};
+    object.touch_links = boxTouchLinks(config_);
     if (!scene_interface_.applyAttachedCollisionObject(object)) {
       error = "MoveIt rejected box attachment to the planning scene";
       return false;
@@ -470,9 +480,7 @@ bool PlanningSceneManager::collisionFree(
     acm.setEntry(config_.box_id, true);
   } else if (allow_pad_contact) {
     acm.setEntry(
-      config_.box_id, std::vector<std::string>{
-        "left_wrist_roll_link", "left_hand_pad_link", config_.left_tcp,
-        "right_wrist_roll_link", "right_hand_pad_link", config_.right_tcp}, true);
+      config_.box_id, boxTouchLinks(config_), true);
   }
   collision_detection::CollisionRequest request;
   request.group_name = config_.planning_group;
@@ -509,9 +517,7 @@ bool PlanningSceneManager::collisionFreeWithBox(
   collision_detection::AllowedCollisionMatrix acm = scene->getAllowedCollisionMatrix();
   if (allow_pad_contact) {
     acm.setEntry(
-      config_.box_id, std::vector<std::string>{
-        "left_wrist_roll_link", "left_hand_pad_link", config_.left_tcp,
-        "right_wrist_roll_link", "right_hand_pad_link", config_.right_tcp}, true);
+      config_.box_id, boxTouchLinks(config_), true);
   }
   collision_detection::CollisionRequest request;
   request.group_name = config_.planning_group;
