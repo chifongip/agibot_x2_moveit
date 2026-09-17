@@ -1,5 +1,6 @@
 #include "agibot_x2_manipulation/planning_budget.hpp"
 #include "pick_place/dual_arm_motion_planner.hpp"
+#include "pick_place/planning_trace_logger.hpp"
 
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
@@ -95,6 +96,17 @@ public:
       "/pick_place/planned_box_path", rclcpp::QoS(1).reliable().transient_local());
     diagnostics_pub_ = node_->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
       "/pick_place/planning_diagnostics", 10);
+    planning_trace_ = std::make_unique<PlanningTraceLogger>(
+      node_->get_logger(), config_.planning_log_file, config_.planning_log_directory);
+    if (planning_trace_->enabled()) {
+      writeTrace(
+        "planner_started", true, "planning trace enabled",
+        PlanningTraceLogger::Fields{
+          {"trace_file", planning_trace_->filePath()},
+          {"planning_frame", config_.planning_frame},
+          {"planning_group", config_.planning_group},
+          {"motion_planning_mode", motionPlanningModeName(config_.motion_planning_mode)}});
+    }
   }
 
   geometry_msgs::msg::PoseStamped stampedPose(const Eigen::Isometry3d & pose) const
@@ -104,6 +116,28 @@ public:
     result.header.stamp = node_->now();
     result.pose = toPoseMsg(pose);
     return result;
+  }
+
+  void writeTrace(
+    const std::string & event, bool success, const std::string & message,
+    const PlanningTraceLogger::Fields & fields = {}) const
+  {
+    if (planning_trace_ && planning_trace_->enabled()) {
+      planning_trace_->write(node_->now().nanoseconds(), event, success, message, fields);
+    }
+  }
+
+  void writeDiagnosticTrace(
+    const std::string & event, const diagnostic_msgs::msg::DiagnosticStatus & status) const
+  {
+    PlanningTraceLogger::Fields fields{
+      {"diagnostic_name", status.name}, {"hardware_id", status.hardware_id}};
+    for (const auto & item : status.values) {
+      fields.emplace_back(item.key, item.value);
+    }
+    writeTrace(
+      event, status.level == diagnostic_msgs::msg::DiagnosticStatus::OK,
+      status.message, fields);
   }
 
   bool setFromDualArmIK(
@@ -300,6 +334,8 @@ public:
       std::to_string(config_.carry_search_timeout));
     add("joint_margin", std::to_string(joint_margin));
     add("maximum_joint_step", std::to_string(maximum_joint_step));
+    writeDiagnosticTrace("closed_chain_planning", status);
+    array.status.push_back(std::move(status));
     diagnostics_pub_->publish(array);
   }
 
@@ -325,6 +361,8 @@ public:
     add("grasp_id", active_grasp_id_);
     add("route_id", route);
     add("segment", segment);
+    writeDiagnosticTrace("pose_to_pose_planning", status);
+    array.status.push_back(std::move(status));
     diagnostics_pub_->publish(array);
   }
 
@@ -1477,6 +1515,18 @@ public:
         }
         error += "]";
       }
+      writeTrace(
+        "adaptive_carry_endpoint_precheck", false, error,
+        PlanningTraceLogger::Fields{
+          {"transition", transition ? "true" : "false"},
+          {"nominal_pose", formatPose(nominal_target_pose)},
+          {"reference_pose", formatPose(from_pose)},
+          {"preferred_pose", preferred_target_pose ?
+            formatPose(*preferred_target_pose) : ""},
+          {"candidate_count", std::to_string(endpoint_order)},
+          {"ik_rejected", std::to_string(ik_rejected)},
+          {"bounds_rejected", std::to_string(bounds_rejected)},
+          {"collision_rejected", std::to_string(collision_rejected)}});
       return false;
     }
 
@@ -1527,6 +1577,15 @@ public:
             endpoint.pose.translation().x(), endpoint.pose.translation().y(),
             endpoint.pose.translation().z(),
             carryRouteName(route));
+          writeTrace(
+            "adaptive_carry_selected", true, "endpoint and route accepted",
+            PlanningTraceLogger::Fields{
+              {"transition", transition ? "true" : "false"},
+              {"route", carryRouteName(route)},
+              {"nominal_pose", formatPose(nominal_target_pose)},
+              {"selected_pose", formatPose(endpoint.pose)},
+              {"joint_margin", std::to_string(endpoint.margin)},
+              {"joint_distance", std::to_string(endpoint.distance)}});
           return true;
         } catch (const std::exception & exception) {
           last_error = exception.what();
@@ -1535,6 +1594,13 @@ public:
     }
     error = "no feasible " + search_name + " pose inside the configured safety envelope; last failure: " +
       last_error;
+    writeTrace(
+      "adaptive_carry_route_failure", false, error,
+      PlanningTraceLogger::Fields{
+        {"transition", transition ? "true" : "false"},
+        {"nominal_pose", formatPose(nominal_target_pose)},
+        {"endpoint_count", std::to_string(endpoints.size())},
+        {"last_route_error", last_error}});
     return false;
   }
 
@@ -2291,6 +2357,7 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr box_path_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;
+  std::unique_ptr<PlanningTraceLogger> planning_trace_;
 };
 
 DualArmMotionPlanner::DualArmMotionPlanner(

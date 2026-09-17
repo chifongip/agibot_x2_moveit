@@ -54,6 +54,8 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_EQ(config.table_tag_id, 9);
   EXPECT_EQ(config.table_tag_stable_sample_count, 3);
   EXPECT_DOUBLE_EQ(config.table_tag_maximum_sample_gap, 2.5);
+  EXPECT_TRUE(config.planning_log_file.empty());
+  EXPECT_EQ(config.planning_log_directory, "/tmp/agibot_x2_planning_traces");
   EXPECT_TRUE(config.carry_pose.matrix().allFinite());
   EXPECT_TRUE(config.carry_pose_b.matrix().allFinite());
   EXPECT_LT((config.carry_pose.translation() - config.carry_pose_b.translation()).norm(), 1e-12);
@@ -73,6 +75,10 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
     "carry_box_pose_a", {0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0});
   test_node->declare_parameter<std::vector<double>>(
     "carry_box_pose_b", {0.30, 0.1, 0.35, 0.0, 0.0, 0.0, 1.0});
+  test_node->declare_parameter<std::string>(
+    "planning_log_file", "/tmp/x2-planning-trace.jsonl");
+  test_node->declare_parameter<std::string>(
+    "planning_log_directory", "/tmp/x2-planning-traces");
 
   const auto config = loadPickPlaceConfig(test_node);
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::POSE_TO_POSE);
@@ -88,6 +94,8 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   EXPECT_LT(
     (config.carry_pose_b.translation() - Eigen::Vector3d(0.30, 0.1, 0.35)).norm(), 1e-12);
   EXPECT_EQ(config.table_tag_stable_sample_count, 3);
+  EXPECT_EQ(config.planning_log_file, "/tmp/x2-planning-trace.jsonl");
+  EXPECT_EQ(config.planning_log_directory, "/tmp/x2-planning-traces");
 }
 
 TEST_F(PickPlaceConfigTest, UsesLegacyCarryPoseForBothTargetsWhenNewPosesAreUnset)
@@ -137,6 +145,14 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidModeAndUnsafeExecutionValues)
   bad_table_tag_gap->declare_parameter<bool>("use_tag_derived_place_pose", true);
   bad_table_tag_gap->declare_parameter<double>("table_tag_maximum_sample_gap", 0.0);
   EXPECT_THROW(loadPickPlaceConfig(bad_table_tag_gap), std::runtime_error);
+
+  const auto relative_log_file = node("relative_log_file");
+  relative_log_file->declare_parameter<std::string>("planning_log_file", "trace.jsonl");
+  EXPECT_THROW(loadPickPlaceConfig(relative_log_file), std::runtime_error);
+
+  const auto relative_log_directory = node("relative_log_directory");
+  relative_log_directory->declare_parameter<std::string>("planning_log_directory", "traces");
+  EXPECT_THROW(loadPickPlaceConfig(relative_log_directory), std::runtime_error);
 }
 
 TEST_F(PickPlaceConfigTest, RejectsInvalidSearchBudgetsAndInitialState)

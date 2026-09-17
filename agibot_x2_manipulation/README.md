@@ -756,6 +756,26 @@ results are published on `/pick_place/planned_box_path`,
 with per-route failure classification and budget data on
 `/pick_place/planning_diagnostics`.
 
+### Persisting planning traces
+
+Planning tracing is enabled by default. Each planner-server start creates a
+file named `planning-YYYYMMDD-HHMMSS-PID.jsonl` in
+`/tmp/agibot_x2_planning_traces`, where the timestamp uses the host's local
+time. The server appends one JSON object per line and flushes each record,
+including closed-chain and pose-to-pose diagnostics, adaptive-carry endpoint
+rejection counts, selected targets/routes, and route failures. The server logs
+the full destination when it starts.
+
+```bash
+ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
+  planning_log_directory:=/var/log/x2/planning
+```
+
+To use one explicit destination instead, set `planning_log_file` to an
+absolute path; it takes precedence over `planning_log_directory`. The trace
+may contain measured poses and joint-planning diagnostics; treat it as robot
+operational data and do not commit it.
+
 Each non-plan-only motion also requires a settled physical endpoint before the
 server begins its next phase. It waits for direct HAL arm feedback received
 after controller execution, then requires consecutive samples within

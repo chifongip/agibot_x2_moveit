@@ -73,6 +73,8 @@ struct PickPlaceConfig
   double carry_search_z_lower{0.0};
   double carry_search_z_upper{0.0};
   double carry_search_orientation_tolerance{0.0};
+  std::string planning_log_file;
+  std::string planning_log_directory;
   Eigen::Vector3d adaptive_place_position_tolerance{Eigen::Vector3d::Zero()};
   double adaptive_place_yaw_tolerance{0.0};
   bool use_tag_derived_place_pose{false};

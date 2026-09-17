@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
 #include <vector>
 
@@ -138,6 +139,23 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.carry_search_z_upper = parameter<double>(node, "carry_search_z_upper", 0.03);
   config.carry_search_orientation_tolerance = parameter<double>(
     node, "carry_search_orientation_tolerance", 0.1745329252);
+  config.planning_log_file = parameter<std::string>(node, "planning_log_file", "");
+  config.planning_log_directory = parameter<std::string>(
+    node, "planning_log_directory", "/tmp/agibot_x2_planning_traces");
+  if (!config.planning_log_file.empty() &&
+    !std::filesystem::path(config.planning_log_file).is_absolute())
+  {
+    throw std::runtime_error("planning_log_file must be an absolute path when enabled");
+  }
+  if (!config.planning_log_directory.empty() &&
+    !std::filesystem::path(config.planning_log_directory).is_absolute())
+  {
+    throw std::runtime_error("planning_log_directory must be an absolute path when enabled");
+  }
+  if (config.planning_log_file.empty() && config.planning_log_directory.empty()) {
+    throw std::runtime_error(
+            "planning_log_file or planning_log_directory must be configured for planning traces");
+  }
   const auto place_tolerance = parameter<std::vector<double>>(
     node, "adaptive_place_position_tolerance", {0.015, 0.015, 0.005});
   if (place_tolerance.size() != 3U) {

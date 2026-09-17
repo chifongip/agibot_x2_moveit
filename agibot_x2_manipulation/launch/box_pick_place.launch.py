@@ -126,6 +126,8 @@ def generate_launch_description():
     allow_execution = LaunchConfiguration("allow_execution")
     motion_planning_mode = LaunchConfiguration("motion_planning_mode")
     manipulation_state_file = LaunchConfiguration("manipulation_state_file")
+    planning_log_file = LaunchConfiguration("planning_log_file")
+    planning_log_directory = LaunchConfiguration("planning_log_directory")
     box_profiles_file = LaunchConfiguration("box_profiles_file")
 
     config_share = get_package_share_directory("agibot_x2_moveit_config")
@@ -234,6 +236,22 @@ def generate_launch_description():
                     "agibot_x2_manipulation_state",
                 ),
                 description="Durable manipulation recovery-state file.",
+            ),
+            DeclareLaunchArgument(
+                "planning_log_file",
+                default_value="",
+                description=(
+                    "Optional absolute JSON Lines destination for detailed planning "
+                    "traces; overrides the automatic timestamped destination."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "planning_log_directory",
+                default_value="/tmp/agibot_x2_planning_traces",
+                description=(
+                    "Absolute directory for automatic timestamped JSON Lines "
+                    "planning traces."
+                ),
             ),
             DeclareLaunchArgument(
                 "ros2_control_update_rate",
@@ -486,6 +504,8 @@ def generate_launch_description():
                         "state_file": ParameterValue(
                             manipulation_state_file, value_type=str
                         ),
+                        "planning_log_file": planning_log_file,
+                        "planning_log_directory": planning_log_directory,
                         "depth_filtered_cloud_topic": (
                             "/x2/moveit/depth_filtered_cloud"
                         ),

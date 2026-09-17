@@ -88,6 +88,7 @@ add_library(pick_place_core
   src/pick_place/dual_arm_motion_planner.cpp
   src/pick_place/manipulation_state_store.cpp
   src/pick_place/pick_place_config.cpp
+  src/pick_place/planning_trace_logger.cpp
   src/pick_place/perception_synchronizer.cpp
   src/pick_place/planning_scene_manager.cpp
   src/pick_place/trajectory_executor.cpp)
@@ -173,6 +174,10 @@ if(BUILD_TESTING)
   target_include_directories(test_pick_place_config PRIVATE src include)
   target_link_libraries(test_pick_place_config pick_place_core)
   ament_target_dependencies(test_pick_place_config rclcpp)
+  ament_add_gtest(test_planning_trace_logger test/test_planning_trace_logger.cpp)
+  target_include_directories(test_planning_trace_logger PRIVATE src)
+  target_link_libraries(test_planning_trace_logger pick_place_core)
+  ament_target_dependencies(test_planning_trace_logger rclcpp)
   ament_add_gtest(test_table_tag_pose_tracker test/test_table_tag_pose_tracker.cpp)
   target_include_directories(test_table_tag_pose_tracker PRIVATE src include)
   target_link_libraries(test_table_tag_pose_tracker pick_place_core)

@@ -158,6 +158,34 @@ def test_late_visible_box_detections_do_not_interrupt_a_planned_task():
     assert "changed before motion:" in server_source
 
 
+def test_detailed_planning_trace_file_is_automatic_and_launch_configurable():
+    package_root = Path(__file__).parents[1]
+    config_source = (
+        package_root / "src" / "pick_place" / "pick_place_config.cpp"
+    ).read_text(encoding="utf-8")
+    planner_source = (
+        package_root / "src" / "pick_place" / "dual_arm_motion_planner.cpp"
+    ).read_text(encoding="utf-8")
+    logger_source = (
+        package_root / "src" / "pick_place" / "planning_trace_logger.cpp"
+    ).read_text(encoding="utf-8")
+    launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
+
+    assert 'parameter<std::string>(node, "planning_log_file", "")' in config_source
+    assert ('parameter<std::string>(\n    node, "planning_log_directory", '
+            '"/tmp/agibot_x2_planning_traces")') in config_source
+    assert "planning_log_file must be an absolute path when enabled" in config_source
+    assert "planning_log_directory must be an absolute path when enabled" in config_source
+    assert 'DeclareLaunchArgument(\n                "planning_log_file"' in launch_source
+    assert 'DeclareLaunchArgument(\n                "planning_log_directory"' in launch_source
+    assert '"planning_log_file": planning_log_file' in launch_source
+    assert '"planning_log_directory": planning_log_directory' in launch_source
+    assert 'filename << "planning-" << std::put_time' in logger_source
+    assert '"-" << getpid() << ".jsonl"' in logger_source
+    assert "adaptive_carry_endpoint_precheck" in planner_source
+    assert "adaptive_carry_selected" in planner_source
+
+
 def test_managed_box_objects_are_removed_after_empty_operations_and_restart():
     scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
     server_source = (

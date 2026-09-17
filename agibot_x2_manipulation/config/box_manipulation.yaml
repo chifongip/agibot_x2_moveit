@@ -70,6 +70,12 @@ pick_place_server:
     carry_search_z_lower: 0.12
     carry_search_z_upper: 0.03
     carry_search_orientation_tolerance: 0.1745329252  # 10 degrees
+    # Save a timestamped planning-YYYYMMDD-HHMMSS-PID.jsonl trace for every
+    # planner-server start. The timestamp uses the host's local time.
+    planning_log_directory: /tmp/agibot_x2_planning_traces
+    # Optional absolute JSON Lines trace file. When set, it overrides the
+    # automatic timestamped destination above.
+    planning_log_file: ""
     # Bounded local correction only; a placement-region planner is required
     # before allowing larger shifts from the requested final box pose.
     adaptive_place_position_tolerance: [0.05, 0.05, 0.02]
