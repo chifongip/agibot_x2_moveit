@@ -168,8 +168,7 @@ public:
         config_.table_tag_place_offset.y(), config_.table_tag_to_box_yaw,
         static_cast<std::size_t>(config_.table_tag_stable_sample_count),
         config_.maximum_table_tag_pose_age, config_.table_tag_maximum_position_spread,
-        config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap,
-        config_.pickup_tag_to_box_yaw, config_.pickup_tag_to_box_offset);
+        config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap);
     }
     move_group_.setPoseReferenceFrame(config_.planning_frame);
     move_group_.setMaxVelocityScalingFactor(config_.velocity_scaling);
@@ -311,8 +310,7 @@ private:
       config_.table_tag_place_offset.y(), config_.table_tag_to_box_yaw,
       static_cast<std::size_t>(config_.table_tag_stable_sample_count),
       config_.maximum_table_tag_pose_age, config_.table_tag_maximum_position_spread,
-      config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap,
-      config_.pickup_tag_to_box_yaw, config_.pickup_tag_to_box_offset);
+      config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap);
   }
 
   bool activateBoxProfile(const TrackedBoxPose & box, std::string & error)
@@ -348,8 +346,6 @@ private:
     config_.dimensions = profile->dimensions;
     config_.pregrasp_distance = profile->pregrasp_distance;
     config_.contact_height_offset = profile->contact_height_offset;
-    config_.pickup_tag_to_box_yaw = profile->tag_to_box_yaw;
-    config_.pickup_tag_to_box_offset = profile->tag_to_box_offset;
     config_.box_id = collisionObjectId(box.instance_id);
     active_box_instance_id_ = box.instance_id;
     active_profile_id_ = profile->id;

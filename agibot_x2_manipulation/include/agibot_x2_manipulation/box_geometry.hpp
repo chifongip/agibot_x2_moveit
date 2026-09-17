@@ -50,8 +50,20 @@ struct GraspCandidate
   double pregrasp_distance{0.0};
 };
 
-/// Convert a centered, aligned top-tag pose into the box-center pose.
+/// Construct the tag-to-box-center transform for a centered, aligned top tag.
 /// tag_to_box_offset is an additional translation in tag-frame coordinates.
+Eigen::Isometry3d topTagToBoxCenter(
+  const BoxDimensions & dimensions, double tag_to_box_yaw = 0.0,
+  const Eigen::Vector3d & tag_to_box_offset = Eigen::Vector3d::Zero());
+
+/// Apply a calibrated tag-to-box-center transform to a measured tag pose.
+/// This supports tags on any box face when tag_to_box_center is calibrated as
+/// a full rigid transform.
+Eigen::Isometry3d boxPoseFromTag(
+  const Eigen::Isometry3d & tag_pose, const Eigen::Isometry3d & tag_to_box_center);
+
+/// Convert a centered, aligned top-tag pose into the box-center pose.
+/// Prefer boxPoseFromTag with a calibrated transform for new profiles.
 Eigen::Isometry3d boxPoseFromTopTag(
   const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
   double tag_to_box_yaw = 0.0,
@@ -61,14 +73,11 @@ Eigen::Isometry3d boxPoseFromTopTag(
 /// The tag frame uses +X right, +Y up, and +Z toward the robot.
 /// The two offsets are in the tabletop X-Z plane, measured from the tag projection.
 /// At zero yaw, box +X, +Y, and +Z align with tag -Z, -X, and +Y respectively.
-/// pickup_tag_to_box_offset uses the pickup tag's coordinates and is re-expressed in
-/// the table tag frame so calibrated pickup and placement box centers agree.
+/// This transform is independent of the pickup tag mounting calibration.
 Eigen::Isometry3d boxPoseFromVerticalTableTag(
   const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
   double tag_height_above_tabletop, double table_x_offset = 0.0,
-  double table_z_offset = 0.0, double table_tag_to_box_yaw = 0.0,
-  double pickup_tag_to_box_yaw = 0.0,
-  const Eigen::Vector3d & pickup_tag_to_box_offset = Eigen::Vector3d::Zero());
+  double table_z_offset = 0.0, double table_tag_to_box_yaw = 0.0);
 
 /// Choose the face pair closest to base +/-Y and construct opposing TCP poses.
 GraspGeometry computeGraspGeometry(

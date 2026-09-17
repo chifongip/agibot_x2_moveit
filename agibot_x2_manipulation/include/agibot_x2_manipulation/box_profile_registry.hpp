@@ -16,6 +16,10 @@ namespace agibot_x2_manipulation {
 struct BoxProfile {
   std::string id;
   BoxDimensions dimensions;
+  // Physical transform from the detected tag frame to the box geometry center.
+  // It is derived from the legacy top-tag fields when tag_to_box_center_pose is
+  // absent, and otherwise loaded directly from that parameter.
+  Eigen::Isometry3d tag_to_box_center{Eigen::Isometry3d::Identity()};
   double tag_to_box_yaw{0.0};
   Eigen::Vector3d tag_to_box_offset{Eigen::Vector3d::Zero()};
   double pregrasp_distance{0.0};
@@ -28,11 +32,12 @@ struct BoxProfile {
 /// A validated catalog of box profiles supplied as ROS parameters.
 ///
 /// Parameters are named `box_profiles.<profile_id>.<field>`. Each profile must
-/// supply tag_ids, dimensions, tag_to_box_yaw, tag_to_box_offset,
-/// pregrasp_distance, contact_height_offset, and carry_pose_a.
-/// carry_pose_b is optional and defaults to carry_pose_a. Tag frames are
-/// resolved as `<box_profiles_tag_frame_prefix><tag_id>`; the prefix defaults
-/// to `tag`.
+/// supply tag_ids, dimensions, pregrasp_distance, contact_height_offset, and
+/// carry_pose_a. A profile must supply either tag_to_box_center_pose
+/// `[x, y, z, qx, qy, qz, qw]` or the legacy top-tag pair tag_to_box_yaw and
+/// tag_to_box_offset. carry_pose_b is optional and defaults to carry_pose_a.
+/// Tag frames are resolved as `<box_profiles_tag_frame_prefix><tag_id>`; the
+/// prefix defaults to `tag`.
 class BoxProfileRegistry {
 public:
   static BoxProfileRegistry

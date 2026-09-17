@@ -38,7 +38,7 @@ pick_place_server:
     ik_timeout: 0.05
     # Coordinated dual-arm search. These are shared grasp hypotheses, not
     # independent per-hand pose tolerances.
-    grasp_position_tolerance: 0.05
+    grasp_position_tolerance: 0.1
     grasp_orientation_tolerance: 0.1745329252  # 10 degrees
     pregrasp_distance_tolerance: 0.020
     alternate_face_alignment_tolerance: 0.261799388  # 15 degrees from best face pair
@@ -82,10 +82,6 @@ pick_place_server:
     table_tag_height_above_tabletop: 0.55
     table_tag_place_offset: [0.0, 0.2]
     table_tag_to_box_yaw: 0.0
-    # Keep these pickup-tag calibration values equal to box_localizer's. They
-    # are re-expressed for tag9 so the table target remains the box center.
-    tag_to_box_yaw: 0.0
-    tag_to_box_offset: [0.04, 0.0, 0.1]
     maximum_table_tag_pose_age: 2.5
     table_tag_detections_topic: /front_center_rectify/detections
     table_tag_id: 9

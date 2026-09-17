@@ -48,6 +48,18 @@ protected:
         rclcpp::Parameter(
             "box_profiles.large.carry_pose_b",
             std::vector<double>{0.29, -0.04, 0.40, 0.0, 0.0, 0.1, 0.995}),
+        rclcpp::Parameter("box_profiles.bottom_container.tag_ids",
+                          std::vector<int64_t>{13}),
+        rclcpp::Parameter("box_profiles.bottom_container.dimensions",
+                          std::vector<double>{0.2, 0.3, 0.3}),
+        rclcpp::Parameter("box_profiles.bottom_container.tag_to_box_center_pose",
+                          std::vector<double>{
+                            0.0, 0.0, 0.15, 0.0, 0.0, 0.0, 1.0}),
+        rclcpp::Parameter("box_profiles.bottom_container.pregrasp_distance", 0.08),
+        rclcpp::Parameter("box_profiles.bottom_container.contact_height_offset", 0.0),
+        rclcpp::Parameter(
+            "box_profiles.bottom_container.carry_pose_a",
+            std::vector<double>{0.30, 0.0, 0.40, 0.0, 0.0, 0.0, 1.0}),
     });
     return std::make_shared<rclcpp::Node>("box_profile_registry_test", options);
   }
@@ -64,6 +76,10 @@ TEST_F(BoxProfileRegistryTest, ResolvesProfilesAndInstancesFromTagIds) {
   EXPECT_DOUBLE_EQ(small->dimensions.height, 0.3);
   EXPECT_DOUBLE_EQ(small->tag_to_box_offset.y(), 0.02);
   EXPECT_LT(
+      (small->tag_to_box_center.translation() - Eigen::Vector3d(0.01, 0.02, -0.12))
+          .norm(),
+      1e-12);
+  EXPECT_LT(
       (small->carry_pose_a.translation() - Eigen::Vector3d(0.31, -0.01, 0.42))
           .norm(),
       1e-12);
@@ -78,6 +94,14 @@ TEST_F(BoxProfileRegistryTest, ResolvesProfilesAndInstancesFromTagIds) {
   EXPECT_EQ(registry.tagFrame(5), "detected_tag_5");
   EXPECT_EQ(registry.instanceId(5), "tag:5");
   EXPECT_EQ(registry.profileForTag(99), nullptr);
+
+  const auto *bottom = registry.profileForTag(13);
+  ASSERT_NE(bottom, nullptr);
+  EXPECT_EQ(bottom->id, "bottom_container");
+  EXPECT_LT(
+      (bottom->tag_to_box_center.translation() -
+      Eigen::Vector3d(0.0, 0.0, 0.15)).norm(),
+      1e-12);
 }
 
 TEST_F(BoxProfileRegistryTest, RejectsAmbiguousTagAssignments) {

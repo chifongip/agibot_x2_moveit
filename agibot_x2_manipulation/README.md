@@ -86,8 +86,8 @@ option when the controller is inactive or unconfigured.
 The legacy fallback in `config/box_manipulation.yaml` defines box dimensions as
 `[length_x, width_y, height_z]` in metres, in the aligned box frame. Its origin
 is the box center; +Z is up. The localizer converts the top-tag pose into that
-frame. `tag_to_box_yaw` describes their fixed yaw offset. These values apply
-only when no profile catalog is loaded.
+frame. `tag_to_box_yaw` describes their fixed yaw offset. These legacy values
+apply only when no profile catalog is loaded.
 `tag_to_box_offset: [x, y, z]` adds a translation in tag-frame coordinates to
 the nominal centered-top-tag transform; its default `[0, 0, 0]` preserves the
 box-center position of half the box height below the tag. Use it to calibrate a
@@ -98,11 +98,20 @@ correction. Keep the `box_dimensions` values for `box_localizer` and
 ## Runtime box profiles
 
 `config/box_profiles.yaml` is the single source of truth for box geometry and
-top-tag/grasp calibration. `box_pick_place.launch.py` passes the same
+tag/grasp calibration. `box_pick_place.launch.py` passes the same
 `box_profiles_file` to `box_localizer` and `pick_place_server`, so a profile is
 configured only once. Each profile lists its `tag_ids`; tag frames are resolved
 as `box_profiles_tag_frame_prefix` plus the tag ID (the default is `tag0`,
 `tag1`, and so on). Add every physical tag ID to `config/apriltag.yaml` too.
+
+New profiles should use `tag_to_box_center_pose: [x, y, z, qx, qy, qz, qw]`,
+the measured rigid transform from the tag frame to
+the physical box center. This supports tags on either face and any fixed tag
+orientation. For aligned frames, a centered top tag has a Z translation of
+`-height / 2`, while a centered bottom tag has `+height / 2`. Measure and use
+the full transform when the tag frame is flipped or otherwise rotated. The
+legacy `tag_to_box_yaw` plus `tag_to_box_offset` pair remains supported only as
+a centered-top-tag compatibility model.
 
 To add a type, copy a profile in that catalog and calibrate all of its values.
 Several tag IDs may identify instances of the same type:
@@ -112,8 +121,8 @@ box_profiles:
   large_carton:
     tag_ids: [17, 18]
     dimensions: [0.30, 0.40, 0.25]
-    tag_to_box_yaw: 0.0
-    tag_to_box_offset: [0.0, 0.0, 0.0]
+    # Tag frame to physical box center: centered, aligned top tag.
+    tag_to_box_center_pose: [0.0, 0.0, -0.125, 0.0, 0.0, 0.0, 1.0]
     pregrasp_distance: 0.08
     contact_height_offset: 0.0
     # [x, y, z, qx, qy, qz, qw] in base_link
@@ -205,10 +214,12 @@ PickPlace operation. Set
 keep an explicit action `place_pose` when a caller must override the calibrated
 target. The server waits up to `table_tag_stability_timeout` (6 seconds by
 default) for a fresh stable table-tag pose before rejecting the goal.
-`pick_place_server.tag_to_box_yaw` and `tag_to_box_offset` must match the
-`box_localizer` calibration. The placement transform re-expresses that pickup
-tag-frame correction in the tag9 frame, so a non-centered pickup tag still
-places the physical box center at the calibrated table target.
+The table-tag transform is independent of the pickup tag calibration. It
+always targets the physical box center, using the active profile's height and
+the table geometry. Therefore changing a pickup tag from top-mounted to
+bottom-mounted changes localization only; it cannot shift the table placement
+target. Use `table_tag_place_offset` only to calibrate the desired table
+location, not to compensate for a pickup tag mount.
 `box_pick_place.launch.py` starts the front-center tag9 pipeline at 1 Hz by
 default. It is independent of `use_apriltag`, which controls the tag0 pickup
 detector. `use_dummy_apriltag:=true` always disables both real-camera

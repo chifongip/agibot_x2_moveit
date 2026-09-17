@@ -38,8 +38,8 @@ std::set<std::string> profileIds(rclcpp::Node &node,
   return ids;
 }
 
-Eigen::Isometry3d carryPoseFromParameter(const std::vector<double> &values,
-                                         const std::string &parameter_name) {
+Eigen::Isometry3d poseFromParameter(const std::vector<double> &values,
+                                    const std::string &parameter_name) {
   if (values.size() != 7U) {
     throw std::runtime_error(parameter_name +
                              " must contain [x, y, z, qx, qy, qz, qw]");
@@ -64,6 +64,7 @@ void validateProfile(const BoxProfile &profile) {
       profile.dimensions.height <= 0.0 ||
       !std::isfinite(profile.tag_to_box_yaw) ||
       !profile.tag_to_box_offset.allFinite() ||
+      !profile.tag_to_box_center.matrix().allFinite() ||
       !std::isfinite(profile.pregrasp_distance) ||
       profile.pregrasp_distance < 0.0 ||
       !std::isfinite(profile.contact_height_offset) ||
@@ -102,8 +103,6 @@ BoxProfileRegistry::fromParameters(rclcpp::Node &node,
     const std::string parameter_prefix = prefix + "." + id + ".";
     const auto dimensions = requiredParameter<std::vector<double>>(
         node, parameter_prefix + "dimensions");
-    const auto offset = requiredParameter<std::vector<double>>(
-        node, parameter_prefix + "tag_to_box_offset");
     const auto tag_ids = requiredParameter<std::vector<int64_t>>(
         node, parameter_prefix + "tag_ids");
     const auto carry_pose_a = requiredParameter<std::vector<double>>(
@@ -113,27 +112,43 @@ BoxProfileRegistry::fromParameters(rclcpp::Node &node,
             ? requiredParameter<std::vector<double>>(node, parameter_prefix +
                                                                "carry_pose_b")
             : carry_pose_a;
-    if (dimensions.size() != 3U || offset.size() != 3U) {
+    if (dimensions.size() != 3U) {
       throw std::runtime_error(
-          "box profile " + id +
-          " requires dimensions and tag_to_box_offset with three values");
+          "box profile " + id + " requires dimensions with three values");
     }
 
     BoxProfile profile;
     profile.id = id;
     profile.dimensions = {dimensions[0], dimensions[1], dimensions[2]};
-    profile.tag_to_box_yaw =
+    const std::string center_pose_parameter =
+      parameter_prefix + "tag_to_box_center_pose";
+    if (node.has_parameter(center_pose_parameter)) {
+      profile.tag_to_box_center = poseFromParameter(
+        requiredParameter<std::vector<double>>(node, center_pose_parameter),
+        center_pose_parameter);
+    } else {
+      const auto offset = requiredParameter<std::vector<double>>(
+        node, parameter_prefix + "tag_to_box_offset");
+      if (offset.size() != 3U) {
+        throw std::runtime_error(
+                "box profile " + id +
+                " requires tag_to_box_offset with three values");
+      }
+      profile.tag_to_box_yaw =
         requiredParameter<double>(node, parameter_prefix + "tag_to_box_yaw");
-    profile.tag_to_box_offset =
+      profile.tag_to_box_offset =
         Eigen::Vector3d(offset[0], offset[1], offset[2]);
+      profile.tag_to_box_center = topTagToBoxCenter(
+        profile.dimensions, profile.tag_to_box_yaw, profile.tag_to_box_offset);
+    }
     profile.pregrasp_distance =
         requiredParameter<double>(node, parameter_prefix + "pregrasp_distance");
     profile.contact_height_offset = requiredParameter<double>(
         node, parameter_prefix + "contact_height_offset");
     profile.carry_pose_a =
-        carryPoseFromParameter(carry_pose_a, parameter_prefix + "carry_pose_a");
+        poseFromParameter(carry_pose_a, parameter_prefix + "carry_pose_a");
     profile.carry_pose_b =
-        carryPoseFromParameter(carry_pose_b, parameter_prefix + "carry_pose_b");
+        poseFromParameter(carry_pose_b, parameter_prefix + "carry_pose_b");
     for (const auto tag_id : tag_ids) {
       if (tag_id < 0 || tag_id > std::numeric_limits<int>::max()) {
         throw std::runtime_error("box profile " + id +

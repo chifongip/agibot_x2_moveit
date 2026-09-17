@@ -54,8 +54,6 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_EQ(config.table_tag_id, 9);
   EXPECT_EQ(config.table_tag_stable_sample_count, 3);
   EXPECT_DOUBLE_EQ(config.table_tag_maximum_sample_gap, 2.5);
-  EXPECT_DOUBLE_EQ(config.pickup_tag_to_box_yaw, 0.0);
-  EXPECT_TRUE(config.pickup_tag_to_box_offset.isZero());
   EXPECT_TRUE(config.carry_pose.matrix().allFinite());
   EXPECT_TRUE(config.carry_pose_b.matrix().allFinite());
   EXPECT_LT((config.carry_pose.translation() - config.carry_pose_b.translation()).norm(), 1e-12);
@@ -71,8 +69,6 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   test_node->declare_parameter<std::string>("perception_3d_source", "both");
   test_node->declare_parameter<bool>("use_tag_derived_place_pose", true);
   test_node->declare_parameter<std::vector<double>>("table_tag_place_offset", {0.1, -0.2});
-  test_node->declare_parameter<double>("tag_to_box_yaw", 0.3);
-  test_node->declare_parameter<std::vector<double>>("tag_to_box_offset", {0.1, -0.2, 0.3});
   test_node->declare_parameter<std::vector<double>>(
     "carry_box_pose_a", {0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0});
   test_node->declare_parameter<std::vector<double>>(
@@ -87,9 +83,6 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   EXPECT_TRUE(config.use_tag_derived_place_pose);
   EXPECT_DOUBLE_EQ(config.table_tag_place_offset.x(), 0.1);
   EXPECT_DOUBLE_EQ(config.table_tag_place_offset.y(), -0.2);
-  EXPECT_DOUBLE_EQ(config.pickup_tag_to_box_yaw, 0.3);
-  EXPECT_LT(
-    (config.pickup_tag_to_box_offset - Eigen::Vector3d(0.1, -0.2, 0.3)).norm(), 1e-12);
   EXPECT_LT(
     (config.carry_pose.translation() - Eigen::Vector3d(0.25, 0.0, 0.34)).norm(), 1e-12);
   EXPECT_LT(
@@ -114,10 +107,6 @@ TEST_F(PickPlaceConfigTest, RejectsMalformedVectorParameters)
   const auto test_node = node("bad_dimensions");
   test_node->declare_parameter<std::vector<double>>("box_dimensions", {0.3, 0.2});
   EXPECT_THROW(loadPickPlaceConfig(test_node), std::runtime_error);
-
-  const auto bad_tag_offset = node("bad_tag_offset");
-  bad_tag_offset->declare_parameter<std::vector<double>>("tag_to_box_offset", {0.1, 0.2});
-  EXPECT_THROW(loadPickPlaceConfig(bad_tag_offset), std::runtime_error);
 
   const auto bad_carry_pose_b = node("bad_carry_pose_b");
   bad_carry_pose_b->declare_parameter<std::vector<double>>(

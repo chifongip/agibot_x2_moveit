@@ -251,14 +251,11 @@ TableTagPlacePoseTracker::TableTagPlacePoseTracker(
   double tag_height_above_tabletop, double table_x_offset, double table_z_offset,
   double table_tag_to_box_yaw, std::size_t stable_sample_count, double maximum_age,
   double maximum_position_spread, double maximum_angular_spread,
-  double maximum_sample_gap, double pickup_tag_to_box_yaw,
-  const Eigen::Vector3d & pickup_tag_to_box_offset)
+  double maximum_sample_gap)
 : node_(node), planning_frame_(std::move(planning_frame)), tag_frame_(std::move(tag_frame)),
   tag_id_(tag_id), minimum_decision_margin_(minimum_decision_margin), dimensions_(dimensions),
   tag_height_above_tabletop_(tag_height_above_tabletop), table_x_offset_(table_x_offset),
   table_z_offset_(table_z_offset), table_tag_to_box_yaw_(table_tag_to_box_yaw),
-  pickup_tag_to_box_yaw_(pickup_tag_to_box_yaw),
-  pickup_tag_to_box_offset_(pickup_tag_to_box_offset),
   maximum_age_(maximum_age), stability_filter_(
     stable_sample_count, maximum_position_spread, maximum_angular_spread, maximum_sample_gap),
   tf_buffer_(node->get_clock()),
@@ -315,8 +312,7 @@ void TableTagPlacePoseTracker::onDetections(
     }
     const Eigen::Isometry3d sample = boxPoseFromVerticalTableTag(
       tf2::transformToEigen(transform), dimensions_, tag_height_above_tabletop_,
-      table_x_offset_, table_z_offset_, table_tag_to_box_yaw_,
-      pickup_tag_to_box_yaw_, pickup_tag_to_box_offset_);
+      table_x_offset_, table_z_offset_, table_tag_to_box_yaw_);
     updateStablePose(sample, transform.header.stamp);
   } catch (const tf2::TransformException & error) {
     RCLCPP_WARN_THROTTLE(

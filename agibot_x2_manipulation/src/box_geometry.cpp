@@ -103,35 +103,52 @@ void validate(const BoxDimensions & dimensions)
 
 }  // namespace
 
-Eigen::Isometry3d boxPoseFromTopTag(
-  const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
-  double tag_to_box_yaw, const Eigen::Vector3d & tag_to_box_offset)
+Eigen::Isometry3d topTagToBoxCenter(
+  const BoxDimensions & dimensions, double tag_to_box_yaw,
+  const Eigen::Vector3d & tag_to_box_offset)
 {
   validate(dimensions);
   if (!std::isfinite(tag_to_box_yaw) || !tag_to_box_offset.allFinite()) {
     throw std::invalid_argument("top-tag calibration values must be finite");
   }
   Eigen::Isometry3d tag_to_box = Eigen::Isometry3d::Identity();
-  tag_to_box.linear() = Eigen::AngleAxisd(tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  tag_to_box.linear() =
+    Eigen::AngleAxisd(tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   tag_to_box.translation() =
     Eigen::Vector3d(0.0, 0.0, -dimensions.height / 2.0) + tag_to_box_offset;
-  return tag_pose * tag_to_box;
+  return tag_to_box;
+}
+
+Eigen::Isometry3d boxPoseFromTag(
+  const Eigen::Isometry3d & tag_pose, const Eigen::Isometry3d & tag_to_box_center)
+{
+  if (!tag_pose.matrix().allFinite() || !tag_to_box_center.matrix().allFinite()) {
+    throw std::invalid_argument(
+            "tag and tag-to-box-center transforms must be finite");
+  }
+  return tag_pose * tag_to_box_center;
+}
+
+Eigen::Isometry3d boxPoseFromTopTag(
+  const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
+  double tag_to_box_yaw, const Eigen::Vector3d & tag_to_box_offset)
+{
+  return boxPoseFromTag(
+    tag_pose, topTagToBoxCenter(dimensions, tag_to_box_yaw, tag_to_box_offset));
 }
 
 Eigen::Isometry3d boxPoseFromVerticalTableTag(
   const Eigen::Isometry3d & tag_pose, const BoxDimensions & dimensions,
   double tag_height_above_tabletop, double table_x_offset,
-  double table_z_offset, double table_tag_to_box_yaw,
-  double pickup_tag_to_box_yaw,
-  const Eigen::Vector3d & pickup_tag_to_box_offset)
+  double table_z_offset, double table_tag_to_box_yaw)
 {
   validate(dimensions);
   if (!std::isfinite(tag_height_above_tabletop) || tag_height_above_tabletop < 0.0 ||
     !std::isfinite(table_x_offset) || !std::isfinite(table_z_offset) ||
-    !std::isfinite(table_tag_to_box_yaw) || !std::isfinite(pickup_tag_to_box_yaw) ||
-    !pickup_tag_to_box_offset.allFinite())
+    !std::isfinite(table_tag_to_box_yaw))
   {
-    throw std::invalid_argument("vertical table-tag calibration values must be finite and valid");
+    throw std::invalid_argument(
+            "vertical table-tag calibration values must be finite and valid");
   }
 
   Eigen::Isometry3d table_tag_to_box = Eigen::Isometry3d::Identity();
@@ -143,13 +160,7 @@ Eigen::Isometry3d boxPoseFromVerticalTableTag(
   table_tag_to_box.translation() = Eigen::Vector3d(
     table_x_offset, -tag_height_above_tabletop + dimensions.height / 2.0,
     table_z_offset);
-
-  const Eigen::Matrix3d pickup_tag_to_box_rotation =
-    Eigen::AngleAxisd(pickup_tag_to_box_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-  const Eigen::Vector3d pickup_offset_in_box =
-    pickup_tag_to_box_rotation.transpose() * pickup_tag_to_box_offset;
-  table_tag_to_box.translation() += table_tag_to_box.linear() * pickup_offset_in_box;
-  return tag_pose * table_tag_to_box;
+  return boxPoseFromTag(tag_pose, table_tag_to_box);
 }
 
 GraspGeometry computeGraspGeometry(

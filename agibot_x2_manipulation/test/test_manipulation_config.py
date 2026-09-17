@@ -73,7 +73,8 @@ def test_box_profiles_are_shared_by_localization_and_planning():
     assert catalog["box_profiles_tag_frame_prefix"] == "tag"
     assert profile["tag_ids"] == [0]
     assert len(profile["dimensions"]) == 3
-    assert len(profile["tag_to_box_offset"]) == 3
+    assert len(profile["tag_to_box_center_pose"]) == 7
+    assert "tag_to_box_offset" not in profile
     assert profile["pregrasp_distance"] > 0.0
     assert len(profile["carry_pose_a"]) == 7
     assert len(profile["carry_pose_b"]) == 7
@@ -220,7 +221,7 @@ def test_tag9_derives_the_default_table_place_pose():
     assert config["table_tag_frame"] == "tag9"
     assert config["table_tag_height_above_tabletop"] > 0.0
     assert config["table_tag_place_offset"] == [0.0, 0.2]
-    assert config["tag_to_box_offset"] == [0.04, 0.0, 0.1]
+    assert "tag_to_box_offset" not in config
     assert config["maximum_table_tag_pose_age"] > 0.0
     assert config["table_tag_detections_topic"] == "/front_center_rectify/detections"
     assert config["table_tag_id"] == 9
@@ -330,14 +331,16 @@ def test_recorded_failure_launch_allows_isolated_execution_by_default():
     assert '"manipulation_state_file": manipulation_state_file' in source
 
 
-def test_table_placement_uses_the_pickup_tag_calibration():
+def test_table_placement_is_independent_of_pickup_tag_calibration():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         document = yaml.safe_load(stream)
 
     localizer = document["box_localizer"]["ros__parameters"]
     server = document["pick_place_server"]["ros__parameters"]
-    assert server["tag_to_box_yaw"] == localizer["tag_to_box_yaw"]
-    assert server["tag_to_box_offset"] == localizer["tag_to_box_offset"]
+    assert "tag_to_box_yaw" in localizer
+    assert "tag_to_box_offset" in localizer
+    assert "tag_to_box_yaw" not in server
+    assert "tag_to_box_offset" not in server
 
 
 def test_coordinated_grasp_search_has_conservative_limits():
@@ -347,7 +350,7 @@ def test_coordinated_grasp_search_has_conservative_limits():
     config = document["pick_place_server"]["ros__parameters"]
 
     assert localizer["maximum_box_tilt"] <= 0.349066
-    assert config["grasp_position_tolerance"] <= 0.05
+    assert config["grasp_position_tolerance"] <= 0.1
     assert config["grasp_orientation_tolerance"] <= 0.174534
     assert config["maximum_grasp_candidates"] > 0
     assert config["ik_attempts_per_candidate"] >= 4

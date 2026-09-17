@@ -30,6 +30,8 @@ BoxProfile legacyProfile(const BoxDimensions &dimensions, double tag_to_box_yaw,
   profile.dimensions = dimensions;
   profile.tag_to_box_yaw = tag_to_box_yaw;
   profile.tag_to_box_offset = tag_to_box_offset;
+  profile.tag_to_box_center = topTagToBoxCenter(
+    dimensions, tag_to_box_yaw, tag_to_box_offset);
   profile.tag_ids = {tag_id};
   return profile;
 }
@@ -150,9 +152,8 @@ private:
       if ((now() - transform_stamp).seconds() > max_age_) {
         return;
       }
-      const Eigen::Isometry3d box_pose = boxPoseFromTopTag(
-          tf2::transformToEigen(transform), profile.dimensions,
-          profile.tag_to_box_yaw, profile.tag_to_box_offset);
+      const Eigen::Isometry3d box_pose = boxPoseFromTag(
+          tf2::transformToEigen(transform), profile.tag_to_box_center);
       const Eigen::Vector3d box_up =
           box_pose.linear() * Eigen::Vector3d::UnitZ();
       const double tilt = std::acos(
