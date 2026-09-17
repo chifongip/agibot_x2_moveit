@@ -171,8 +171,8 @@ GraspGeometry computeGraspGeometry(
   if (pregrasp_distance < 0.0) {
     throw std::invalid_argument("pregrasp distance cannot be negative");
   }
-  if (std::abs(contact_height_offset) >= dimensions.height / 2.0) {
-    throw std::invalid_argument("contact height lies outside the box");
+  if (!std::isfinite(contact_height_offset)) {
+    throw std::invalid_argument("contact height offset must be finite");
   }
 
   const Eigen::Vector3d base_y = Eigen::Vector3d::UnitY();
@@ -189,7 +189,8 @@ std::vector<GraspCandidate> generateGraspCandidates(
   const GraspCandidateOptions & options)
 {
   validate(dimensions);
-  if (nominal_pregrasp_distance < 0.0 || options.position_tolerance < 0.0 ||
+  if (!std::isfinite(nominal_contact_height_offset) ||
+    nominal_pregrasp_distance < 0.0 || options.position_tolerance < 0.0 ||
     options.orientation_tolerance < 0.0 || options.pregrasp_distance_tolerance < 0.0 ||
     options.alternate_face_alignment_tolerance < 0.0 || options.maximum_candidates == 0U)
   {
@@ -231,9 +232,6 @@ std::vector<GraspCandidate> generateGraspCandidates(
       for (const double height_factor : signed_factors) {
         const double contact_height =
           nominal_contact_height_offset + height_factor * options.position_tolerance;
-        if (std::abs(contact_height) >= dimensions.height / 2.0) {
-          continue;
-        }
         for (const double tangent_factor : signed_factors) {
           const double tangent_offset = tangent_factor * options.position_tolerance;
           const double tangent_half_span = use_x ? dimensions.width / 2.0 : dimensions.length / 2.0;

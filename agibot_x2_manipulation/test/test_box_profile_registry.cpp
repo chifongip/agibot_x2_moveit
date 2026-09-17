@@ -113,6 +113,17 @@ TEST_F(BoxProfileRegistryTest, RejectsAmbiguousTagAssignments) {
   EXPECT_THROW(BoxProfileRegistry::fromParameters(*node), std::runtime_error);
 }
 
+TEST_F(BoxProfileRegistryTest, AllowsContactHeightOffsetsOutsideTheBox) {
+  auto node = nodeWithProfiles();
+  node->set_parameter(
+      rclcpp::Parameter("box_profiles.small.contact_height_offset", 0.31));
+
+  const auto registry = BoxProfileRegistry::fromParameters(*node);
+  const auto *profile = registry.find("small");
+  ASSERT_NE(profile, nullptr);
+  EXPECT_DOUBLE_EQ(profile->contact_height_offset, 0.31);
+}
+
 TEST_F(BoxProfileRegistryTest, RejectsMalformedCarryCalibration) {
   auto node = nodeWithProfiles();
   node->set_parameter(rclcpp::Parameter("box_profiles.large.carry_pose_a",

@@ -113,6 +113,10 @@ the full transform when the tag frame is flipped or otherwise rotated. The
 legacy `tag_to_box_yaw` plus `tag_to_box_offset` pair remains supported only as
 a centered-top-tag compatibility model.
 
+`contact_height_offset` is a finite, calibrated local-Z grasp-contact offset.
+It is not constrained to lie within half the box height, so it can represent a
+tool or contact calibration outside the nominal box surface.
+
 To add a type, copy a profile in that catalog and calibrate all of its values.
 Several tag IDs may identify instances of the same type:
 

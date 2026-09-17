@@ -71,8 +71,6 @@ void validateProfile(const BoxProfile &profile) {
       !std::isfinite(profile.pregrasp_distance) ||
       profile.pregrasp_distance < 0.0 ||
       !std::isfinite(profile.contact_height_offset) ||
-      std::abs(profile.contact_height_offset) >=
-          profile.dimensions.height / 2.0 ||
       !profile.carry_pose_a.matrix().allFinite() ||
       !profile.carry_pose_b.matrix().allFinite()) {
     throw std::runtime_error("invalid box profile: " + profile.id);

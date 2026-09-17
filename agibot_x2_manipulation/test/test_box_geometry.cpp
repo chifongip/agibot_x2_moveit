@@ -145,11 +145,29 @@ TEST(BoxGeometry, HalfTurnStillAssignsRobotLeft)
   EXPECT_LT(grasp.right_contact.translation().y(), 0.0);
 }
 
-TEST(BoxGeometry, InvalidContactHeightIsRejected)
+TEST(BoxGeometry, ContactHeightOutsideTheBoxIsAllowed)
 {
-  EXPECT_THROW(
-    computeGraspGeometry(Eigen::Isometry3d::Identity(), {0.4, 0.2, 0.3}, 0.08, 0.15),
-    std::invalid_argument);
+  const auto grasp = computeGraspGeometry(
+    Eigen::Isometry3d::Identity(), {0.4, 0.2, 0.3}, 0.08, 0.20);
+
+  EXPECT_NEAR(grasp.left_contact.translation().z(), 0.20, 1e-12);
+  EXPECT_NEAR(grasp.right_contact.translation().z(), 0.20, 1e-12);
+}
+
+TEST(BoxGeometry, CandidateGenerationAllowsContactHeightOutsideTheBox)
+{
+  GraspCandidateOptions options;
+  options.position_tolerance = 0.0;
+  options.orientation_tolerance = 0.0;
+  options.pregrasp_distance_tolerance = 0.0;
+  options.alternate_face_alignment_tolerance = 0.0;
+  options.maximum_candidates = 1;
+
+  const auto candidates = generateGraspCandidates(
+    Eigen::Isometry3d::Identity(), {0.4, 0.2, 0.3}, 0.08, -0.20, options);
+
+  ASSERT_FALSE(candidates.empty());
+  EXPECT_NEAR(candidates.front().contact_height_offset, -0.20, 1e-12);
 }
 
 TEST(BoxGeometry, PelvisRelativeDummyPoseProducesExpectedGrasps)
