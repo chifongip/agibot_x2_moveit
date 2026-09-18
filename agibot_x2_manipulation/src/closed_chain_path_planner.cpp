@@ -59,6 +59,7 @@ const char * closedChainFailureName(ClosedChainFailure failure)
     case ClosedChainFailure::DEADLINE: return "deadline";
     case ClosedChainFailure::IK: return "ik";
     case ClosedChainFailure::BOUNDS: return "bounds";
+    case ClosedChainFailure::JOINT_MARGIN: return "joint_margin";
     case ClosedChainFailure::COLLISION: return "collision";
     case ClosedChainFailure::CONTINUITY: return "continuity";
     case ClosedChainFailure::CONTACT: return "contact";

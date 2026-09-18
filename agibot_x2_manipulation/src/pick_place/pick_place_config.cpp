@@ -140,6 +140,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.carry_search_z_upper = parameter<double>(node, "carry_search_z_upper", 0.03);
   config.carry_search_orientation_tolerance = parameter<double>(
     node, "carry_search_orientation_tolerance", 0.1745329252);
+  config.minimum_carry_joint_margin = parameter<double>(
+    node, "minimum_carry_joint_margin", config.minimum_grasp_joint_margin);
   config.planning_log_file = parameter<std::string>(node, "planning_log_file", "");
   config.planning_log_directory = parameter<std::string>(
     node, "planning_log_directory", "/tmp/agibot_x2_planning_traces");
@@ -386,6 +388,7 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     config.maximum_planning_candidates < 1 || config.maximum_retry_candidates < 0 ||
     config.grasp_search_timeout <= 0.0 || config.planning_time_per_candidate <= 0.0 ||
     config.pregrasp_planning_timeout <= 0.0 || config.minimum_grasp_joint_margin < 0.0 ||
+    config.minimum_carry_joint_margin < 0.0 ||
     config.closed_chain_position_tolerance < 0.0 ||
     config.closed_chain_orientation_tolerance < 0.0 || config.closed_chain_position_step <= 0.0 ||
     config.closed_chain_orientation_step <= 0.0 || config.closed_chain_ik_attempts < 1 ||

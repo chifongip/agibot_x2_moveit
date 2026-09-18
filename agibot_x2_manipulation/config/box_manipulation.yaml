@@ -50,6 +50,8 @@ pick_place_server:
     pregrasp_planning_timeout: 60.0
     maximum_retry_candidates: 3
     minimum_grasp_joint_margin: 0.02  # rad; avoid grasps that cannot move away from a limit
+    # Carry routes must retain at least the same clearance as a selected grasp.
+    minimum_carry_joint_margin: 0.02
     closed_chain_position_tolerance: 0.010
     closed_chain_orientation_tolerance: 0.0523598776  # 3 degrees
     closed_chain_position_step: 0.005

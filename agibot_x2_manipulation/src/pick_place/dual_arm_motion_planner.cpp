@@ -414,12 +414,29 @@ public:
     return false;
   }
 
+  bool validateMinimumJointMargin(
+    const moveit::core::RobotState & state, double minimum_joint_margin,
+    const std::string & context, std::string & error) const
+  {
+    if (minimum_joint_margin <= 0.0) {
+      return true;
+    }
+    const auto * dual_group = state.getJointModelGroup(move_group_.getName());
+    const double margin = state.getMinDistanceToPositionBounds(dual_group).first;
+    if (margin + 1e-12 >= minimum_joint_margin) {
+      return true;
+    }
+    error = context + " joint margin " + std::to_string(margin) +
+      " is below minimum_carry_joint_margin " + std::to_string(minimum_joint_margin);
+    return false;
+  }
+
   bool appendJointSpacePlan(
     robot_trajectory::RobotTrajectory & combined, moveit::core::RobotState & state,
     moveit::core::RobotState target, const std::string & route,
     const std::string & segment, const CancelFunction & canceled, std::string & error,
     const std::chrono::steady_clock::time_point & deadline =
-    std::chrono::steady_clock::time_point::max())
+    std::chrono::steady_clock::time_point::max(), double minimum_joint_margin = 0.0)
   {
     if (canceled()) {
       error = segment + " endpoint planning canceled";
@@ -466,6 +483,15 @@ public:
       publishEndpointDiagnostic(route, segment, false, error);
       return false;
     }
+    for (std::size_t index = 0; index < planned.getWayPointCount(); ++index) {
+      if (!validateMinimumJointMargin(
+          planned.getWayPoint(index), minimum_joint_margin,
+          segment + " trajectory waypoint " + std::to_string(index), error))
+      {
+        publishEndpointDiagnostic(route, segment, false, error);
+        return false;
+      }
+    }
     combined.append(
       planned, planned.getWayPointDurationFromPrevious(1), 1);
     state = planned.getLastWayPoint();
@@ -481,8 +507,14 @@ public:
     const Eigen::Isometry3d & box_to_right_contact, const std::string & route,
     const CancelFunction & canceled, std::string & error,
     const std::chrono::steady_clock::time_point & deadline =
-    std::chrono::steady_clock::time_point::max())
+    std::chrono::steady_clock::time_point::max(), double minimum_joint_margin = 0.0)
   {
+    if (!validateMinimumJointMargin(
+        state, minimum_joint_margin, route + " route start", error))
+    {
+      publishEndpointDiagnostic(route, controls.front().segment, false, error);
+      return false;
+    }
     for (std::size_t index = 1; index < controls.size(); ++index) {
       if (canceled() || std::chrono::steady_clock::now() >= deadline) {
         error = route + " endpoint route canceled or deadline reached";
@@ -499,7 +531,8 @@ public:
         return false;
       }
       if (!appendJointSpacePlan(
-          trajectory, state, target, route, controls[index].segment, canceled, error, deadline))
+          trajectory, state, target, route, controls[index].segment, canceled, error, deadline,
+          minimum_joint_margin))
       {
         return false;
       }
@@ -513,8 +546,13 @@ public:
     const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, const std::string & route,
     const std::chrono::steady_clock::time_point & deadline, const CancelFunction & canceled,
-    std::string & error)
+    std::string & error, double minimum_joint_margin = 0.0)
   {
+    if (!validateMinimumJointMargin(
+        state, minimum_joint_margin, route + " route start", error))
+    {
+      return false;
+    }
     const auto * dual_group = state.getJointModelGroup(move_group_.getName());
     std::vector<double> start_joints;
     state.copyJointGroupPositions(dual_group, start_joints);
@@ -522,8 +560,8 @@ public:
     ClosedChainPath path;
     ClosedChainSearchReport report;
     const ClosedChainSolve solve =
-      [this, &fixed_state, dual_group, ignore_box, &box_to_left_contact,
-        &box_to_right_contact](
+      [this, &fixed_state, dual_group, ignore_box, minimum_joint_margin,
+        &box_to_left_contact, &box_to_right_contact](
       const std::vector<double> & seed, const Eigen::Isometry3d & from_box_pose,
       const Eigen::Isometry3d & box_pose,
       std::size_t solution_limit, const std::chrono::steady_clock::time_point & solve_deadline,
@@ -600,6 +638,14 @@ public:
             solve_report.detail = "dual-arm joint bounds violated";
             continue;
           }
+          std::string margin_error;
+          if (!validateMinimumJointMargin(
+              candidate, minimum_joint_margin, "carry waypoint", margin_error))
+          {
+            solve_report.failure = ClosedChainFailure::JOINT_MARGIN;
+            solve_report.detail = margin_error;
+            continue;
+          }
           std::vector<double> joints;
           candidate.copyJointGroupPositions(dual_group, joints);
           double largest_step = 0.0;
@@ -661,10 +707,24 @@ public:
               from_box_pose, box_pose, t);
             const auto expected_grasp = graspFromBoxToTcp(
               expected_box, box_to_left_contact, box_to_right_contact, 0.0);
-            if (!interpolated.satisfiesBounds(dual_group) ||
-              (ignore_box ? !planning_scene_.collisionFreeWithBox(
-                interpolated, expected_box,
-                true) :
+            if (!interpolated.satisfiesBounds(dual_group)) {
+              solve_report.failure = ClosedChainFailure::BOUNDS;
+              solve_report.detail = "interpolated edge violates joint bounds";
+              edge_valid = false;
+              break;
+            }
+            std::string interpolated_margin_error;
+            if (!validateMinimumJointMargin(
+                interpolated, minimum_joint_margin, "carry route interpolation",
+                interpolated_margin_error))
+            {
+              solve_report.failure = ClosedChainFailure::JOINT_MARGIN;
+              solve_report.detail = interpolated_margin_error;
+              edge_valid = false;
+              break;
+            }
+            if ((ignore_box ? !planning_scene_.collisionFreeWithBox(
+                interpolated, expected_box, true) :
               !planning_scene_.collisionFree(interpolated, true, false)) ||
               (interpolated.getGlobalLinkTransform(config_.left_tcp).translation() -
               expected_grasp.left_contact.translation()).norm() >
@@ -681,13 +741,13 @@ public:
                 expected_grasp.right_contact) >
               config_.closed_chain_contact_orientation_error)
             {
+              solve_report.failure = ClosedChainFailure::CONTACT;
+              solve_report.detail = "interpolated edge violates collision or rigid contact closure";
               edge_valid = false;
               break;
             }
           }
           if (!edge_valid) {
-            solve_report.failure = ClosedChainFailure::CONTACT;
-            solve_report.detail = "interpolated edge violates collision or rigid contact closure";
             continue;
           }
           ClosedChainSolution solution;
@@ -1331,7 +1391,7 @@ public:
       }
       const bool planned = appendPoseToPoseObjectPath(
         trajectory, state, controls, box_to_left_contact, box_to_right_contact,
-        carryRouteName(route), canceled, error);
+        carryRouteName(route), canceled, error, deadline, config_.minimum_carry_joint_margin);
       std::string restore_error;
       const bool restored = !plan_only || planning_scene_.endVirtualAttachment(
         saved_box,
@@ -1345,7 +1405,8 @@ public:
       }
     } else if (!appendObjectPath(
         trajectory, state, controls, plan_only, box_to_left_contact,
-        box_to_right_contact, carryRouteName(route), deadline, canceled, error))
+        box_to_right_contact, carryRouteName(route), deadline, canceled, error,
+        config_.minimum_carry_joint_margin))
     {
       return false;
     }
@@ -1389,13 +1450,13 @@ public:
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       if (!appendPoseToPoseObjectPath(
           trajectory, state, controls, box_to_left_contact, box_to_right_contact,
-          route_name, canceled, error))
+          route_name, canceled, error, deadline, config_.minimum_carry_joint_margin))
       {
         return false;
       }
     } else if (!appendObjectPath(
         trajectory, state, controls, false, box_to_left_contact, box_to_right_contact,
-        route_name, deadline, canceled, error))
+        route_name, deadline, canceled, error, config_.minimum_carry_joint_margin))
     {
       return false;
     }
@@ -1459,6 +1520,7 @@ public:
     std::size_t endpoint_order = 0;
     std::size_t ik_rejected = 0;
     std::size_t bounds_rejected = 0;
+    std::size_t margin_rejected = 0;
     std::size_t collision_rejected = 0;
     std::set<std::string> colliding_pairs;
     const auto precheck_deadline = std::chrono::steady_clock::now() +
@@ -1499,6 +1561,12 @@ public:
         ++endpoint_order;
         continue;
       }
+      const double joint_margin = endpoint.getMinDistanceToPositionBounds(dual_group).first;
+      if (joint_margin + 1e-12 < config_.minimum_carry_joint_margin) {
+        ++margin_rejected;
+        ++endpoint_order;
+        continue;
+      }
       if (!collision_free) {
         ++collision_rejected;
         colliding_pairs.insert(collision_pairs);
@@ -1514,7 +1582,7 @@ public:
           pose,
           (pose.translation() - nominal_target_pose.translation()).norm() +
           0.1 * poseAngularError(pose, nominal_target_pose),
-          endpoint.getMinDistanceToPositionBounds(dual_group).first,
+          joint_margin,
           endpoint.distance(start, dual_group), endpoint_order++, preferred});
     }
     std::stable_sort(
@@ -1528,9 +1596,10 @@ public:
       });
     if (endpoints.empty()) {
       error = "no " + search_name +
-        " endpoint passed IK, bounds, and collision precheck (nominal_pose=" +
+        " endpoint passed IK, bounds, joint-margin, and collision precheck (nominal_pose=" +
         formatPose(nominal_target_pose) + ", IK=" + std::to_string(ik_rejected) +
-        ", bounds=" + std::to_string(bounds_rejected) + ", collision=" +
+        ", bounds=" + std::to_string(bounds_rejected) + ", joint_margin=" +
+        std::to_string(margin_rejected) + ", collision=" +
         std::to_string(collision_rejected) + ")";
       if (!colliding_pairs.empty()) {
         error += "; colliding_pairs=[";
@@ -1555,6 +1624,7 @@ public:
           {"candidate_count", std::to_string(endpoint_order)},
           {"ik_rejected", std::to_string(ik_rejected)},
           {"bounds_rejected", std::to_string(bounds_rejected)},
+          {"joint_margin_rejected", std::to_string(margin_rejected)},
           {"collision_rejected", std::to_string(collision_rejected)}});
       return false;
     }

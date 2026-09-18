@@ -58,6 +58,7 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_DOUBLE_EQ(config.table_tag_maximum_sample_gap, 2.5);
   EXPECT_TRUE(config.planning_log_file.empty());
   EXPECT_EQ(config.planning_log_directory, "/tmp/agibot_x2_planning_traces");
+  EXPECT_DOUBLE_EQ(config.minimum_carry_joint_margin, config.minimum_grasp_joint_margin);
   EXPECT_TRUE(config.carry_pose.matrix().allFinite());
   EXPECT_TRUE(config.carry_pose_b.matrix().allFinite());
   EXPECT_LT((config.carry_pose.translation() - config.carry_pose_b.translation()).norm(), 1e-12);
@@ -89,6 +90,8 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   test_node->declare_parameter<std::string>(
     "planning_log_directory", "/tmp/x2-planning-traces");
   test_node->declare_parameter<bool>("posture_zmq_enabled", false);
+  test_node->declare_parameter<double>("minimum_grasp_joint_margin", 0.03);
+  test_node->declare_parameter<double>("minimum_carry_joint_margin", 0.04);
 
   const auto config = loadPickPlaceConfig(test_node);
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::POSE_TO_POSE);
@@ -109,6 +112,19 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   EXPECT_EQ(config.planning_log_file, "/tmp/x2-planning-trace.jsonl");
   EXPECT_EQ(config.planning_log_directory, "/tmp/x2-planning-traces");
   EXPECT_FALSE(config.posture_zmq_enabled);
+  EXPECT_DOUBLE_EQ(config.minimum_grasp_joint_margin, 0.03);
+  EXPECT_DOUBLE_EQ(config.minimum_carry_joint_margin, 0.04);
+}
+
+TEST_F(PickPlaceConfigTest, CarriesUseTheGraspMarginWhenNoCarryOverrideIsSet)
+{
+  const auto test_node = node("carry_margin_default");
+  test_node->declare_parameter<double>("minimum_grasp_joint_margin", 0.03);
+
+  const auto config = loadPickPlaceConfig(test_node);
+
+  EXPECT_DOUBLE_EQ(config.minimum_grasp_joint_margin, 0.03);
+  EXPECT_DOUBLE_EQ(config.minimum_carry_joint_margin, 0.03);
 }
 
 TEST_F(PickPlaceConfigTest, RejectsUnsafeReturnSearchSettings)
@@ -206,6 +222,10 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidSearchBudgetsAndInitialState)
   const auto bad_budget = node("bad_budget");
   bad_budget->declare_parameter<double>("carry_search_timeout", 0.0);
   EXPECT_THROW(loadPickPlaceConfig(bad_budget), std::runtime_error);
+
+  const auto bad_carry_margin = node("bad_carry_margin");
+  bad_carry_margin->declare_parameter<double>("minimum_carry_joint_margin", -0.01);
+  EXPECT_THROW(loadPickPlaceConfig(bad_carry_margin), std::runtime_error);
 
   const auto bad_state = node("bad_state");
   bad_state->declare_parameter<std::string>("initial_state", "holding");

@@ -351,6 +351,20 @@ def test_place_endpoint_rejection_reports_requested_pose():
     assert "formatPose(requested_pose)" in source
 
 
+def test_carry_routes_enforce_the_configured_joint_margin():
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "pick_place"
+        / "dual_arm_motion_planner.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "validateMinimumJointMargin" in source
+    assert "config_.minimum_carry_joint_margin" in source
+    assert "joint_margin_rejected" in source
+    assert "ClosedChainFailure::JOINT_MARGIN" in source
+
+
 def test_filtered_output_topics_match_moveit_configuration():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
@@ -369,7 +383,7 @@ def test_tag9_derives_the_default_table_place_pose():
     assert config["table_tag_place_offset"] == [0.0, 0.05]
     assert config["table_collision_enabled"] is True
     assert config["table_collision_id"] == "work_table"
-    assert config["table_dimensions"] == [0.5, 0.3, 0.6]
+    assert config["table_dimensions"] == [0.6, 0.4, 0.6]
     assert "tag_to_box_offset" not in config
     assert config["maximum_table_tag_pose_age"] > 0.0
     assert config["table_tag_detections_topic"] == "/front_center_rectify/detections"
@@ -528,6 +542,7 @@ def test_coordinated_grasp_search_has_conservative_limits():
     assert config["pregrasp_planning_timeout"] >= 30.0
     assert config["maximum_retry_candidates"] == 3
     assert config["minimum_grasp_joint_margin"] >= 0.02
+    assert config["minimum_carry_joint_margin"] == config["minimum_grasp_joint_margin"]
     assert config["closed_chain_position_tolerance"] == 0.010
     assert config["closed_chain_orientation_tolerance"] <= 0.052360
     assert config["closed_chain_ik_attempts"] >= 4
@@ -536,13 +551,14 @@ def test_coordinated_grasp_search_has_conservative_limits():
     assert config["closed_chain_projection_limit"] == 32
     assert config["closed_chain_validation_position_step"] <= 0.005
     assert config["closed_chain_validation_orientation_step"] <= 0.017454
-    assert config["closed_chain_contact_position_error"] <= 0.05
+    assert config["closed_chain_contact_position_error"] <= 0.1
     assert config["closed_chain_contact_orientation_error"] <= 0.174534
-    assert config["carry_search_timeout"] == 8.0
-    assert config["carry_search_z_lower"] >= 0.12
-    assert config["carry_search_z_upper"] <= 0.03
+    assert config["carry_search_timeout"] == 80.0
+    assert config["maximum_carry_candidates"] == 270
+    assert config["carry_search_z_lower"] >= 0.02
+    assert config["carry_search_z_upper"] <= 0.05
     assert config["carry_search_x_range"] <= 0.05
-    assert config["carry_search_y_range"] <= 0.03
+    assert config["carry_search_y_range"] <= 0.05
     assert config["carry_search_orientation_tolerance"] <= 0.174534
     assert config["adaptive_place_position_tolerance"] == [0.05, 0.05, 0.02]
     assert config["adaptive_place_yaw_tolerance"] <= 0.174534

@@ -54,6 +54,7 @@ struct PickPlaceConfig
   double pregrasp_planning_timeout{0.0};
   int maximum_retry_candidates{0};
   double minimum_grasp_joint_margin{0.0};
+  double minimum_carry_joint_margin{0.0};
   double closed_chain_position_tolerance{0.0};
   double closed_chain_orientation_tolerance{0.0};
   double closed_chain_position_step{0.0};

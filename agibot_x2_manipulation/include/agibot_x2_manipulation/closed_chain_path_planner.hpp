@@ -32,6 +32,7 @@ enum class ClosedChainFailure
   DEADLINE,
   IK,
   BOUNDS,
+  JOINT_MARGIN,
   COLLISION,
   CONTINUITY,
   CONTACT

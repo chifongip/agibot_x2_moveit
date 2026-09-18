@@ -745,9 +745,12 @@ A candidate is accepted only if it has at least
 continuation is feasible. The closed-chain search perturbs one rigid box pose
 within `closed_chain_position_tolerance` and
 `closed_chain_orientation_tolerance`; it never moves the TCPs independently.
-Plan-only checking moves the box collision body with every candidate waypoint.
+Carry endpoint admission and every carry-route waypoint also enforce
+`minimum_carry_joint_margin`; it defaults to the grasp margin, but can be
+raised independently when carrying needs greater clearance. Plan-only checking
+moves the box collision body with every candidate waypoint.
 If a waypoint fails, the server reports its segment, index, box position, and
-whether IK, bounds, joint continuity, or collision was responsible, then tries
+whether IK, bounds, joint margin, joint continuity, or collision was responsible, then tries
 the next grasp candidate.
 
 `/pick_box` searches for an achievable Carry A pose around the selected
