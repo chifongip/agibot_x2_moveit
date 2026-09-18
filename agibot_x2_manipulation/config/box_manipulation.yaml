@@ -10,7 +10,7 @@ box_localizer:
     # Additional [x, y, z] correction from the centered top-tag model, in tag coordinates [m].
     tag_to_box_offset: [0.04, 0.0, 0.1]
     stable_sample_count: 3
-    maximum_pose_age: 1.5
+    maximum_pose_age: 2.5
     maximum_position_spread: 0.005
     maximum_angular_spread: 0.0523598776  # 3 degrees
     maximum_box_tilt: 0.3490658504        # 20 degrees from base +Z
@@ -61,15 +61,15 @@ pick_place_server:
     closed_chain_projection_limit: 32
     closed_chain_validation_position_step: 0.005
     closed_chain_validation_orientation_step: 0.0174533
-    closed_chain_contact_position_error: 0.05
+    closed_chain_contact_position_error: 0.1
     closed_chain_contact_orientation_error: 0.1745329252  # 10 degrees
-    carry_search_timeout: 8.0
-    maximum_carry_candidates: 96
+    carry_search_timeout: 80.0
+    maximum_carry_candidates: 270
     carry_search_x_range: 0.05
-    carry_search_y_range: 0.03
-    carry_search_z_lower: 0.12
-    carry_search_z_upper: 0.03
-    carry_search_orientation_tolerance: 0.1745329252  # 10 degrees
+    carry_search_y_range: 0.05
+    carry_search_z_lower: 0.02
+    carry_search_z_upper: 0.05
+    carry_search_orientation_tolerance: 0.0872664626  # 5 degrees
     # Save a timestamped planning-YYYYMMDD-HHMMSS-PID.jsonl trace for every
     # planner-server start. The timestamp uses the host's local time.
     planning_log_directory: /tmp/agibot_x2_planning_traces
@@ -79,7 +79,7 @@ pick_place_server:
     # Bounded local correction only; a placement-region planner is required
     # before allowing larger shifts from the requested final box pose.
     adaptive_place_position_tolerance: [0.05, 0.05, 0.02]
-    adaptive_place_yaw_tolerance: 0.1745329252  # 10 degrees
+    adaptive_place_yaw_tolerance: 0.0872664626  # 5 degrees
     # An empty action place_pose is resolved from tag9. Its frame uses +X right,
     # +Y up, and +Z toward the robot. The tabletop center is a single source
     # of truth for both placement and the MoveIt table collision box.
@@ -94,7 +94,7 @@ pick_place_server:
     table_collision_enabled: true
     table_collision_id: work_table
     # [length along tag +X, depth along tag -Z, height along tag +Y] [m].
-    table_dimensions: [0.5, 0.3, 0.6]
+    table_dimensions: [0.6, 0.4, 0.6]
     maximum_table_tag_pose_age: 2.5
     table_tag_detections_topic: /front_center_rectify/detections
     table_tag_id: 9
