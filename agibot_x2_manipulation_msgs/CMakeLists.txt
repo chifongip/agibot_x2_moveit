@@ -14,9 +14,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ResetManipulation.action"
   "msg/BoxState.msg"
   "msg/BoxStateArray.msg"
+  "msg/LocomanipulationPostureStatus.msg"
   "msg/ManipulationState.msg"
+  "srv/ClearLocomanipulationPostureTarget.srv"
   "srv/RecoverManipulationState.srv"
   "srv/ReloadBoxProfiles.srv"
+  "srv/SetLocomanipulationPosture.srv"
   DEPENDENCIES geometry_msgs std_msgs)
 
 ament_export_dependencies(rosidl_default_runtime)

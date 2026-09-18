@@ -319,16 +319,39 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.execution_settle_samples = parameter<int>(node, "execution_settle_samples", 3);
   config.arm_state_topic = parameter<std::string>(
     node, "arm_state_topic", "/aima/hal/joint/arm/state");
+  config.posture_zmq_enabled = parameter<bool>(node, "posture_zmq_enabled", true);
+  config.posture_zmq_endpoint = parameter<std::string>(
+    node, "posture_zmq_endpoint", "tcp://*:8557");
+  config.posture_zmq_publish_rate_hz = parameter<double>(
+    node, "posture_zmq_publish_rate_hz", 50.0);
+  config.posture_settle_timeout = parameter<double>(
+    node, "posture_settle_timeout", 10.0);
+  config.posture_settle_duration = parameter<double>(
+    node, "posture_settle_duration", 0.25);
+  config.posture_settle_samples = parameter<int>(node, "posture_settle_samples", 3);
+  config.leg_state_topic = parameter<std::string>(
+    node, "leg_state_topic", "/aima/hal/joint/leg/state");
+  config.waist_state_topic = parameter<std::string>(
+    node, "waist_state_topic", "/aima/hal/joint/waist/state");
   if (config.reset_preemption_timeout <= 0.0 || config.reset_state_timeout <= 0.0 ||
     config.reset_joint_tolerance < 0.0 ||
     !std::isfinite(config.place_start_state_bounds_tolerance) ||
     config.place_start_state_bounds_tolerance < 0.0 || config.execution_settle_timeout <= 0.0 ||
     config.execution_joint_tolerance < 0.0 || config.execution_velocity_tolerance < 0.0 ||
-    config.execution_settle_samples < 1 || config.arm_state_topic.empty())
+    config.execution_settle_samples < 1 || config.arm_state_topic.empty() ||
+    config.posture_zmq_endpoint.empty() ||
+    !std::isfinite(config.posture_zmq_publish_rate_hz) ||
+    config.posture_zmq_publish_rate_hz <= 0.0 ||
+    !std::isfinite(config.posture_settle_timeout) || config.posture_settle_timeout <= 0.0 ||
+    !std::isfinite(config.posture_settle_duration) || config.posture_settle_duration < 0.0 ||
+    config.posture_settle_samples < 1 || config.leg_state_topic.empty() ||
+    config.waist_state_topic.empty())
   {
     throw std::runtime_error(
             "reset/execution timeouts must be positive; tolerances must be nonnegative; "
-            "arm_state_topic must not be empty");
+            "arm, leg, and waist state topics must not be empty; posture ZMQ settings "
+            "must have a nonempty endpoint, positive publish rate and timeout, and "
+            "nonnegative settle duration");
   }
   if (config.initial_state != "empty" && config.initial_state != "unknown") {
     throw std::runtime_error("initial_state must be 'empty' or 'unknown'");

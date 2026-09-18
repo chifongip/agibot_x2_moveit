@@ -81,6 +81,92 @@ also pass `spawn_dual_arm_controller:=false`. This reuses the active trajectory
 controller without attempting to configure it a second time. Do not use this
 option when the controller is inactive or unconfigured.
 
+## Locomanipulation posture ZMQ control
+
+`box_pick_place.launch.py` enables `posture_zmq_enabled:=true` by default. The
+manipulation server owns this independent publisher and binds
+`posture_zmq_endpoint:=tcp://*:8557`. It continuously sends RoboJuDo's complete
+absolute JSON setpoint after an explicit request:
+
+```json
+{"height":0.64,"waist_yaw":0.0}
+```
+
+This is deliberately separate from `agibot_x2_ros2_control`'s arm-command ZMQ
+transport (`zmq_endpoint`, normally port 8559). The hardware plugin remains
+generic and arm-only; high-level state machines own posture selection, task
+lifetime, and ordering. The publisher is idle at startup and until a target is
+requested. To disable only this integration, start with
+`posture_zmq_enabled:=false`.
+
+Use `/set_locomanipulation_posture`
+(`agibot_x2_manipulation_msgs/srv/SetLocomanipulationPosture`) from the
+high-level state machine or `x2_operator_panel` to send an individual target:
+
+```bash
+ros2 service call /set_locomanipulation_posture \
+  agibot_x2_manipulation_msgs/srv/SetLocomanipulationPosture \
+  "{height: 0.52, waist_yaw: 0.20, wait_for_settle: true}"
+```
+
+The service only accepts a target when `allow_execution:=true`, posture ZMQ is
+enabled, no reset is pending, and manipulation state is a confirmed `EMPTY` or
+`HOLDING`. This permits lower-body changes while carrying an attached box, but
+rejects `UNKNOWN` and recovery states where the physical hold is uncertain.
+`wait_for_settle:=true` additionally waits for `posture_settle_samples` fresh
+direct leg and waist HAL samples plus `posture_settle_duration`; it confirms a
+feedback window, not policy-target convergence. A false value returns after the
+local publisher has accepted the target. Once the local publisher accepts a
+target, the service reports success even if the optional feedback window later
+times out or reset interrupts that wait; its response states that distinction.
+This prevents a caller from treating an accepted, still-effective target as a
+failed no-op.
+
+The latched `/locomanipulation_posture_status` topic reports whether execution
+is enabled, the local publisher's active target, its feedback-window timeout,
+and endpoint. Use it to gate high-level sequencing and operator UI readiness.
+`/clear_locomanipulation_posture_target`
+(`agibot_x2_manipulation_msgs/srv/ClearLocomanipulationPostureTarget`) releases
+this publisher's source lease without commanding a new pose:
+
+```bash
+ros2 service call /clear_locomanipulation_posture_target \
+  agibot_x2_manipulation_msgs/srv/ClearLocomanipulationPostureTarget "{}"
+```
+
+RoboJuDo deliberately retains its last accepted posture after the source
+lease expires. Therefore release is an authority handoff to another posture
+source, not a physical reset or a safe-pose command.
+
+Pick, PickPlace, Place, carry transitions, and retreat never command or
+restore lower-body posture. They plan from the currently measured robot state.
+Reset releases this server's active posture publisher so it cannot continuously
+reassert an old request; because of RoboJuDo's hold-last-target behavior, reset
+does not alter the robot's physical posture. The high-level state machine must
+issue and, when needed, settle a posture target before starting a manipulation
+action. Box profiles intentionally contain no posture calibration: choose the
+target from the live object location and current task context.
+
+For example, a mobile-manipulation state machine can sequence:
+
+```
+dock -> set posture (EMPTY) -> pick -> set posture (HOLDING) -> undock
+-> navigate -> dock -> set posture (HOLDING) -> place -> set posture (EMPTY) -> undock
+```
+
+Use the feedback window before transitions that depend on the new lower-body
+pose, and use RoboJuDo state feedback if target-convergence confirmation is
+required.
+
+RoboJuDo posture ZMQ has no receipt acknowledgement. Fresh HAL samples prove
+the state pipeline is alive, not that the policy accepted the target or that a
+higher-priority local joystick/keyboard source has not overridden it. Enter
+RoboJuDo `JOINT_DEFAULT` then `RL_DEFAULT`, validate each posture/manipulation
+combination with simulation and `plan_only: true`, and only then enable hardware
+execution. The posture service does not collision-plan lower-body motion, so the
+high-level state machine must use an appropriate safe operating policy before
+commanding a target.
+
 ## Box and grasp calibration
 
 The legacy fallback in `config/box_manipulation.yaml` defines box dimensions as
@@ -731,10 +817,10 @@ ros2 action send_goal /reset_manipulation \
   "{confirm_empty: true}" --feedback
 ```
 
-Reset is an application-level arm operation: it does not clear hardware
-e-stops, controller/firmware faults, or command legs, waist, or head. A failed
-reset keeps manipulation locked in `RECOVERY_REQUIRED`; resolve the physical
-fault before retrying.
+Reset is an application-level arm operation: it does not command legs, waist,
+or head, and it never clears hardware e-stops or controller/firmware faults. A
+failed reset keeps manipulation locked in `RECOVERY_REQUIRED`; resolve the
+physical fault before retrying.
 
 Reset uses the shared clearance-search planner with `reset_named_target` passed
 explicitly and post-place retreat disabled. It shares the `return_*` search and

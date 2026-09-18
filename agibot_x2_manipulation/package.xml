@@ -20,6 +20,8 @@
   <depend>moveit_msgs</depend>
   <depend>moveit_ros_planning</depend>
   <depend>moveit_ros_planning_interface</depend>
+  <build_depend>libzmq3-dev</build_depend>
+  <exec_depend>libzmq3-dev</exec_depend>
   <exec_depend>moveit_planners_ompl</exec_depend>
   <depend>nav_msgs</depend>
   <depend>rclcpp</depend>

@@ -127,6 +127,14 @@ struct PickPlaceConfig
   double execution_velocity_tolerance{0.0};
   int execution_settle_samples{0};
   std::string arm_state_topic;
+  bool posture_zmq_enabled{true};
+  std::string posture_zmq_endpoint;
+  double posture_zmq_publish_rate_hz{0.0};
+  double posture_settle_timeout{0.0};
+  double posture_settle_duration{0.0};
+  int posture_settle_samples{0};
+  std::string leg_state_topic;
+  std::string waist_state_topic;
   bool simulate_attachment{false};
   std::string attach_service;
   std::string detach_service;

@@ -1,0 +1,8 @@
+# Absolute RoboJuDo locomanipulation posture target.
+float64 height
+float64 waist_yaw
+# Wait for the configured direct lower-body feedback settling window before responding.
+bool wait_for_settle
+---
+bool success
+string message

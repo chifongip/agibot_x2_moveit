@@ -15,6 +15,8 @@ def generate_launch_description():
     manipulation_share = get_package_share_directory("agibot_x2_manipulation")
     zmq_endpoint = LaunchConfiguration("zmq_endpoint")
     fake_zmq_endpoint = LaunchConfiguration("fake_zmq_endpoint")
+    posture_zmq_enabled = LaunchConfiguration("posture_zmq_enabled")
+    posture_zmq_endpoint = LaunchConfiguration("posture_zmq_endpoint")
     use_rviz = LaunchConfiguration("use_rviz")
     allow_execution = LaunchConfiguration("allow_execution")
     motion_planning_mode = LaunchConfiguration("motion_planning_mode")
@@ -29,6 +31,16 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("zmq_endpoint", default_value="tcp://*:8559"),
+            DeclareLaunchArgument(
+                "posture_zmq_enabled",
+                default_value="false",
+                choices=["true", "false"],
+                description=(
+                    "Keep the replay isolated from RoboJuDo posture control. "
+                    "The production box_pick_place launch enables it by default."
+                ),
+            ),
+            DeclareLaunchArgument("posture_zmq_endpoint", default_value="tcp://*:8557"),
             DeclareLaunchArgument(
                 "fake_zmq_endpoint", default_value="tcp://127.0.0.1:8559"
             ),
@@ -74,6 +86,8 @@ def generate_launch_description():
                 launch_arguments={
                     "command_transport": "zmq",
                     "zmq_endpoint": zmq_endpoint,
+                    "posture_zmq_enabled": posture_zmq_enabled,
+                    "posture_zmq_endpoint": posture_zmq_endpoint,
                     "use_rviz": use_rviz,
                     "use_apriltag": "false",
                     "use_dummy_apriltag": "true",

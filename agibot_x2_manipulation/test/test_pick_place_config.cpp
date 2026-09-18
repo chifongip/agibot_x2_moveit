@@ -61,6 +61,11 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_TRUE(config.carry_pose.matrix().allFinite());
   EXPECT_TRUE(config.carry_pose_b.matrix().allFinite());
   EXPECT_LT((config.carry_pose.translation() - config.carry_pose_b.translation()).norm(), 1e-12);
+  EXPECT_TRUE(config.posture_zmq_enabled);
+  EXPECT_EQ(config.posture_zmq_endpoint, "tcp://*:8557");
+  EXPECT_DOUBLE_EQ(config.posture_zmq_publish_rate_hz, 50.0);
+  EXPECT_EQ(config.leg_state_topic, "/aima/hal/joint/leg/state");
+  EXPECT_EQ(config.waist_state_topic, "/aima/hal/joint/waist/state");
 }
 
 TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
@@ -83,6 +88,7 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
     "planning_log_file", "/tmp/x2-planning-trace.jsonl");
   test_node->declare_parameter<std::string>(
     "planning_log_directory", "/tmp/x2-planning-traces");
+  test_node->declare_parameter<bool>("posture_zmq_enabled", false);
 
   const auto config = loadPickPlaceConfig(test_node);
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::POSE_TO_POSE);
@@ -102,6 +108,7 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   EXPECT_EQ(config.table_tag_stable_sample_count, 3);
   EXPECT_EQ(config.planning_log_file, "/tmp/x2-planning-trace.jsonl");
   EXPECT_EQ(config.planning_log_directory, "/tmp/x2-planning-traces");
+  EXPECT_FALSE(config.posture_zmq_enabled);
 }
 
 TEST_F(PickPlaceConfigTest, RejectsUnsafeReturnSearchSettings)
@@ -164,6 +171,10 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidModeAndUnsafeExecutionValues)
   const auto bad_bounds_tolerance = node("bad_bounds_tolerance");
   bad_bounds_tolerance->declare_parameter<double>("place_start_state_bounds_tolerance", -0.01);
   EXPECT_THROW(loadPickPlaceConfig(bad_bounds_tolerance), std::runtime_error);
+
+  const auto bad_posture_samples = node("bad_posture_samples");
+  bad_posture_samples->declare_parameter<int>("posture_settle_samples", 0);
+  EXPECT_THROW(loadPickPlaceConfig(bad_posture_samples), std::runtime_error);
 
   const auto bad_table_tag = node("bad_table_tag");
   bad_table_tag->declare_parameter<bool>("use_tag_derived_place_pose", true);

@@ -25,6 +25,7 @@ def generate_test_description():
         launch_arguments={
             "command_transport": "zmq",
             "zmq_endpoint": f"tcp://*:{port}",
+            "posture_zmq_enabled": "false",
             "use_rviz": "false",
             "use_apriltag": "false",
             "use_dummy_apriltag": "true",
@@ -82,4 +83,3 @@ class TestReloadBoxProfilesService(unittest.TestCase):
         applied = self.reload(dry_run=False)
         self.assertTrue(applied.success, applied.message)
         self.assertEqual(applied.profile_version, 1)
-

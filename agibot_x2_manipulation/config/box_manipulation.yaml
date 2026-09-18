@@ -143,6 +143,14 @@ pick_place_server:
     execution_joint_tolerance: 0.1
     execution_velocity_tolerance: 0.05
     execution_settle_samples: 3
+    # Independent RoboJuDo locomanipulation posture control. The startup launch
+    # supplies posture_zmq_enabled so operators can disable it explicitly.
+    # Port 8557 and this JSON protocol are intentionally separate from the
+    # ros2_control arm-command PUB transport on port 8559.
+    posture_zmq_publish_rate_hz: 50.0
+    posture_settle_timeout: 10.0
+    posture_settle_duration: 0.25
+    posture_settle_samples: 3
     simulate_ideal_attachment: false
     attach_service: /mujoco_grasp/attach
     detach_service: /mujoco_grasp/detach

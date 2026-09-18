@@ -80,6 +80,8 @@ def generate_launch_description():
     command_transport = LaunchConfiguration("command_transport")
     initial_arm_command_mode = LaunchConfiguration("initial_arm_command_mode")
     zmq_endpoint = LaunchConfiguration("zmq_endpoint")
+    posture_zmq_enabled = LaunchConfiguration("posture_zmq_enabled")
+    posture_zmq_endpoint = LaunchConfiguration("posture_zmq_endpoint")
     leg_state_topic = LaunchConfiguration("leg_state_topic")
     waist_state_topic = LaunchConfiguration("waist_state_topic")
     arm_state_topic = LaunchConfiguration("arm_state_topic")
@@ -181,6 +183,24 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument("zmq_endpoint", default_value="tcp://*:8559"),
+            DeclareLaunchArgument(
+                "posture_zmq_enabled",
+                default_value="true",
+                choices=["true", "false"],
+                description=(
+                    "Enable task-owned RoboJuDo locomanipulation posture ZMQ "
+                    "control on tcp://*:8557. This is separate from the arm "
+                    "controller ZMQ transport on zmq_endpoint."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "posture_zmq_endpoint",
+                default_value="tcp://*:8557",
+                description=(
+                    "RoboJuDo locomanipulation posture PUB bind endpoint; use a "
+                    "unique loopback endpoint only for isolated simulation."
+                ),
+            ),
             DeclareLaunchArgument(
                 "leg_state_topic", default_value="/aima/hal/joint/leg/state"
             ),
@@ -506,6 +526,14 @@ def generate_launch_description():
                         # The execution gate consumes direct HAL measurements,
                         # not the potentially cached joint-state broadcaster.
                         "arm_state_topic": arm_state_topic,
+                        "leg_state_topic": leg_state_topic,
+                        "waist_state_topic": waist_state_topic,
+                        "posture_zmq_enabled": ParameterValue(
+                            posture_zmq_enabled, value_type=bool
+                        ),
+                        "posture_zmq_endpoint": ParameterValue(
+                            posture_zmq_endpoint, value_type=str
+                        ),
                         "state_file": ParameterValue(
                             manipulation_state_file, value_type=str
                         ),

@@ -43,6 +43,12 @@ MOVE_CARRY_POSE_ACTION_FILE = (
     / "action"
     / "MoveCarryPose.action"
 )
+POSTURE_SERVICE_FILE = (
+    Path(__file__).parents[2]
+    / "agibot_x2_manipulation_msgs"
+    / "srv"
+    / "SetLocomanipulationPosture.srv"
+)
 
 
 def load_launch_module():
@@ -63,6 +69,72 @@ def test_launch_controls_perception_source_selection():
     assert '"arm_state_topic": arm_state_topic' in LAUNCH_FILE.read_text(
         encoding="utf-8"
     )
+
+
+def test_independent_locomanipulation_posture_zmq_is_enabled_by_default():
+    with CONFIG_FILE.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
+
+    launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
+    server_source = (
+        Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
+    ).read_text(encoding="utf-8")
+    controller_source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "pick_place"
+        / "locomanipulation_posture_controller.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert '"posture_zmq_enabled",\n                default_value="true"' in launch_source
+    assert '"posture_zmq_enabled": ParameterValue(' in launch_source
+    assert '"posture_zmq_endpoint": ParameterValue(' in launch_source
+    assert '"leg_state_topic": leg_state_topic' in launch_source
+    assert '"waist_state_topic": waist_state_topic' in launch_source
+    assert "posture_zmq_endpoint" not in config
+    assert "posture_default_height" not in config
+    assert "posture_default_waist_yaw" not in config
+    profile_header = (
+        Path(__file__).parents[1]
+        / "include"
+        / "agibot_x2_manipulation"
+        / "box_profile_registry.hpp"
+    ).read_text(encoding="utf-8")
+    assert "posture_height" not in profile_header
+    assert "posture_waist_yaw" not in profile_header
+    assert "create_service<SetLocomanipulationPosture>" in server_source
+    assert '"/set_locomanipulation_posture"' in server_source
+    assert "create_service<ClearLocomanipulationPostureTarget>" in server_source
+    assert '"/clear_locomanipulation_posture_target"' in server_source
+    assert '"/locomanipulation_posture_status"' in server_source
+    assert "posture_controller_.deactivateTarget();" in server_source
+    assert "posture changes require manipulation state EMPTY or HOLDING" in server_source
+    assert "manipulation_state != ManipulationState::HOLDING" in server_source
+    assert "posture execution is disabled: allow_execution is false" in server_source
+    assert "prepareTaskPosture" not in server_source
+    assert "prepareDefaultPosture" not in server_source
+    assert "waitForPostureFeedback" not in server_source
+    posture_service = POSTURE_SERVICE_FILE.read_text(encoding="utf-8")
+    assert "float64 height" in posture_service
+    assert "float64 waist_yaw" in posture_service
+    assert "bool wait_for_settle" in posture_service
+    assert "bool success" in posture_service
+    posture_status = (
+        Path(__file__).parents[2]
+        / "agibot_x2_manipulation_msgs"
+        / "msg"
+        / "LocomanipulationPostureStatus.msg"
+    ).read_text(encoding="utf-8")
+    assert "bool execution_enabled" in posture_status
+    assert "bool target_active" in posture_status
+    assert '\\"height\\"' in controller_source
+    assert '\\"waist_yaw\\"' in controller_source
+    assert '"posture_zmq_endpoint", "tcp://*:8557"' in (
+        Path(__file__).parents[1]
+        / "src"
+        / "pick_place"
+        / "pick_place_config.cpp"
+    ).read_text(encoding="utf-8")
 
 
 def test_box_profiles_are_shared_by_localization_and_planning():

@@ -5,6 +5,7 @@
 #include "pick_place/attachment_controller.hpp"
 #include "pick_place/box_pose_tracker.hpp"
 #include "pick_place/dual_arm_motion_planner.hpp"
+#include "pick_place/locomanipulation_posture_controller.hpp"
 #include "pick_place/manipulation_state_store.hpp"
 #include "pick_place/pick_place_config.hpp"
 #include "pick_place/perception_synchronizer.hpp"
@@ -17,9 +18,12 @@
 #include <agibot_x2_manipulation_msgs/action/pick_place.hpp>
 #include <agibot_x2_manipulation_msgs/action/place.hpp>
 #include <agibot_x2_manipulation_msgs/action/reset_manipulation.hpp>
+#include <agibot_x2_manipulation_msgs/msg/locomanipulation_posture_status.hpp>
 #include <agibot_x2_manipulation_msgs/msg/manipulation_state.hpp>
+#include <agibot_x2_manipulation_msgs/srv/clear_locomanipulation_posture_target.hpp>
 #include <agibot_x2_manipulation_msgs/srv/recover_manipulation_state.hpp>
 #include <agibot_x2_manipulation_msgs/srv/reload_box_profiles.hpp>
+#include <agibot_x2_manipulation_msgs/srv/set_locomanipulation_posture.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
@@ -56,10 +60,16 @@ using Pick = agibot_x2_manipulation_msgs::action::Pick;
 using Place = agibot_x2_manipulation_msgs::action::Place;
 using MoveCarryPose = agibot_x2_manipulation_msgs::action::MoveCarryPose;
 using ResetManipulation = agibot_x2_manipulation_msgs::action::ResetManipulation;
+using LocomanipulationPostureStatus =
+  agibot_x2_manipulation_msgs::msg::LocomanipulationPostureStatus;
 using ManipulationState = agibot_x2_manipulation_msgs::msg::ManipulationState;
+using ClearLocomanipulationPostureTarget =
+  agibot_x2_manipulation_msgs::srv::ClearLocomanipulationPostureTarget;
 using RecoverManipulationState =
   agibot_x2_manipulation_msgs::srv::RecoverManipulationState;
 using ReloadBoxProfiles = agibot_x2_manipulation_msgs::srv::ReloadBoxProfiles;
+using SetLocomanipulationPosture =
+  agibot_x2_manipulation_msgs::srv::SetLocomanipulationPosture;
 using PickGoalHandle = rclcpp_action::ServerGoalHandle<Pick>;
 using PlaceGoalHandle = rclcpp_action::ServerGoalHandle<Place>;
 using PickPlaceGoalHandle = rclcpp_action::ServerGoalHandle<PickPlace>;
@@ -149,7 +159,8 @@ class PickPlaceServer
 public:
   explicit PickPlaceServer(const rclcpp::Node::SharedPtr & node)
   : node_(node), config_(loadPickPlaceConfig(node)),
-    profiles_(BoxProfileRegistry::fromParameters(*node)), state_store_(config_.state_file),
+    posture_controller_(node, config_), profiles_(BoxProfileRegistry::fromParameters(*node)),
+    state_store_(config_.state_file),
     box_pose_tracker_(
       node, config_.planning_frame, config_.box_pose_topic, config_.box_states_topic,
       config_.max_pose_age,
@@ -274,9 +285,31 @@ public:
         &PickPlaceServer::reloadBoxProfiles, this, std::placeholders::_1,
         std::placeholders::_2),
       rmw_qos_profile_services_default, reload_callback_group_);
+    posture_callback_group_ = node_->create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive);
+    posture_service_ = node_->create_service<SetLocomanipulationPosture>(
+      "/set_locomanipulation_posture",
+      std::bind(
+        &PickPlaceServer::setLocomanipulationPosture, this, std::placeholders::_1,
+        std::placeholders::_2),
+      rmw_qos_profile_services_default, posture_callback_group_);
+    posture_release_callback_group_ = node_->create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive);
+    posture_release_service_ = node_->create_service<ClearLocomanipulationPostureTarget>(
+      "/clear_locomanipulation_posture_target",
+      std::bind(
+        &PickPlaceServer::clearLocomanipulationPostureTarget, this, std::placeholders::_1,
+        std::placeholders::_2),
+      rmw_qos_profile_services_default, posture_release_callback_group_);
+    posture_status_publisher_ = node_->create_publisher<LocomanipulationPostureStatus>(
+      "/locomanipulation_posture_status",
+      rclcpp::QoS(1).reliable().transient_local());
+    posture_status_timer_ = node_->create_wall_timer(
+      std::chrono::seconds(1), [this]() {publishPostureStatus();});
     localizer_reload_client_ = node_->create_client<ReloadBoxProfiles>(
       "/box_localizer/reload_box_profiles");
     publishState();
+    publishPostureStatus();
   }
 
 private:
@@ -769,6 +802,8 @@ private:
     if (!reset_coordinator_.requestReset()) {
       return rclcpp_action::GoalResponse::REJECT;
     }
+    posture_controller_.deactivateTarget();
+    publishPostureStatus();
     trajectory_executor_.requestStop();
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
   }
@@ -1116,6 +1151,99 @@ private:
     }
   }
 
+  void setLocomanipulationPosture(
+    const std::shared_ptr<SetLocomanipulationPosture::Request> request,
+    std::shared_ptr<SetLocomanipulationPosture::Response> response)
+  {
+    if (!config_.allow_execution) {
+      response->message = "posture execution is disabled: allow_execution is false";
+      return;
+    }
+    if (!posture_controller_.enabled()) {
+      response->message = "locomanipulation posture ZMQ control is disabled";
+      return;
+    }
+    if (reset_coordinator_.resetRequested() || reset_coordinator_.resetPending()) {
+      response->message = "manipulation reset is pending";
+      return;
+    }
+    const uint8_t manipulation_state = state_.load();
+    if (manipulation_state != ManipulationState::EMPTY &&
+      manipulation_state != ManipulationState::HOLDING)
+    {
+      response->message = "posture changes require manipulation state EMPTY or HOLDING";
+      return;
+    }
+    if (!reserveGoal()) {
+      response->message = "manipulation server is busy";
+      return;
+    }
+    ScopeExit release([this]() {releaseOperation();});
+
+    const LocomanipulationPostureController::Target target{
+      request->height, request->waist_yaw};
+    std::string error;
+    if (!posture_controller_.setTarget(target, error)) {
+      response->message = error;
+      return;
+    }
+    publishPostureStatus();
+
+    bool feedback_window_complete = true;
+    if (request->wait_for_settle) {
+      const CancelFunction canceled = [this]() {return reset_coordinator_.resetRequested();};
+      feedback_window_complete = posture_controller_.waitForFreshFeedback(canceled, error);
+    }
+    response->success = true;
+    if (!request->wait_for_settle) {
+      response->message = "locomanipulation posture target accepted by the local ZMQ publisher";
+    } else if (feedback_window_complete) {
+      response->message =
+        "locomanipulation posture target accepted after the direct lower-body feedback window";
+    } else {
+      response->message =
+        "locomanipulation posture target accepted; direct lower-body feedback window did not complete: " +
+        error;
+    }
+  }
+
+  void clearLocomanipulationPostureTarget(
+    const std::shared_ptr<ClearLocomanipulationPostureTarget::Request>,
+    std::shared_ptr<ClearLocomanipulationPostureTarget::Response> response)
+  {
+    const bool was_active = posture_controller_.deactivateTarget();
+    publishPostureStatus();
+    response->success = true;
+    response->message = was_active ?
+      "locomanipulation posture publisher released; RoboJuDo retains its last accepted posture until another source overrides it" :
+      "locomanipulation posture publisher was already released";
+  }
+
+  void publishPostureStatus()
+  {
+    if (!posture_status_publisher_) {
+      return;
+    }
+    LocomanipulationPostureStatus status;
+    status.enabled = posture_controller_.enabled();
+    status.execution_enabled = config_.allow_execution && status.enabled;
+    status.target_active = posture_controller_.targetActive();
+    const auto target = posture_controller_.target();
+    status.target_height = target.height;
+    status.target_waist_yaw = target.waist_yaw;
+    status.feedback_window_timeout_sec = config_.posture_settle_timeout;
+    status.endpoint = posture_controller_.endpoint();
+    if (!status.enabled) {
+      status.detail = "Locomanipulation posture ZMQ control is disabled";
+    } else if (!config_.allow_execution) {
+      status.detail = "Posture execution is disabled: allow_execution is false";
+    } else if (!status.target_active) {
+      status.detail = "Posture publisher is released; no target is being continuously published";
+    } else {
+      status.detail = "Posture publisher is active";
+    }
+    posture_status_publisher_->publish(status);
+  }
 
   TaskOutcome outcome(
     bool success, uint16_t code, const std::string & message,
@@ -2343,6 +2471,7 @@ private:
 
   rclcpp::Node::SharedPtr node_;
   PickPlaceConfig config_;
+  LocomanipulationPostureController posture_controller_;
   BoxProfileRegistry profiles_;
   std::string box_id_prefix_;
   std::string active_box_instance_id_;
@@ -2383,6 +2512,12 @@ private:
   rclcpp::Service<RecoverManipulationState>::SharedPtr recovery_service_;
   rclcpp::CallbackGroup::SharedPtr reload_callback_group_;
   rclcpp::Service<ReloadBoxProfiles>::SharedPtr reload_profiles_service_;
+  rclcpp::CallbackGroup::SharedPtr posture_callback_group_;
+  rclcpp::Service<SetLocomanipulationPosture>::SharedPtr posture_service_;
+  rclcpp::CallbackGroup::SharedPtr posture_release_callback_group_;
+  rclcpp::Service<ClearLocomanipulationPostureTarget>::SharedPtr posture_release_service_;
+  rclcpp::Publisher<LocomanipulationPostureStatus>::SharedPtr posture_status_publisher_;
+  rclcpp::TimerBase::SharedPtr posture_status_timer_;
   rclcpp::Client<ReloadBoxProfiles>::SharedPtr localizer_reload_client_;
 };
 

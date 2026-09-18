@@ -15,6 +15,7 @@ find_package(Eigen3 REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(PkgConfig REQUIRED)
 find_package(random_numbers REQUIRED)
 find_package(tl_expected REQUIRED)
 # Compatibility aliases for the newer MoveIt Humble packages, whose exports
@@ -43,6 +44,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+pkg_check_modules(ZMQ REQUIRED IMPORTED_TARGET libzmq)
 
 add_library(box_geometry src/box_geometry.cpp)
 target_include_directories(box_geometry PUBLIC
@@ -87,6 +89,7 @@ add_library(pick_place_core
   src/pick_place/attachment_controller.cpp
   src/pick_place/box_pose_tracker.cpp
   src/pick_place/dual_arm_motion_planner.cpp
+  src/pick_place/locomanipulation_posture_controller.cpp
   src/pick_place/manipulation_state_store.cpp
   src/pick_place/pick_place_config.cpp
   src/pick_place/planning_trace_logger.cpp
@@ -98,7 +101,7 @@ target_include_directories(pick_place_core PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(pick_place_core
-  box_geometry closed_chain_path_planner perception_readiness planning_budget Eigen3::Eigen)
+  box_geometry closed_chain_path_planner perception_readiness planning_budget Eigen3::Eigen PkgConfig::ZMQ)
 ament_target_dependencies(pick_place_core
   agibot_x2_manipulation_msgs aimdk_msgs apriltag_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
   moveit_ros_planning_interface joint_trajectory_controller nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs
@@ -176,6 +179,11 @@ if(BUILD_TESTING)
   target_include_directories(test_pick_place_config PRIVATE src include)
   target_link_libraries(test_pick_place_config pick_place_core)
   ament_target_dependencies(test_pick_place_config rclcpp)
+  ament_add_gtest(test_locomanipulation_posture_controller
+    test/test_locomanipulation_posture_controller.cpp)
+  target_include_directories(test_locomanipulation_posture_controller PRIVATE src include)
+  target_link_libraries(test_locomanipulation_posture_controller pick_place_core)
+  ament_target_dependencies(test_locomanipulation_posture_controller aimdk_msgs rclcpp)
   ament_add_gtest(test_post_place_planner test/test_post_place_planner.cpp)
   target_include_directories(test_post_place_planner PRIVATE src include)
   target_link_libraries(test_post_place_planner pick_place_core)
