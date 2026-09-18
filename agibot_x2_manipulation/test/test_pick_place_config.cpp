@@ -104,6 +104,19 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   EXPECT_EQ(config.planning_log_directory, "/tmp/x2-planning-traces");
 }
 
+TEST_F(PickPlaceConfigTest, RejectsUnsafeReturnSearchSettings)
+{
+  const auto bad_resolution = node("bad_return_resolution");
+  bad_resolution->declare_parameter<double>("return_validation_joint_step", 0.0);
+  EXPECT_THROW(loadPickPlaceConfig(bad_resolution), std::runtime_error);
+  const auto bad_offsets = node("bad_return_offsets");
+  bad_offsets->declare_parameter<std::vector<double>>("return_up_offsets", {-0.1});
+  EXPECT_THROW(loadPickPlaceConfig(bad_offsets), std::runtime_error);
+  const auto bad_budget = node("bad_return_budget");
+  bad_budget->declare_parameter<double>("return_planning_timeout", 0.0);
+  EXPECT_THROW(loadPickPlaceConfig(bad_budget), std::runtime_error);
+}
+
 TEST_F(PickPlaceConfigTest, UsesLegacyCarryPoseForBothTargetsWhenNewPosesAreUnset)
 {
   const auto test_node = node("legacy_carry_pose");

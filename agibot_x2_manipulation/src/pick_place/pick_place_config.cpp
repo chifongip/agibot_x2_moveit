@@ -3,6 +3,7 @@
 #include <geometry_msgs/msg/pose.hpp>
 
 #include <cmath>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
@@ -274,6 +275,37 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.state_file = parameter<std::string>(node, "state_file", defaultStateFile());
   config.initial_state = parameter<std::string>(node, "initial_state", "empty");
   config.post_place_named_target = parameter<std::string>(node, "post_place_named_target", "zero");
+  config.return_planning_timeout = parameter<double>(node, "return_planning_timeout", 30.0);
+  config.return_planning_time_per_attempt = parameter<double>(
+    node, "return_planning_time_per_attempt", 2.0);
+  config.return_ik_attempts = parameter<int>(node, "return_ik_attempts", 8);
+  config.return_validation_joint_step = parameter<double>(node, "return_validation_joint_step", 0.01);
+  config.return_longest_valid_segment_fraction = parameter<double>(
+    node, "return_longest_valid_segment_fraction", 0.005);
+  config.return_path_tolerance = parameter<double>(node, "return_path_tolerance", 0.01);
+  config.return_up_offsets = parameter<std::vector<double>>(
+    node, "return_up_offsets", config.return_up_offsets);
+  config.return_back_offsets = parameter<std::vector<double>>(
+    node, "return_back_offsets", config.return_back_offsets);
+  config.return_out_offsets = parameter<std::vector<double>>(
+    node, "return_out_offsets", config.return_out_offsets);
+  const auto positive = [](double value) {return std::isfinite(value) && value > 0.0;};
+  const auto offsets_valid = [](const std::vector<double> & values) {
+      return !values.empty() && values.size() <= 16U &&
+             std::all_of(values.begin(), values.end(), [](double value) {
+        return std::isfinite(value) && value >= 0.0;
+      });
+    };
+  if (!positive(config.return_planning_timeout) ||
+    !positive(config.return_planning_time_per_attempt) || config.return_ik_attempts < 1 ||
+    config.return_ik_attempts > 64 || !positive(config.return_validation_joint_step) ||
+    !positive(config.return_longest_valid_segment_fraction) ||
+    config.return_longest_valid_segment_fraction > 1.0 ||
+    !positive(config.return_path_tolerance) || !offsets_valid(config.return_up_offsets) ||
+    !offsets_valid(config.return_back_offsets) || !offsets_valid(config.return_out_offsets))
+  {
+    throw std::runtime_error("invalid post-place return search parameters");
+  }
   config.reset_named_target = parameter<std::string>(node, "reset_named_target", "zero");
   config.reset_preemption_timeout = parameter<double>(node, "reset_preemption_timeout", 15.0);
   config.reset_state_timeout = parameter<double>(node, "reset_state_timeout", 2.0);

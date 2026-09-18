@@ -31,6 +31,7 @@ endif()
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_ros_planning REQUIRED)
 find_package(moveit_core REQUIRED)
+find_package(joint_trajectory_controller REQUIRED)
 find_package(moveit_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -91,6 +92,7 @@ add_library(pick_place_core
   src/pick_place/planning_trace_logger.cpp
   src/pick_place/perception_synchronizer.cpp
   src/pick_place/planning_scene_manager.cpp
+  src/pick_place/post_place_planner.cpp
   src/pick_place/trajectory_executor.cpp)
 target_include_directories(pick_place_core PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -99,7 +101,7 @@ target_link_libraries(pick_place_core
   box_geometry closed_chain_path_planner perception_readiness planning_budget Eigen3::Eigen)
 ament_target_dependencies(pick_place_core
   agibot_x2_manipulation_msgs aimdk_msgs apriltag_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
-  moveit_ros_planning_interface nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs
+  moveit_ros_planning_interface joint_trajectory_controller nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs
   std_srvs tf2_eigen tf2_geometry_msgs tf2_ros visualization_msgs)
 
 add_executable(box_localizer_node src/box_localizer_node.cpp)
@@ -174,6 +176,18 @@ if(BUILD_TESTING)
   target_include_directories(test_pick_place_config PRIVATE src include)
   target_link_libraries(test_pick_place_config pick_place_core)
   ament_target_dependencies(test_pick_place_config rclcpp)
+  ament_add_gtest(test_post_place_planner test/test_post_place_planner.cpp)
+  target_include_directories(test_post_place_planner PRIVATE src include)
+  target_link_libraries(test_post_place_planner pick_place_core)
+  ament_target_dependencies(test_post_place_planner moveit_core moveit_ros_planning rclcpp)
+  ament_add_gtest_executable(test_post_place_replay test/test_post_place_replay.cpp
+    SKIP_LINKING_MAIN_LIBRARIES)
+  target_include_directories(test_post_place_replay PRIVATE src include)
+  target_link_libraries(test_post_place_replay pick_place_core)
+  ament_target_dependencies(test_post_place_replay moveit_core moveit_ros_planning rclcpp tf2_eigen)
+  install(TARGETS test_post_place_replay RUNTIME DESTINATION lib/${PROJECT_NAME})
+  add_launch_test(test/test_post_place_replay.launch.py TIMEOUT 210)
+  add_launch_test(test/test_reset_return.launch.py TIMEOUT 150)
   ament_add_gtest(test_planning_trace_logger test/test_planning_trace_logger.cpp)
   target_include_directories(test_planning_trace_logger PRIVATE src)
   target_link_libraries(test_planning_trace_logger pick_place_core)

@@ -10,6 +10,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 import launch_testing
 import launch_testing.actions
+import launch_testing.asserts
 import pytest
 import rclpy
 from rclpy.action import ActionClient
@@ -30,6 +31,9 @@ def generate_test_description():
             "use_rviz": "false",
             "use_apriltag": "false",
             "use_dummy_apriltag": "true",
+            "dummy_tag_params_file": os.path.join(
+                share, "config", "dummy_apriltag.yaml"
+            ),
             "start_table_tag_detector": "false",
             "perception_3d_source": "none",
             "allow_execution": "true",
@@ -97,7 +101,8 @@ class TestDummyWorkflow(unittest.TestCase):
         pick_place_goal.instance_id = "tag:0"
         self.place_pose(pick_place_goal)
         pick_place_goal.plan_only = True
-        self.send_goal(PickPlace, "/pick_place", pick_place_goal, 45.0)
+        # Allow configured pregrasp, carry, placement, and return-search budgets.
+        self.send_goal(PickPlace, "/pick_place", pick_place_goal, 120.0)
 
         pick_goal.plan_only = False
         pick_result = self.send_goal(Pick, "/pick_box", pick_goal, 70.0)
@@ -111,3 +116,9 @@ class TestDummyWorkflow(unittest.TestCase):
 
         pick_place_goal.plan_only = False
         self.send_goal(PickPlace, "/pick_place", pick_place_goal, 100.0)
+
+
+@launch_testing.post_shutdown_test()
+class TestCleanShutdown(unittest.TestCase):
+    def test_processes_exit_cleanly(self, proc_info):
+        launch_testing.asserts.assertExitCodes(proc_info)

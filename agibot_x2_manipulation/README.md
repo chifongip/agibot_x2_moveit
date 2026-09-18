@@ -255,9 +255,18 @@ the table geometry. Therefore changing a pickup tag from top-mounted to
 bottom-mounted changes localization only; it cannot shift the table placement
 target. Use `table_tag_place_offset` only to calibrate the desired table
 location, not to compensate for a pickup tag mount.
-Set `table_collision_enabled: true` to require a stable tag pose before every
-Pick, Place, PickPlace, carry, and reset plan. The table stays as a persistent
-world collision object while grasp-box and visible-box objects are refreshed.
+Set `table_collision_enabled: true` to include a currently fresh, stable table-tag
+pose in Pick, Place, PickPlace, carry, and reset scene updates. These actions use
+one validated detection snapshot and one scene diff to replace managed obstacles.
+Stale/invisible boxes and the configured table model are removed; unrelated
+external obstacles remain. Missing table detections do not block planning with
+an explicit target, but a tag-derived placement target still requires a fresh
+stable table pose. Selected, held, and released task boxes are protected during
+their manipulation stages. Empty-action cleanup reconciles fresh obstacles and
+removes task contact allowances rather than erasing every managed box.
+Existing pre-execution checks remain; no continuous motion monitoring is added.
+Undetected physical obstacles require 3D perception or external collision models
+to remain collision-checked. Fresh incorrect detections can still affect planning.
 Each fresh stable Tag 9 measurement also publishes a translucent cube on the
 latched `/table_markers` `visualization_msgs/MarkerArray` topic. This updates
 continuously while the detector is running, independently of task acceptance;
@@ -558,8 +567,10 @@ ros2 action send_goal /pick_place \
 ```
 
 The server defaults to `motion_planning_mode:=closed_chain`, which samples and
-validates rigid box/TCP waypoints throughout approach, carry, placement, and
-retreat. For endpoint-only arm motion, select:
+validates rigid box/TCP waypoints throughout approach, carry, and placement.
+After release, both modes use coordinated TCP retreat, followed by the dedicated
+clearance-search planner for the named joint target.
+For endpoint-only arm motion while carrying, select:
 
 ```bash
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
@@ -568,12 +579,73 @@ ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
 
 In `pose_to_pose` mode, the server retains the same pregrasp, contact, lift,
 carry, place, retreat, and zero endpoints. It solves dual-arm IK at each
-endpoint, then asks MoveIt for a collision-checked joint-space plan to the next
-endpoint. Joint bounds, obstacle avoidance, attached-box collision geometry,
+carry/place endpoint, then asks MoveIt for a collision-checked joint-space plan
+to the next endpoint. Retreat always uses coordinated interpolation rather than
+endpoint-only free-space planning. Joint bounds, obstacle avoidance, attached-box collision geometry,
 execution feedback, and recovery handling remain active. This mode does not
 guarantee straight TCP motion or continuous rigid two-hand closure between
 endpoints, so validate with `plan_only: true` and fake-ZMQ simulation before
 enabling robot motion.
+
+### Post-place return planning
+
+Place and PickPlace feasibility checks include release, retreat, and return to
+the exact `post_place_named_target` joint configuration. Before placement motion,
+the server checks this continuation on an independent scene snapshot with the
+box released at the selected placement pose. The live collision scene is not
+changed by this check. If the continuation fails, adaptive placement may try
+another candidate inside its existing pose tolerances.
+Candidate continuation checks share one return budget per adaptive placement
+search, including time already spent generating the placement candidate.
+
+After physical release, the server searches again from measured feedback. It
+plans an outward retreat using the existing coordinated approach search in
+reverse, with actual release TCPs as its interpolation start. Only this retreat
+uses the existing grasp touch allowances for the task box (hand pads, TCPs, and
+wrist links); tables and other obstacles remain collision-checked. The box stays
+in the snapshot throughout retreat planning and validation. The retreat endpoint
+must be collision-free with all task-box touch allowances disabled.
+If that endpoint has no valid named-target continuation, the server also tries
+retreat distances of 1.5 and 2 times `pregrasp_distance`, dividing the remaining
+shared budget between attempts. This changes no configured grasp parameters.
+The dedicated named-target planner then tries a direct return; if direct return fails, it
+searches paired hand poses above and toward the robot from the table. These are
+pose endpoints connected by whole-dual-arm RRTConnect plans, not straight
+Cartesian hand paths. Both segments of a clearance route must pass before any
+segment executes. The table, placed box, visible obstacles, and octomap remain
+present. Named-target return and reset never inherit retreat touch allowances.
+Wrist collisions with the table are always checked. Both the retreat and named
+continuation must be feasible before any post-place segment executes.
+
+The return-specific defaults are `return_planning_timeout: 30.0` seconds,
+`return_planning_time_per_attempt: 2.0` seconds, and `return_ik_attempts: 8`.
+Clearance offsets in metres are `return_up_offsets: [0.05, 0.10, 0.15, 0.20]`,
+`return_back_offsets: [0.0, 0.05, 0.10]`, and `return_out_offsets: [0.0, 0.04]`.
+Up follows the table normal, back follows the tabletop direction toward the
+robot, and outward separates the hands while retaining their orientations.
+Without a table object, up and back use base-frame +Z and -X.
+
+The dedicated OMPL pipeline uses `return_longest_valid_segment_fraction: 0.005`.
+Both the geometric path and the final TOTG trajectory are checked along joint
+edges at `return_validation_joint_step: 0.01` rad. TOTG uses
+`return_path_tolerance: 0.01`; invalid processed paths are rejected and search
+continues. Each segment is timed separately and is not retimed after validation.
+Before execution, measured start agreement and the latest collision scene are
+checked again. At most two replans are permitted for changed feedback or scenes,
+each with a fresh bounded search budget.
+
+Planning traces include `post_place_return` events for geometric and processed
+validation, rejected candidates, selected clearance poses, seeds, and budget
+exhaustion. If no valid route is found after release, the action reports failure
+with `object_held=false` and leaves manipulation state `EMPTY`. A finite search
+cannot guarantee a route through an obstructed scene. Validate in simulation
+before allowing hardware execution; these parameters do not replace accurate
+collision geometry or calibration.
+
+Final validation also samples the joint trajectory controller's cubic/quintic
+interpolation at 100 Hz or finer, with additional subdivision from the joint
+motion bound. This detects spline overshoot even when its endpoints and their
+straight joint-space connection are clear.
 
 Pregrasp planning first tests up to `maximum_planning_candidates` candidates
 for `planning_time_per_candidate` seconds each. If none succeeds, the best
@@ -649,8 +721,8 @@ estimates to agree within `recovery_position_tolerance` and
 carry pose. These tolerances do not check the tag pose or compare raw joint
 values directly.
 
-For a fault recovery after the operator has stopped the base, made the path
-clear, and removed any box, reset the planning scene and move the dual arms to
+For a fault recovery after the operator has stopped the base and verified that
+the arms hold no box, reset the manipulation state and move the dual arms to
 the configured `reset_named_target` (`zero` by default):
 
 ```bash
@@ -664,7 +736,41 @@ e-stops, controller/firmware faults, or command legs, waist, or head. A failed
 reset keeps manipulation locked in `RECOVERY_REQUIRED`; resolve the physical
 fault before retrying.
 
+Reset uses the shared clearance-search planner with `reset_named_target` passed
+explicitly and post-place retreat disabled. It shares the `return_*` search and
+validation settings, including the 30-second search budget, post-TOTG checks,
+and controller-spline validation. It verifies the final target using reset's
+existing joint tolerance and measured execution feedback.
+
+After `confirm_empty: true`, reset clears managed box models (including attached
+models), their grasp touch allowances, and the configured table collision model.
+It rebuilds these obstacles from currently fresh, stable detections; stale or
+invisible boxes and tables are omitted without waiting for a table detection.
+External collision objects are preserved, and enabled 3D perception is refreshed. The
+scene and measured start are checked before each segment, with at most two
+bounded replans. Remaining attached objects block empty-arm planning/execution.
+`confirm_empty` confirms empty arms, not an empty environment. Clearing invisible
+models means undetected physical boxes or tables are not collision-checked unless
+represented by 3D perception or external collision objects. Verify the reset
+workspace is safe before requesting motion. A fresh but incorrect detection can
+still affect planning. Failure or cancellation keeps `RECOVERY_REQUIRED` latched.
+
 ## Simulation test
+
+Release validation must include the complete PickPlace workflow, not only the
+return-path replay and reset tests. The representative replay obstacles are
+constructed test scenes, not a reconstruction of the reported September
+collision. The dummy case previously exposed a mismatch between placement wrist
+touch allowances and pad-only free-space retreat. Coordinated retreat now uses
+the existing grasp policy, and its endpoint and named continuation are checked
+strictly. Do not bypass a failed continuation by allowing arbitrary wrist-box
+collisions or changing tuned parameters to match a test.
+
+The stock MoveIt 2.5.9 and upgraded 2.5.10 dependencies both reproduced a
+shutdown crash. See
+[the version-specific dependency patch](../patches/README.md) for the isolated
+overlay used to validate clean shutdown. Passing with that overlay does not
+validate a release that still uses the stock dependency.
 
 For a dummy pose-to-pose verification, start the fake feedback utility first.
 It publishes all 31 HAL joint states and assumes the simulated arms exactly

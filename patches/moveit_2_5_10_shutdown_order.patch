@@ -1,0 +1,46 @@
+diff --git a/moveit_ros/move_group/src/move_group.cpp b/moveit_ros/move_group/src/move_group.cpp
+--- a/moveit_ros/move_group/src/move_group.cpp
++++ b/moveit_ros/move_group/src/move_group.cpp
+@@ -113,6 +113,10 @@ public:
+   {
+     return context_;
+   }
++  std::shared_ptr<pluginlib::ClassLoader<MoveGroupCapability>> getCapabilityPluginLoader()
++  {
++    return capability_plugin_loader_;
++  }
+ 
+ private:
+   void configureCapabilities()
+@@ -208,6 +212,8 @@ int main(int argc, char** argv)
+   rclcpp::NodeOptions opt;
+   opt.allow_undeclared_parameters(true);
+   opt.automatically_declare_parameters_from_overrides(true);
++  // Callback-group weak control blocks must die before capability code unloads.
++  std::shared_ptr<pluginlib::ClassLoader<move_group::MoveGroupCapability>> capability_plugin_lifetime;
+   rclcpp::Node::SharedPtr nh = rclcpp::Node::make_shared("move_group", opt);
+   moveit_cpp::MoveItCpp::Options moveit_cpp_options(nh);
+ 
+@@ -294,6 +300,7 @@ int main(int argc, char** argv)
+     rclcpp::executors::MultiThreadedExecutor executor;
+ 
+     move_group::MoveGroupExe mge(moveit_cpp, default_planning_pipeline, debug);
++    capability_plugin_lifetime = mge.getCapabilityPluginLoader();
+ 
+     bool monitor_dynamics;
+     if (nh->get_parameter("monitor_dynamics", monitor_dynamics) && monitor_dynamics)
+diff --git a/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp b/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
+--- a/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
++++ b/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
+@@ -81,6 +81,11 @@ TrajectoryExecutionManager::~TrajectoryExecutionManager()
+   if (private_executor_thread_.joinable())
+     private_executor_thread_.join();
+   private_executor_.reset();
++  // Destroy callback-group weak references while their plugin code is loaded.
++  callback_handler_.reset();
++  controller_manager_.reset();
++  controller_mgr_node_.reset();
++  controller_manager_loader_.reset();
+ }
+ 
+ void TrajectoryExecutionManager::initialize()

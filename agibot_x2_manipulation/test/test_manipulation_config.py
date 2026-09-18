@@ -186,7 +186,7 @@ def test_detailed_planning_trace_file_is_automatic_and_launch_configurable():
     assert "adaptive_carry_selected" in planner_source
 
 
-def test_managed_box_objects_are_removed_after_empty_operations_and_restart():
+def test_empty_operations_reconcile_detections_and_restart_cleanup_remains_available():
     scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
     server_source = (
         Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
@@ -198,7 +198,25 @@ def test_managed_box_objects_are_removed_after_empty_operations_and_restart():
     assert "scene_interface_.getAttachedObjects()" in scene_source
     assert "clearManagedBoxes(error)" in scene_source
     assert "clearSceneAfterEmptyOperation(task);" in server_source
-    assert "planning_scene_.clearManagedBoxes(error)" in server_source
+    assert 'updateVisibleBoxScene("", false, true, visible_boxes, error)' in server_source
+    assert (
+        "planning_scene_.updateDetectionScene(observations, protected_ids, false, error)"
+        in server_source
+    )
+    assert (
+        "planning_scene_.updateDetectionScene(observations, {}, true, error)"
+        in server_source
+    )
+
+
+def test_post_place_separates_coordinated_retreat_from_named_target_planning():
+    server_source = (
+        Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
+    ).read_text(encoding="utf-8")
+    assert "motion_planner_.buildRetreat(" in server_source
+    assert "post_place_planner_->plan(retreat_end, {}, scene, false" in server_source
+    assert "validatePostPlaceSegment(" in server_source
+    assert "postPlaceRetreatTarget" not in server_source
 
 
 def test_pose_to_pose_mode_is_selectable_and_closed_chain_remains_default():

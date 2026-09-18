@@ -40,6 +40,8 @@ struct AdaptiveCarryPlan
 using CancelFunction = std::function<bool ()>;
 using ContinuationFunction = std::function<bool (
       const moveit::core::RobotState &, const PlannedGrasp &, std::string &)>;
+using PlaceContinuation = std::function<bool (
+      const moveit::core::RobotState &, const Eigen::Isometry3d &, std::string &)>;
 
 class DualArmMotionPlanner
 {
@@ -60,6 +62,12 @@ public:
     const moveit::core::RobotState & start, const GraspGeometry & target,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     const CancelFunction & canceled);
+  bool buildRetreat(
+    const moveit::core::RobotState & start, const GraspGeometry & target,
+    const planning_scene::PlanningScenePtr & scene,
+    moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
+    std::string & error, const CancelFunction & canceled,
+    std::chrono::steady_clock::time_point deadline);
   GraspGeometry graspFromBoxToTcp(
     const Eigen::Isometry3d & box_pose,
     const Eigen::Isometry3d & box_to_left_contact,
@@ -102,7 +110,7 @@ public:
     const Eigen::Isometry3d & box_to_right_contact,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     Eigen::Isometry3d & selected_pose, std::string & error,
-    const CancelFunction & canceled);
+    const CancelFunction & canceled, const PlaceContinuation & continuation = {});
   bool planPickPath(
     const geometry_msgs::msg::PoseStamped & box_message, const Eigen::Isometry3d & pick_pose,
     moveit::planning_interface::MoveGroupInterface::Plan & pregrasp_plan,

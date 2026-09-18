@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "agibot_x2_manipulation/box_geometry.hpp"
 #include "pick_place/pick_place_config.hpp"
 
@@ -21,12 +23,33 @@
 namespace agibot_x2_manipulation
 {
 
+// Use the existing grasp touch policy only for coordinated disengagement.
+planning_scene::PlanningScenePtr retreatContactScene(
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config);
+
+// After operator-confirmed release, clear managed detection geometry.
+bool buildResetSceneDiff(
+  const planning_scene::PlanningSceneConstPtr & scene, const std::string & box_prefix,
+  const std::string & table_id, moveit_msgs::msg::PlanningScene & diff, std::string & error);
+
 struct SceneBox
 {
   std::string id;
   BoxDimensions dimensions;
   Eigen::Isometry3d pose{Eigen::Isometry3d::Identity()};
 };
+
+struct DetectionSceneSnapshot
+{
+  std::vector<SceneBox> boxes;
+  std::optional<SceneBox> table;
+};
+
+bool buildDetectionSceneDiff(
+  const planning_scene::PlanningSceneConstPtr & scene, const std::string & box_prefix,
+  const std::string & table_id, const std::string & frame,
+  const DetectionSceneSnapshot & observations, const std::set<std::string> & protected_ids,
+  bool confirmed_release, moveit_msgs::msg::PlanningScene & diff, std::string & error);
 
 class PlanningSceneManager
 {
@@ -35,11 +58,18 @@ public:
     const rclcpp::Node::SharedPtr & node, const PickPlaceConfig & config);
 
   bool synchronize(std::string & error);
+  planning_scene::PlanningScenePtr snapshot() const;
+  planning_scene::PlanningScenePtr releasedBoxSnapshot(const Eigen::Isometry3d & pose) const;
   bool applyBox(const Eigen::Isometry3d & pose, std::string & error);
   bool applyTable(const Eigen::Isometry3d & pose, std::string & error);
   void publishTableMarker(
     const Eigen::Isometry3d & pose, const builtin_interfaces::msg::Time & stamp);
   bool applyObstacleBoxes(const std::vector<SceneBox> & boxes, std::string & error);
+  bool refreshResetBoxes(const std::vector<SceneBox> & boxes, std::string & error);
+  bool prepareResetScene(std::string & error);
+  bool updateDetectionScene(
+    const DetectionSceneSnapshot & observations, const std::set<std::string> & protected_ids,
+    bool confirmed_release, std::string & error);
   bool clearOwnedBoxes(std::string & error);
   bool clearManagedBoxes(std::string & error);
   bool removeBox(std::string & error);

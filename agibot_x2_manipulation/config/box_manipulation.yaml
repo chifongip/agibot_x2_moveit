@@ -123,6 +123,16 @@ pick_place_server:
     place_start_state_bounds_tolerance: 0.02  # rad, about 1.15 degrees
     initial_state: empty
     post_place_named_target: zero
+    # Independent post-release OMPL search; calibration and held-box mode are unchanged.
+    return_planning_timeout: 30.0
+    return_planning_time_per_attempt: 2.0
+    return_ik_attempts: 8
+    return_up_offsets: [0.05, 0.10, 0.15, 0.20]
+    return_back_offsets: [0.0, 0.05, 0.10]
+    return_out_offsets: [0.0, 0.04]
+    return_longest_valid_segment_fraction: 0.005
+    return_validation_joint_step: 0.01  # rad; check interpolated edges after timing
+    return_path_tolerance: 0.01  # TOTG joint-space deviation tolerance
     reset_named_target: zero
     reset_preemption_timeout: 15.0
     reset_state_timeout: 2.0

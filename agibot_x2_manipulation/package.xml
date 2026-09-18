@@ -16,9 +16,11 @@
   <depend>eigen</depend>
   <depend>geometry_msgs</depend>
   <depend>moveit_core</depend>
+  <depend>joint_trajectory_controller</depend>
   <depend>moveit_msgs</depend>
   <depend>moveit_ros_planning</depend>
   <depend>moveit_ros_planning_interface</depend>
+  <exec_depend>moveit_planners_ompl</exec_depend>
   <depend>nav_msgs</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>

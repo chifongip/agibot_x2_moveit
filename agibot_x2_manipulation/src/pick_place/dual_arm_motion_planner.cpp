@@ -1,6 +1,7 @@
 #include "agibot_x2_manipulation/planning_budget.hpp"
 #include "pick_place/dual_arm_motion_planner.hpp"
 #include "pick_place/planning_trace_logger.hpp"
+#include "pick_place/post_place_planner.hpp"
 
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
@@ -416,7 +417,9 @@ public:
   bool appendJointSpacePlan(
     robot_trajectory::RobotTrajectory & combined, moveit::core::RobotState & state,
     moveit::core::RobotState target, const std::string & route,
-    const std::string & segment, const CancelFunction & canceled, std::string & error)
+    const std::string & segment, const CancelFunction & canceled, std::string & error,
+    const std::chrono::steady_clock::time_point & deadline =
+    std::chrono::steady_clock::time_point::max())
   {
     if (canceled()) {
       error = segment + " endpoint planning canceled";
@@ -436,7 +439,13 @@ public:
       return false;
     }
     moveit::planning_interface::MoveGroupInterface::Plan plan;
-    move_group_.setPlanningTime(config_.planning_time_per_candidate);
+    const double remaining = std::chrono::duration<double>(
+      deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0.0) {
+      error = segment + " route deadline reached before endpoint planning";
+      return false;
+    }
+    move_group_.setPlanningTime(std::min(config_.planning_time_per_candidate, remaining));
     const auto result = move_group_.plan(plan);
     move_group_.setPlanningTime(10.0);
     if (result != moveit::core::MoveItErrorCode::SUCCESS) {
@@ -470,9 +479,15 @@ public:
     const std::vector<ClosedChainWaypoint> & controls,
     const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, const std::string & route,
-    const CancelFunction & canceled, std::string & error)
+    const CancelFunction & canceled, std::string & error,
+    const std::chrono::steady_clock::time_point & deadline =
+    std::chrono::steady_clock::time_point::max())
   {
     for (std::size_t index = 1; index < controls.size(); ++index) {
+      if (canceled() || std::chrono::steady_clock::now() >= deadline) {
+        error = route + " endpoint route canceled or deadline reached";
+        return false;
+      }
       const auto grasp = graspFromBoxToTcp(
         controls[index].pose, box_to_left_contact, box_to_right_contact, 0.0);
       moveit::core::RobotState target(state);
@@ -484,7 +499,7 @@ public:
         return false;
       }
       if (!appendJointSpacePlan(
-          trajectory, state, target, route, controls[index].segment, canceled, error))
+          trajectory, state, target, route, controls[index].segment, canceled, error, deadline))
       {
         return false;
       }
@@ -838,9 +853,12 @@ public:
   bool buildApproach(
     const moveit::core::RobotState & start, const GraspGeometry & target,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
-    const CancelFunction & canceled)
+    const CancelFunction & canceled,
+    const planning_scene::PlanningScenePtr & retreat_scene = nullptr,
+    std::chrono::steady_clock::time_point outer_deadline =
+    std::chrono::steady_clock::time_point::max())
   {
-    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+    if (!retreat_scene && config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       std::string error;
       moveit::core::RobotState endpoint(start);
       if (!solveDualArmEndpoint(
@@ -884,14 +902,24 @@ public:
     parameter_end.translation().x() = config_.pregrasp_distance;
     const std::vector<ClosedChainWaypoint> controls{
       {parameter_start, false, "approach"}, {parameter_end, false, "approach"}};
-    const auto deadline = std::chrono::steady_clock::now() +
+    const auto deadline = std::min(outer_deadline, std::chrono::steady_clock::now() +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-      std::chrono::duration<double>(config_.carry_search_timeout));
+      std::chrono::duration<double>(config_.carry_search_timeout)));
+    const auto collision_free = [this, &retreat_scene](moveit::core::RobotState & candidate) {
+        if (!retreat_scene) {
+          return planning_scene_.collisionFree(candidate, true, false);
+        }
+        collision_detection::CollisionRequest request;
+        request.group_name = config_.planning_group;
+        collision_detection::CollisionResult result;
+        retreat_scene->checkCollision(request, result, candidate);
+        return !result.collision;
+      };
     ClosedChainPath path;
     ClosedChainSearchReport report;
     const moveit::core::RobotState fixed_state(start);
     const ClosedChainSolve solve =
-      [this, &fixed_state, dual_group, &target](
+      [this, &fixed_state, dual_group, &target, &collision_free](
       const std::vector<double> & seed, const Eigen::Isometry3d & from_parameter_pose,
       const Eigen::Isometry3d & parameter_pose,
       std::size_t solution_limit, const std::chrono::steady_clock::time_point & solve_deadline,
@@ -991,7 +1019,7 @@ public:
             solve_report.detail = "approach TCP pose closure violated";
             continue;
           }
-          if (!planning_scene_.collisionFree(candidate, true, false)) {
+          if (!collision_free(candidate)) {
             solve_report.failure = ClosedChainFailure::COLLISION;
             continue;
           }
@@ -1016,7 +1044,7 @@ public:
             const Eigen::Isometry3d expected_right = interpolatePose(
               target.right_pregrasp, target.right_contact, approach_t);
             if (!interpolated.satisfiesBounds(dual_group) ||
-              !planning_scene_.collisionFree(interpolated, true, false) ||
+              !collision_free(interpolated) ||
               (interpolated.getGlobalLinkTransform(config_.left_tcp).translation() -
               expected_left.translation()).norm() > config_.closed_chain_contact_position_error ||
               (interpolated.getGlobalLinkTransform(config_.right_tcp).translation() -
@@ -1068,7 +1096,8 @@ public:
     if (canceled() || std::chrono::steady_clock::now() >= deadline) {
       return false;
     }
-    trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization;
+    trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization(
+      retreat_scene ? 0.01 : 0.1);
     if (!time_parameterization.computeTimeStamps(
         trajectory, config_.velocity_scaling, config_.acceleration_scaling))
     {
@@ -1652,7 +1681,7 @@ public:
       }
       const bool planned = appendPoseToPoseObjectPath(
         trajectory, state, controls, box_to_left_contact, box_to_right_contact,
-        route_name, canceled, error);
+        route_name, canceled, error, deadline);
       std::string restore_error;
       const bool restored = !ignore_box || planning_scene_.endVirtualAttachment(
         saved_box,
@@ -1738,12 +1767,13 @@ public:
     const Eigen::Isometry3d & box_to_right_contact,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     Eigen::Isometry3d & selected_pose, std::string & error,
-    const CancelFunction & canceled)
+    const CancelFunction & canceled, const PlaceContinuation & continuation)
   {
     const std::chrono::steady_clock::time_point deadline =
       std::chrono::steady_clock::now() +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-      std::chrono::duration<double>(config_.carry_search_timeout));
+      std::chrono::duration<double>(config_.carry_search_timeout +
+        (continuation ? config_.return_planning_timeout : 0.0)));
     const auto * dual_group = start.getJointModelGroup(move_group_.getName());
     struct Endpoint
     {
@@ -1829,9 +1859,15 @@ public:
           return false;
         }
         const auto remaining = std::chrono::duration<double>(deadline - now).count();
+        const auto endpoint_count = makePlaceRouteWaypoints(
+          from_pose, endpoint.pose, config_.lift_height, config_.carry_search_y_range,
+          from_pick, route).size() - 1U;
+        const double route_timeout = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE ?
+          endpointRouteTimeout(remaining, config_.planning_time_per_candidate, endpoint_count) :
+          std::min(1.25, remaining);
         const auto route_deadline = std::min(
           deadline, now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(std::min(1.25, remaining))));
+            std::chrono::duration<double>(route_timeout)));
         try {
           moveit_msgs::msg::RobotTrajectory trajectory;
           moveit::core::RobotState candidate_end(start);
@@ -1842,6 +1878,10 @@ public:
               candidate_error, route_deadline, canceled))
           {
             last_error = candidate_error;
+            continue;
+          }
+          if (continuation && !continuation(candidate_end, endpoint.pose, candidate_error)) {
+            last_error = "post-place continuation failed: " + candidate_error;
             continue;
           }
           output = std::move(trajectory);
@@ -2344,6 +2384,7 @@ public:
   }
 
 private:
+  friend class DualArmMotionPlanner;
   rclcpp::Node::SharedPtr node_;
   const PickPlaceConfig & config_;
   moveit::planning_interface::MoveGroupInterface & move_group_;
@@ -2381,6 +2422,46 @@ bool DualArmMotionPlanner::buildApproach(
   const CancelFunction & canceled)
 {
   return impl_->buildApproach(start, target, output, end_state, canceled);
+}
+
+bool DualArmMotionPlanner::buildRetreat(
+  const moveit::core::RobotState & start, const GraspGeometry & target,
+  const planning_scene::PlanningScenePtr & scene,
+  moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
+  std::string & error, const CancelFunction & canceled,
+  std::chrono::steady_clock::time_point deadline)
+{
+  auto contact = retreatContactScene(scene, impl_->config_);
+  moveit::core::RobotState empty_start(start);
+  empty_start.clearAttachedBody(impl_->config_.box_id);
+  if (!impl_->buildApproach(empty_start, target, output, end_state, canceled, contact, deadline)) {
+    error = "coordinated retreat search failed";
+    return false;
+  }
+  robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), impl_->config_.planning_group);
+  trajectory.setRobotTrajectoryMsg(empty_start, output);
+  const auto interrupted = [&]() {return canceled() || std::chrono::steady_clock::now() >= deadline;};
+  if (!validateReturnTrajectory(trajectory, contact, impl_->config_.return_validation_joint_step,
+      error, interrupted) ||
+    !validateTimedReturnTrajectory(trajectory, contact, impl_->config_.return_validation_joint_step,
+      error, interrupted))
+  {
+    return false;
+  }
+  // The free-space planner must never inherit disengagement contact allowances.
+  auto strict = planning_scene::PlanningScene::clone(scene);
+  strict->getAllowedCollisionMatrixNonConst().setEntry(impl_->config_.box_id, false);
+  strict->getAllowedCollisionMatrixNonConst().setDefaultEntry(impl_->config_.box_id, false);
+  robot_trajectory::RobotTrajectory endpoint(start.getRobotModel(), impl_->config_.planning_group);
+  endpoint.addSuffixWayPoint(trajectory.getLastWayPoint(), 0.0);
+  if (!validateReturnTrajectory(endpoint, strict, impl_->config_.return_validation_joint_step,
+      error, interrupted))
+  {
+    error = "retreat endpoint is not collision-free: " + error;
+    return false;
+  }
+  end_state = trajectory.getLastWayPoint();
+  return true;
 }
 
 GraspGeometry DualArmMotionPlanner::graspFromBoxToTcp(
@@ -2454,12 +2535,12 @@ bool DualArmMotionPlanner::planAdaptivePlace(
   const Eigen::Isometry3d & box_to_right_contact,
   moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
   Eigen::Isometry3d & selected_pose, std::string & error,
-  const CancelFunction & canceled)
+  const CancelFunction & canceled, const PlaceContinuation & continuation)
 {
   return impl_->planAdaptivePlace(
     start, from_pose, requested_pose, from_pick, ignore_box,
     box_to_left_contact, box_to_right_contact, output, end_state,
-    selected_pose, error, canceled);
+    selected_pose, error, canceled, continuation);
 }
 
 bool DualArmMotionPlanner::planPickPath(

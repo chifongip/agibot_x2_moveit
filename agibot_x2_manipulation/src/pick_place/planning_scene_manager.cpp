@@ -6,7 +6,9 @@
 #include <shape_msgs/msg/solid_primitive.hpp>
 #include <tf2_eigen/tf2_eigen.hpp>
 
+#include <algorithm>
 #include <exception>
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -69,6 +71,206 @@ std::vector<std::string> boxTouchLinks(const PickPlaceConfig & config)
 }
 
 }  // namespace
+
+planning_scene::PlanningScenePtr retreatContactScene(
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config)
+{
+  auto copy = planning_scene::PlanningScene::clone(scene);
+  copy->getCurrentStateNonConst().clearAttachedBody(config.box_id);
+  auto & acm = copy->getAllowedCollisionMatrixNonConst();
+  acm.setEntry(config.box_id, false);
+  acm.setDefaultEntry(config.box_id, false);
+  acm.setEntry(config.box_id, boxTouchLinks(config), true);
+  return copy;
+}
+
+bool buildResetSceneDiff(
+  const planning_scene::PlanningSceneConstPtr & scene, const std::string & box_prefix,
+  const std::string & table_id, moveit_msgs::msg::PlanningScene & diff, std::string & error)
+{
+  diff = moveit_msgs::msg::PlanningScene();
+  diff.is_diff = true;
+  diff.robot_state.is_diff = true;
+  if (!scene) {
+    error = "reset scene unavailable";
+    return false;
+  }
+  auto released = planning_scene::PlanningScene::clone(scene);
+  std::set<std::string> removed;
+  const auto managed = [&box_prefix](const std::string & id) {
+      return id == box_prefix || id.rfind(box_prefix + "_", 0) == 0;
+    };
+  std::vector<moveit_msgs::msg::AttachedCollisionObject> attached;
+  scene->getAttachedCollisionObjectMsgs(attached);
+  for (const auto & object : attached) {
+    if (!managed(object.object.id)) {
+      continue;
+    }
+    moveit_msgs::msg::AttachedCollisionObject detach;
+    detach.link_name = object.link_name;
+    detach.object.id = object.object.id;
+    detach.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    if (!released->processAttachedCollisionObjectMsg(detach)) {
+      error = "cannot preserve released reset box: " + object.object.id;
+      return false;
+    }
+    diff.robot_state.attached_collision_objects.push_back(detach);
+    removed.insert(object.object.id);
+  }
+  auto & acm = released->getAllowedCollisionMatrixNonConst();
+  for (const auto & id : released->getWorld()->getObjectIds()) {
+    if (managed(id) || id == table_id) {
+      removed.insert(id);
+    }
+  }
+  for (const auto & id : removed) {
+    moveit_msgs::msg::CollisionObject object;
+    object.id = id;
+    object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    diff.world.collision_objects.push_back(object);
+    acm.removeEntry(id);
+    acm.setDefaultEntry(id, false);
+  }
+  acm.getMessage(diff.allowed_collision_matrix);
+  return true;
+}
+
+bool buildDetectionSceneDiff(
+  const planning_scene::PlanningSceneConstPtr & scene, const std::string & box_prefix,
+  const std::string & table_id, const std::string & frame,
+  const DetectionSceneSnapshot & observations, const std::set<std::string> & protected_ids,
+  bool confirmed_release, moveit_msgs::msg::PlanningScene & diff, std::string & error)
+{
+  diff = moveit_msgs::msg::PlanningScene();
+  const auto managed = [&box_prefix](const std::string & id) {
+      return id == box_prefix || id.rfind(box_prefix + "_", 0) == 0;
+    };
+  std::vector<SceneBox> objects = observations.boxes;
+  if (observations.table) {
+    if (observations.table->id != table_id) {
+      error = "unexpected detection table ID";
+      return false;
+    }
+    objects.push_back(*observations.table);
+  }
+  std::set<std::string> ids;
+  for (const auto & box : objects) {
+    const auto & rotation = box.pose.linear();
+    if ((!managed(box.id) && box.id != table_id) || box.id.empty() ||
+      !ids.insert(box.id).second || protected_ids.count(box.id) != 0U ||
+      !box.pose.matrix().allFinite() ||
+      !(rotation.transpose() * rotation).isApprox(Eigen::Matrix3d::Identity(), 1e-6) ||
+      std::abs(rotation.determinant() - 1.0) > 1e-6 ||
+      !std::isfinite(box.dimensions.length) || box.dimensions.length <= 0.0 ||
+      !std::isfinite(box.dimensions.width) || box.dimensions.width <= 0.0 ||
+      !std::isfinite(box.dimensions.height) || box.dimensions.height <= 0.0)
+    {
+      error = "invalid detection snapshot object: " + box.id;
+      return false;
+    }
+  }
+  if (!scene) {
+    error = "detection scene unavailable";
+    return false;
+  }
+  auto protected_objects = protected_ids;
+  if (!confirmed_release) {
+    std::vector<const moveit::core::AttachedBody *> attached;
+    scene->getCurrentState().getAttachedBodies(attached);
+    for (const auto * body : attached) {
+      protected_objects.insert(body->getName());
+      if (ids.count(body->getName()) != 0U) {
+        error = "detection snapshot would overwrite attached object: " + body->getName();
+        return false;
+      }
+    }
+  }
+  if (confirmed_release) {
+    if (!protected_objects.empty()) {
+      error = "confirmed release cannot protect task objects";
+      return false;
+    }
+    if (!buildResetSceneDiff(scene, box_prefix, table_id, diff, error)) {
+      return false;
+    }
+    collision_detection::AllowedCollisionMatrix acm(diff.allowed_collision_matrix);
+    for (const auto & id : ids) {
+      acm.setEntry(id, false);
+      acm.setDefaultEntry(id, false);
+    }
+    acm.getMessage(diff.allowed_collision_matrix);
+  } else {
+    diff.is_diff = true;
+    diff.robot_state.is_diff = true;
+    auto acm = scene->getAllowedCollisionMatrix();
+    for (const auto & id : scene->getWorld()->getObjectIds()) {
+      if ((managed(id) || id == table_id) && protected_objects.count(id) == 0U) {
+        moveit_msgs::msg::CollisionObject removal;
+        removal.id = id;
+        removal.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+        diff.world.collision_objects.push_back(removal);
+        acm.removeEntry(id);
+        acm.setDefaultEntry(id, false);
+      }
+    }
+    // Ordinary detections never inherit grasp contact allowances.
+    for (const auto & id : ids) {
+      acm.setEntry(id, false);
+      acm.setDefaultEntry(id, false);
+    }
+    acm.getMessage(diff.allowed_collision_matrix);
+  }
+  for (const auto & box : objects) {
+    moveit_msgs::msg::CollisionObject object;
+    object.id = box.id;
+    object.header.frame_id = frame;
+    object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    shape_msgs::msg::SolidPrimitive primitive;
+    primitive.type = shape_msgs::msg::SolidPrimitive::BOX;
+    primitive.dimensions = {box.dimensions.length, box.dimensions.width, box.dimensions.height};
+    object.primitives.push_back(primitive);
+    object.primitive_poses.push_back(toPoseMsg(box.pose));
+    diff.world.collision_objects.push_back(object);
+  }
+  return true;
+}
+
+bool PlanningSceneManager::updateDetectionScene(
+  const DetectionSceneSnapshot & observations, const std::set<std::string> & protected_ids,
+  bool confirmed_release, std::string & error)
+{
+  if (!synchronize(error)) {
+    return false;
+  }
+  moveit_msgs::msg::PlanningScene diff;
+  if (!buildDetectionSceneDiff(snapshot(), managed_box_id_prefix_, config_.table_collision_id,
+      config_.planning_frame, observations, protected_ids, confirmed_release, diff, error))
+  {
+    return false;
+  }
+  if (!scene_interface_.applyPlanningScene(diff)) {
+    error = "MoveIt rejected detection scene update";
+    return false;
+  }
+  if (!synchronize(error)) {
+    return false;
+  }
+  owned_box_ids_ = protected_ids;
+  obstacle_box_ids_.clear();
+  for (const auto & box : observations.boxes) {
+    owned_box_ids_.insert(box.id);
+    obstacle_box_ids_.insert(box.id);
+  }
+  for (const auto & object : diff.world.collision_objects) {
+    const bool observed = std::any_of(observations.boxes.begin(), observations.boxes.end(),
+      [&object](const SceneBox & box) {return box.id == object.id;}) ||
+      (observations.table && observations.table->id == object.id);
+    RCLCPP_DEBUG(node_->get_logger(), "Detection scene %s: %s (%s)",
+      object.operation == moveit_msgs::msg::CollisionObject::REMOVE ? "remove" : "add/update",
+      object.id.c_str(), observed ? "fresh replacement" : "absent/stale detection");
+  }
+  return true;
+}
 
 moveit_msgs::msg::CollisionObject PlanningSceneManager::makeBoxObject(
   const std::string & id, const BoxDimensions & dimensions,
@@ -178,6 +380,23 @@ bool PlanningSceneManager::applyBox(const Eigen::Isometry3d & pose, std::string 
     error = "failed to apply the box collision object: " + std::string(exception.what());
     return false;
   }
+}
+
+planning_scene::PlanningScenePtr PlanningSceneManager::snapshot() const
+{
+  planning_scene_monitor::LockedPlanningSceneRO scene(scene_monitor_);
+  return planning_scene::PlanningScene::clone(scene);
+}
+
+planning_scene::PlanningScenePtr PlanningSceneManager::releasedBoxSnapshot(
+  const Eigen::Isometry3d & pose) const
+{
+  auto scene = snapshot();
+  scene->getCurrentStateNonConst().clearAttachedBody(config_.box_id);
+  if (!scene->processCollisionObjectMsg(makeBoxObject(config_.box_id, config_.dimensions, pose))) {
+    throw std::runtime_error("cannot place released box in return-planning snapshot");
+  }
+  return scene;
 }
 
 bool PlanningSceneManager::applyTable(const Eigen::Isometry3d & pose, std::string & error)
@@ -309,6 +528,54 @@ bool PlanningSceneManager::clearOwnedBoxes(std::string & error)
   }
   owned_box_ids_.clear();
   obstacle_box_ids_.clear();
+  return true;
+}
+
+bool PlanningSceneManager::prepareResetScene(std::string & error)
+{
+  if (!synchronize(error)) {
+    return false;
+  }
+  moveit_msgs::msg::PlanningScene diff;
+  if (!buildResetSceneDiff(snapshot(), managed_box_id_prefix_, config_.table_collision_id,
+      diff, error) ||
+    !scene_interface_.applyPlanningScene(diff))
+  {
+    if (error.empty()) {
+      error = "MoveIt rejected reset scene preparation";
+    }
+    return false;
+  }
+  owned_box_ids_.clear();
+  obstacle_box_ids_.clear();
+  return synchronize(error);
+}
+
+bool PlanningSceneManager::refreshResetBoxes(
+  const std::vector<SceneBox> & boxes, std::string & error)
+{
+  std::set<std::string> ids;
+  // Validate the entire batch before updating any obstacle. Reset preparation
+  // clears the previous detection snapshot before these fresh observations.
+  for (const auto & box : boxes) {
+    if (!isManagedBoxId(box.id) || !ids.insert(box.id).second ||
+      !box.pose.matrix().allFinite() ||
+      !std::isfinite(box.dimensions.length) || box.dimensions.length <= 0.0 ||
+      !std::isfinite(box.dimensions.width) || box.dimensions.width <= 0.0 ||
+      !std::isfinite(box.dimensions.height) || box.dimensions.height <= 0.0)
+    {
+      error = "invalid reset box observation";
+      return false;
+    }
+  }
+  for (const auto & box : boxes) {
+    if (!scene_interface_.applyCollisionObject(makeBoxObject(box.id, box.dimensions, box.pose))) {
+      error = "MoveIt rejected reset box observation: " + box.id;
+      return false;
+    }
+    owned_box_ids_.insert(box.id);
+    obstacle_box_ids_.insert(box.id);
+  }
   return true;
 }
 

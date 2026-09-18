@@ -7,6 +7,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <string>
+#include <vector>
 
 namespace agibot_x2_manipulation
 {
@@ -108,6 +109,15 @@ struct PickPlaceConfig
   std::string state_file;
   std::string initial_state;
   std::string post_place_named_target;
+  double return_planning_timeout{30.0};
+  double return_planning_time_per_attempt{2.0};
+  int return_ik_attempts{8};
+  double return_validation_joint_step{0.01};
+  double return_longest_valid_segment_fraction{0.005};
+  double return_path_tolerance{0.01};
+  std::vector<double> return_up_offsets{0.05, 0.10, 0.15, 0.20};
+  std::vector<double> return_back_offsets{0.0, 0.05, 0.10};
+  std::vector<double> return_out_offsets{0.0, 0.04};
   std::string reset_named_target;
   double reset_preemption_timeout{0.0};
   double reset_state_timeout{0.0};

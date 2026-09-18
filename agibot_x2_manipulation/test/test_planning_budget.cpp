@@ -26,5 +26,13 @@ TEST(PlanningBudget, RejectsExhaustedOrInvalidBudgets)
   EXPECT_DOUBLE_EQ(adaptiveRetryTimeout(30.0, 0.0, 0U), 0.0);
 }
 
+TEST(PlanningBudget, EndpointRouteIncludesEveryPlanAndSceneRoundTrips)
+{
+  EXPECT_DOUBLE_EQ(endpointRouteTimeout(30.0, 2.0, 3U), 8.0);
+  EXPECT_DOUBLE_EQ(endpointRouteTimeout(1.0, 2.0, 3U), 1.0);
+  EXPECT_DOUBLE_EQ(endpointRouteTimeout(0.0, 2.0, 3U), 0.0);
+  EXPECT_DOUBLE_EQ(endpointRouteTimeout(30.0, 2.0, 0U), 0.0);
+}
+
 }  // namespace
 }  // namespace agibot_x2_manipulation

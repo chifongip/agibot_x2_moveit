@@ -9,6 +9,7 @@
 #include "pick_place/pick_place_config.hpp"
 #include "pick_place/perception_synchronizer.hpp"
 #include "pick_place/planning_scene_manager.hpp"
+#include "pick_place/post_place_planner.hpp"
 #include "pick_place/trajectory_executor.hpp"
 
 #include <agibot_x2_manipulation_msgs/action/move_carry_pose.hpp>
@@ -179,6 +180,7 @@ public:
     move_group_.setMaxVelocityScalingFactor(config_.velocity_scaling);
     move_group_.setMaxAccelerationScalingFactor(config_.acceleration_scaling);
     move_group_.setPlanningTime(10.0);
+    post_place_planner_ = std::make_unique<PostPlacePlanner>(node_, config_, move_group_.getRobotModel());
     RCLCPP_INFO(
       node_->get_logger(), "Pick/place motion planning mode: %s",
       motionPlanningModeName(config_.motion_planning_mode));
@@ -453,8 +455,9 @@ private:
     return activateBoxProfile(box, error);
   }
 
-  bool updateVisibleBoxScene(
-    const std::string & target_instance_id, bool require_target, bool clear_owned_boxes,
+  bool collectFreshBoxes(
+    const std::string & target_instance_id, bool require_target,
+    DetectionSceneSnapshot & observations,
     std::vector<TrackedBoxPose> & visible_boxes, std::string & error)
   {
     visible_boxes.clear();
@@ -468,32 +471,22 @@ private:
       error = "selected box profile changed before planning";
       return false;
     }
-    if (clear_owned_boxes && !planning_scene_.clearManagedBoxes(error)) {
-      return false;
-    }
-    if (!config_.visible_boxes_as_obstacles) {
-      if (target != fresh_boxes.end()) {
-        visible_boxes.push_back(target->second);
-      }
-      return true;
-    }
-
-    std::vector<SceneBox> obstacles;
     for (const auto & entry : fresh_boxes) {
       const auto & tracked = entry.second;
       visible_boxes.push_back(tracked);
-      if (tracked.instance_id == target_instance_id) {
+      if (tracked.instance_id == target_instance_id || !config_.visible_boxes_as_obstacles) {
         continue;
       }
       const BoxProfile * profile = profiles_.find(tracked.profile_id);
-      if (!profile) {
+      if (!profile && !profiles_.empty()) {
         error = "visible box instance '" + tracked.instance_id +
           "' references an unknown profile: " + tracked.profile_id;
         return false;
       }
       try {
-        obstacles.push_back(
-          {collisionObjectId(tracked.instance_id), profile->dimensions,
+        observations.boxes.push_back(
+          {profile ? collisionObjectId(tracked.instance_id) : config_.box_id,
+            profile ? profile->dimensions : config_.dimensions,
             toEigen(stampedBoxPose(tracked).pose)});
       } catch (const std::exception & exception) {
         error = "invalid pose for visible box instance '" + tracked.instance_id +
@@ -501,7 +494,57 @@ private:
         return false;
       }
     }
-    return planning_scene_.applyObstacleBoxes(obstacles, error);
+    return true;
+  }
+
+  bool updateVisibleBoxScene(
+    const std::string & target_instance_id, bool require_target, bool clear_owned_boxes,
+    std::vector<TrackedBoxPose> & visible_boxes, std::string & error)
+  {
+    DetectionSceneSnapshot observations;
+    if (!collectFreshBoxes(target_instance_id, require_target, observations, visible_boxes, error) ||
+      !collectFreshTable(observations, error))
+    {
+      return false;
+    }
+    const std::set<std::string> protected_ids =
+      !clear_owned_boxes && !target_instance_id.empty() ?
+      std::set<std::string>{config_.box_id} : std::set<std::string>{};
+    return planning_scene_.updateDetectionScene(observations, protected_ids, false, error);
+  }
+
+  bool collectFreshTable(DetectionSceneSnapshot & observations, std::string & error)
+  {
+    if (config_.table_collision_enabled && table_tag_pose_tracker_) {
+      geometry_msgs::msg::PoseStamped tag_pose;
+      std::string observation_error;
+      if (table_tag_pose_tracker_->waitForStablePose(
+          0.0, []() {return false;}, tag_pose, observation_error))
+      {
+        try {
+          observations.table = SceneBox{config_.table_collision_id, config_.table_dimensions,
+            tablePoseFromVerticalTag(toEigen(tag_pose.pose), config_.table_dimensions,
+              config_.table_tag_to_tabletop_center)};
+        } catch (const std::exception & exception) {
+          error = "invalid fresh table observation: " + std::string(exception.what());
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  bool refreshResetScene(std::string & error, const CancelFunction & canceled)
+  {
+    if (canceled()) {
+      error = "reset scene refresh canceled";
+      return false;
+    }
+    DetectionSceneSnapshot observations;
+    std::vector<TrackedBoxPose> visible_boxes;
+    return collectFreshBoxes("", false, observations, visible_boxes, error) &&
+      collectFreshTable(observations, error) &&
+      planning_scene_.updateDetectionScene(observations, {}, true, error);
   }
 
   bool refreshSelectedBoxFromSnapshot(
@@ -627,22 +670,12 @@ private:
   bool synchronizeTableCollisionScene(
     std::string & error, const CancelFunction & canceled)
   {
-    if (!config_.table_collision_enabled) {
-      return true;
-    }
-    Eigen::Isometry3d tag_pose;
-    if (!waitForStableTableTagPose(tag_pose, error, canceled)) {
+    if (canceled()) {
+      error = "detection scene refresh canceled";
       return false;
     }
-    try {
-      return planning_scene_.applyTable(
-        tablePoseFromVerticalTag(
-          tag_pose, config_.table_dimensions, config_.table_tag_to_tabletop_center), error);
-    } catch (const std::exception & exception) {
-      error = "failed to derive table collision pose from Tag 9: " +
-        std::string(exception.what());
-      return false;
-    }
+    std::vector<TrackedBoxPose> visible_boxes;
+    return updateVisibleBoxScene(active_box_instance_id_, false, false, visible_boxes, error);
   }
 
   void publishTrackedTableMarker(const geometry_msgs::msg::PoseStamped & tag_pose)
@@ -1107,12 +1140,13 @@ private:
       return;
     }
     std::string error;
-    if (planning_scene_.clearManagedBoxes(error)) {
+    std::vector<TrackedBoxPose> visible_boxes;
+    if (updateVisibleBoxScene("", false, true, visible_boxes, error)) {
       active_visible_boxes_.clear();
       return;
     }
     const std::string cleanup_error =
-      "failed to remove server-managed collision objects: " + error;
+      "failed to reconcile detection obstacles after task cleanup: " + error;
     RCLCPP_ERROR(node_->get_logger(), "%s", cleanup_error.c_str());
     if (task.success) {
       task.success = false;
@@ -1361,7 +1395,9 @@ private:
           *carry_plan.end_state, carry_plan.pose, pick_place_target, false, true,
           candidate.candidate.box_to_left_contact,
           candidate.candidate.box_to_right_contact,
-          place_validation, place_end, selected_place_pose, continuation_error, canceled);
+          place_validation, place_end, selected_place_pose, continuation_error, canceled,
+          postPlaceContinuation(candidate.candidate.box_to_left_contact,
+            candidate.candidate.box_to_right_contact, canceled));
       };
     if (!motion_planner_.planPickPath(
         box_message, pick_pose, pregrasp_plan, approach, contact_end,
@@ -1511,6 +1547,139 @@ private:
     return outcome(true, kSuccess, "box picked and moved to carry pose", held_pose_);
   }
 
+  bool planPostPlaceSequence(
+    const moveit::core::RobotState & start, const Eigen::Isometry3d & pose,
+    const Eigen::Isometry3d & left, const Eigen::Isometry3d & right,
+    const planning_scene::PlanningScenePtr & scene, bool include_retreat,
+    PostPlacePlan & output, std::string & error, const CancelFunction & canceled,
+    std::chrono::steady_clock::time_point deadline)
+  {
+    output.segments.clear();
+    moveit::core::RobotState empty_start(start);
+    empty_start.clearAttachedBody(config_.box_id);
+    empty_start.update();
+    std::vector<const moveit::core::AttachedBody *> attached;
+    empty_start.getAttachedBodies(attached);
+    if (!attached.empty()) {
+      error = "post-place continuation blocked by attached object: " + attached.front()->getName();
+      return false;
+    }
+    if (!include_retreat) {
+      return post_place_planner_->plan(empty_start, {}, scene, false, output, error, canceled,
+        deadline, config_.post_place_named_target);
+    }
+    // Try farther coordinated disengagement endpoints if the nominal endpoint
+    // has no named-target continuation. All attempts share the original budget.
+    const std::vector<double> distances{1.0, 1.5, 2.0};
+    for (std::size_t attempt = 0; attempt < distances.size(); ++attempt) {
+      const auto now = std::chrono::steady_clock::now();
+      if (canceled() || now >= deadline) {
+        break;
+      }
+      const auto attempt_deadline = now + (deadline - now) /
+        static_cast<int>(distances.size() - attempt);
+      moveit::core::RobotState retreat_end(empty_start);
+      PostPlaceSegment retreat;
+      auto target = motion_planner_.graspFromBoxToTcp(
+        pose, left, right, config_.pregrasp_distance * distances[attempt]);
+      // Coordinated interpolation starts at actual TCPs, not approximate placement IK targets.
+      target.left_contact = target.left_pregrasp;
+      target.right_contact = target.right_pregrasp;
+      target.left_pregrasp = retreat_end.getGlobalLinkTransform(config_.left_tcp);
+      target.right_pregrasp = retreat_end.getGlobalLinkTransform(config_.right_tcp);
+      retreat.name = "coordinated_retreat";
+      retreat.retreat = true;
+      if (!motion_planner_.buildRetreat(retreat_end, target, scene, retreat.trajectory,
+          retreat_end, error, canceled, attempt_deadline))
+      {
+        continue;
+      }
+      PostPlacePlan named;
+      if (!post_place_planner_->plan(retreat_end, {}, scene, false, named, error, canceled,
+          attempt_deadline, config_.post_place_named_target))
+      {
+        continue;
+      }
+      output.segments.push_back(std::move(retreat));
+      output.segments.insert(output.segments.end(), named.segments.begin(), named.segments.end());
+      return true;
+    }
+    error = "no coordinated retreat with a valid named-target continuation: " + error;
+    return false;
+  }
+
+  bool validatePostPlaceSegment(
+    const PostPlaceSegment & segment, const moveit::core::RobotState & current,
+    const planning_scene::PlanningScenePtr & scene, std::string & error,
+    const CancelFunction & canceled)
+  {
+    if (!segment.retreat) {
+      return post_place_planner_->validateSegment(segment, current, scene, error, canceled, true);
+    }
+    std::vector<const moveit::core::AttachedBody *> attached;
+    current.getAttachedBodies(attached);
+    if (attached.empty()) {
+      scene->getCurrentState().getAttachedBodies(attached);
+    }
+    if (!attached.empty()) {
+      error = "coordinated retreat requires released arms";
+      return false;
+    }
+    robot_trajectory::RobotTrajectory trajectory(current.getRobotModel(), config_.planning_group);
+    trajectory.setRobotTrajectoryMsg(current, segment.trajectory);
+    if (trajectory.empty()) {
+      error = "empty coordinated retreat trajectory";
+      return false;
+    }
+    double maximum_start_error = 0.0;
+    for (const auto * joint : trajectory.getGroup()->getActiveJointModels()) {
+      maximum_start_error = std::max(maximum_start_error, joint->distance(
+          current.getJointPositions(joint), trajectory.getFirstWayPoint().getJointPositions(joint)));
+    }
+    if (maximum_start_error > config_.execution_joint_tolerance) {
+      error = "measured retreat start differs from planned start";
+      return false;
+    }
+    auto contact = retreatContactScene(scene, config_);
+    if (!validateTimedReturnTrajectory(trajectory, contact, config_.return_validation_joint_step,
+        error, canceled))
+    {
+      return false;
+    }
+    trajectory.addPrefixWayPoint(current, 0.0);
+    if (!validateReturnTrajectory(trajectory, contact, config_.return_validation_joint_step,
+        error, canceled))
+    {
+      return false;
+    }
+    contact->getAllowedCollisionMatrixNonConst().setEntry(config_.box_id, false);
+    contact->getAllowedCollisionMatrixNonConst().setDefaultEntry(config_.box_id, false);
+    robot_trajectory::RobotTrajectory endpoint(current.getRobotModel(), config_.planning_group);
+    endpoint.addSuffixWayPoint(trajectory.getLastWayPoint(), 0.0);
+    return validateReturnTrajectory(endpoint, contact, config_.return_validation_joint_step,
+      error, canceled);
+  }
+
+  PlaceContinuation postPlaceContinuation(
+    const Eigen::Isometry3d & left, const Eigen::Isometry3d & right,
+    const CancelFunction & canceled)
+  {
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(config_.return_planning_timeout));
+    return [this, left, right, canceled, deadline](
+      const moveit::core::RobotState & release_state, const Eigen::Isometry3d & pose,
+      std::string & error) {
+        PostPlacePlan plan;
+        const bool feasible = planPostPlaceSequence(release_state, pose, left, right,
+          planning_scene_.releasedBoxSnapshot(pose), true, plan, error, canceled, deadline);
+        if (!feasible) {
+          RCLCPP_WARN(node_->get_logger(), "Post-place preflight rejected placement: %s", error.c_str());
+        }
+        return feasible;
+      };
+  }
+
   TaskOutcome runPlace(
     const geometry_msgs::msg::PoseStamped & requested_pose, bool plan_only,
     const FeedbackFunction & feedback, const CancelFunction & canceled)
@@ -1572,7 +1741,8 @@ private:
     Eigen::Isometry3d selected_place_pose = place_pose;
     if (!motion_planner_.planAdaptivePlace(
         *current, from_pose, place_pose, false, false, held_box_to_left_contact_,
-        held_box_to_right_contact_, transport, place_end, selected_place_pose, error, canceled))
+        held_box_to_right_contact_, transport, place_end, selected_place_pose, error, canceled,
+        postPlaceContinuation(held_box_to_left_contact_, held_box_to_right_contact_, canceled)))
     {
       return outcome(
         false, kPlanningFailed, "adaptive closed-chain place planning failed: " + error,
@@ -1584,7 +1754,7 @@ private:
       return outcome(false, kSafetyAbort, "place canceled after planning", held_pose_);
     }
     if (plan_only) {
-      return outcome(true, kSuccess, "place path is feasible", place_message);
+      return outcome(true, kSuccess, "place, retreat, and return path is feasible", place_message);
     }
     if (canceled()) {
       return outcome(false, kExecutionFailed, "place canceled before motion", held_pose_);
@@ -1627,80 +1797,69 @@ private:
         false, kExecutionFailed, "box placed, but retreat was canceled", place_message);
     }
 
-    const auto place_grasp = motion_planner_.graspFromBoxToTcp(
-      place_pose, held_box_to_left_contact_, held_box_to_right_contact_, config_.pregrasp_distance);
-    current = move_group_.getCurrentState(2.0);
-    if (!current) {
-      return outcome(
-        false, kSafetyAbort, "box placed, but current state is unavailable",
-        place_message);
-    }
-    GraspGeometry retreat_target = place_grasp;
-    std::swap(retreat_target.left_contact, retreat_target.left_pregrasp);
-    std::swap(retreat_target.right_contact, retreat_target.right_pregrasp);
-    moveit_msgs::msg::RobotTrajectory retreat;
-    moveit::core::RobotState retreat_end(*current);
-    feedback("retreating", 0.80F, place_message);
-    if (!motion_planner_.buildApproach(*current, retreat_target, retreat, retreat_end, canceled)) {
-      return outcome(
-        false, kExecutionFailed, "box placed, but retreat planning failed",
-        place_message);
-    }
-    if (canceled()) {
-      return outcome(
-        false, kExecutionFailed, "box placed, but retreat was canceled",
-        place_message);
-    }
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
-      return outcome(false, kSafetyAbort, error, place_message);
-    }
-    if (!trajectory_executor_.execute(retreat, canceled)) {
-      return outcome(
-        false, kExecutionFailed, trajectory_executor_.error(
-          "box placed, but retreat failed"), place_message);
-    }
     held_pose_ = geometry_msgs::msg::PoseStamped();
-    if (canceled()) {
-      setState(ManipulationState::EMPTY, "box placed; return to zero canceled");
-      return outcome(
-        false, kExecutionFailed, "box placed, but return to zero was canceled", place_message);
+    PostPlacePlan return_plan;
+    bool include_retreat = true;
+    std::size_t segment_index = 0;
+    int replans = 0;
+    const auto plan_remaining = [&]() {
+        if (!planning_scene_.synchronize(error)) {
+          return false;
+        }
+        current = move_group_.getCurrentState(config_.reset_state_timeout);
+        if (!current) {
+          error = "measured return state is unavailable";
+          return false;
+        }
+        const auto deadline = std::chrono::steady_clock::now() +
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(config_.return_planning_timeout));
+        return planPostPlaceSequence(*current, place_pose,
+          held_box_to_left_contact_, held_box_to_right_contact_, planning_scene_.snapshot(),
+          include_retreat, return_plan, error, canceled, deadline);
+      };
+    feedback("planning_return", 0.80F, place_message);
+    if (!plan_remaining()) {
+      setState(ManipulationState::EMPTY, "box placed; return planning failed: " + error);
+      return outcome(false, kPlanningFailed,
+        "box placed, but return planning failed: " + error, place_message);
     }
-
-    feedback("returning_to_zero", 0.92F, place_message);
-    current = move_group_.getCurrentState(2.0);
-    if (!current) {
-      setState(ManipulationState::EMPTY, "box placed; current state unavailable for zero motion");
-      return outcome(
-        false, kSafetyAbort, "box placed, but current state is unavailable before zero motion",
-        place_message);
-    }
-    move_group_.setStartState(*current);
-    move_group_.clearPoseTargets();
-    if (!move_group_.setNamedTarget(config_.post_place_named_target)) {
-      setState(ManipulationState::EMPTY, "box placed; zero target is unavailable");
-      return outcome(
-        false, kPlanningFailed, "box placed, but the zero target is unavailable", place_message);
-    }
-    moveit::planning_interface::MoveGroupInterface::Plan zero_plan;
-    if (move_group_.plan(zero_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-      setState(ManipulationState::EMPTY, "box placed; return-to-zero planning failed");
-      return outcome(
-        false, kPlanningFailed, "box placed, but return-to-zero planning failed", place_message);
-    }
-    if (canceled()) {
-      setState(ManipulationState::EMPTY, "box placed; return to zero canceled after planning");
-      return outcome(
-        false, kExecutionFailed, "box placed, but return to zero was canceled", place_message);
-    }
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
-      return outcome(false, kSafetyAbort, error, place_message);
-    }
-    if (!trajectory_executor_.execute(zero_plan, canceled)) {
-      setState(ManipulationState::EMPTY, "box placed; return-to-zero execution failed");
-      return outcome(
-        false, kExecutionFailed,
-        trajectory_executor_.error("box placed, but return-to-zero execution failed"),
-        place_message);
+    while (segment_index < return_plan.segments.size()) {
+      if (canceled()) {
+        return outcome(false, kExecutionFailed, "box placed, but return canceled", place_message);
+      }
+      if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error) ||
+        !planning_scene_.synchronize(error))
+      {
+        return outcome(false, kSafetyAbort, error, place_message);
+      }
+      current = move_group_.getCurrentState(config_.reset_state_timeout);
+      if (!current) {
+        return outcome(false, kSafetyAbort,
+          "box placed, but measured return state is unavailable", place_message);
+      }
+      const auto & segment = return_plan.segments[segment_index];
+      if (!validatePostPlaceSegment(
+          segment, *current, planning_scene_.snapshot(), error, canceled))
+      {
+        if (++replans > 2 || !plan_remaining()) {
+          setState(ManipulationState::EMPTY, "box placed; return revalidation failed: " + error);
+          return outcome(false, kPlanningFailed,
+            "box placed, but return revalidation failed: " + error, place_message);
+        }
+        segment_index = 0;
+        continue;
+      }
+      feedback(segment.retreat ? "retreating" : "returning_to_zero", 0.90F, place_message);
+      if (!trajectory_executor_.execute(segment.trajectory, canceled)) {
+        setState(ManipulationState::EMPTY, "box placed; return execution failed");
+        return outcome(false, kExecutionFailed,
+          trajectory_executor_.error("box placed, but return execution failed"), place_message);
+      }
+      if (segment.retreat) {
+        include_retreat = false;
+      }
+      ++segment_index;
     }
     if (canceled()) {
       setState(ManipulationState::EMPTY, "box placed; reset requested after return to zero");
@@ -1799,7 +1958,9 @@ private:
           *carry_plan.end_state, carry_plan.pose, place_pose, false, true,
           candidate.candidate.box_to_left_contact,
           candidate.candidate.box_to_right_contact,
-          transport, place_end, selected_place_pose, continuation_error, canceled);
+          transport, place_end, selected_place_pose, continuation_error, canceled,
+          postPlaceContinuation(candidate.candidate.box_to_left_contact,
+            candidate.candidate.box_to_right_contact, canceled));
       };
     if (!motion_planner_.planPickPath(
         box_message, pick_pose, pregrasp_plan, approach, contact_end,
@@ -1866,7 +2027,6 @@ private:
         }
         if (clear_reset_latch) {
           reset_physical_detach_done_ = false;
-          reset_scene_cleanup_done_ = false;
         }
         reset_coordinator_.finishReset(clear_reset_latch);
         if (canceling) {
@@ -1905,7 +2065,7 @@ private:
 
     try {
       std::string error;
-      feedback("clearing_scene", 0.20F);
+      feedback("preparing_scene", 0.20F);
       if (!reset_physical_detach_done_) {
         if (attachment_.simulated() && attachment_.expected() &&
           !attachment_.detach(error))
@@ -1920,15 +2080,7 @@ private:
         fail(ResetManipulation::Result::CANCELED, "reset canceled during physical cleanup");
         return;
       }
-      if (!reset_scene_cleanup_done_) {
-        if (!planning_scene_.clearBox(error)) {
-          fail(ResetManipulation::Result::CLEANUP_FAILED, error);
-          return;
-        }
-        reset_scene_cleanup_done_ = true;
-      }
       held_pose_ = geometry_msgs::msg::PoseStamped();
-      box_pose_tracker_.clear();
       motion_planner_.clearGraspMarkers();
       move_group_.clearPoseTargets();
 
@@ -1942,9 +2094,7 @@ private:
         fail(ResetManipulation::Result::CLEANUP_FAILED, error);
         return;
       }
-      if (!synchronizeTableCollisionScene(
-          error, [goal]() {return goal->is_canceling();}))
-      {
+      if (!refreshResetScene(error, [goal]() {return goal->is_canceling();})) {
         fail(ResetManipulation::Result::CLEANUP_FAILED, error);
         return;
       }
@@ -1953,47 +2103,64 @@ private:
         return;
       }
 
-      feedback("planning_zero", 0.50F);
-      auto current = move_group_.getCurrentState(config_.reset_state_timeout);
-      if (!current) {
-        fail(ResetManipulation::Result::STATE_UNAVAILABLE, "current robot state unavailable");
-        return;
-      }
-      current->update();
-      move_group_.setStartState(*current);
-      move_group_.clearPoseTargets();
-      if (!move_group_.setNamedTarget(config_.reset_named_target)) {
-        fail(
-          ResetManipulation::Result::PLANNING_FAILED,
-          "configured reset named target is unavailable");
-        return;
-      }
-      moveit::planning_interface::MoveGroupInterface::Plan reset_plan;
-      if (move_group_.plan(reset_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-        fail(
-          ResetManipulation::Result::PLANNING_FAILED,
-          "collision-checked planning to the reset target failed");
-        return;
-      }
-      if (goal->is_canceling()) {
-        fail(ResetManipulation::Result::CANCELED, "reset canceled before zero execution");
-        return;
-      }
-
-      feedback("executing_zero", 0.70F);
-      trajectory_executor_.resetCancellation();
+      const CancelFunction canceled = [goal]() {return goal->is_canceling();};
+      PostPlacePlan reset_plan;
+      uint16_t planning_failure_code = ResetManipulation::Result::PLANNING_FAILED;
       std::map<std::string, double> settled_reset_positions;
-      if (!trajectory_executor_.execute(
-          reset_plan, [goal]() {return goal->is_canceling();}, &settled_reset_positions))
-      {
-        const std::string message = goal->is_canceling() ?
-          "reset canceled during zero execution" :
-          trajectory_executor_.error("execution to the reset target failed");
-        fail(
-          goal->is_canceling() ? ResetManipulation::Result::CANCELED :
-          ResetManipulation::Result::EXECUTION_FAILED,
-          message);
+      trajectory_executor_.resetCancellation();
+      const auto plan_reset = [&]() {
+          auto current = move_group_.getCurrentState(config_.reset_state_timeout);
+          if (!current) {
+            planning_failure_code = ResetManipulation::Result::STATE_UNAVAILABLE;
+            error = "current robot state unavailable";
+            return false;
+          }
+          planning_failure_code = ResetManipulation::Result::PLANNING_FAILED;
+          return post_place_planner_->planToNamedTarget(*current, planning_scene_.snapshot(),
+            config_.reset_named_target, reset_plan, error, canceled);
+        };
+      feedback("planning_zero", 0.50F);
+      if (!plan_reset()) {
+        fail(canceled() ? ResetManipulation::Result::CANCELED :
+          planning_failure_code, "reset planning failed: " + error);
         return;
+      }
+      std::size_t segment_index = 0;
+      int replans = 0;
+      while (segment_index < reset_plan.segments.size()) {
+        if (canceled()) {
+          fail(ResetManipulation::Result::CANCELED, "reset canceled before execution");
+          return;
+        }
+        if (!refreshResetScene(error, canceled)) {
+          fail(ResetManipulation::Result::CLEANUP_FAILED, error);
+          return;
+        }
+        auto current = move_group_.getCurrentState(config_.reset_state_timeout);
+        if (!current) {
+          fail(ResetManipulation::Result::STATE_UNAVAILABLE, "current robot state unavailable");
+          return;
+        }
+        const auto & segment = reset_plan.segments[segment_index];
+        if (!post_place_planner_->validateSegment(
+            segment, *current, planning_scene_.snapshot(), error, canceled, true))
+        {
+          if (++replans > 2 || !plan_reset()) {
+            fail(canceled() ? ResetManipulation::Result::CANCELED :
+              planning_failure_code, "reset revalidation failed: " + error);
+            return;
+          }
+          segment_index = 0;
+          continue;
+        }
+        feedback("executing_zero", 0.70F);
+        if (!trajectory_executor_.execute(segment.trajectory, canceled, &settled_reset_positions)) {
+          fail(canceled() ? ResetManipulation::Result::CANCELED :
+            ResetManipulation::Result::EXECUTION_FAILED,
+            trajectory_executor_.error("execution to the reset target failed"));
+          return;
+        }
+        ++segment_index;
       }
 
       feedback("verifying", 0.90F);
@@ -2012,11 +2179,13 @@ private:
       }
 
       held_pose_ = geometry_msgs::msg::PoseStamped();
-      setState(ManipulationState::EMPTY, "reset complete; arms at zero", true, true);
+      setState(
+        ManipulationState::EMPTY, "reset complete; arms at " + config_.reset_named_target,
+        true, true);
       feedback("complete", 1.0F);
       finish(
         true, ResetManipulation::Result::SUCCESS,
-        "manipulation state cleared and arms returned to zero", true);
+        "manipulation state cleared and arms reached " + config_.reset_named_target, true);
     } catch (const std::exception & exception) {
       fail(
         ResetManipulation::Result::CLEANUP_FAILED,
@@ -2192,7 +2361,6 @@ private:
   std::vector<TrackedBoxPose> active_visible_boxes_;
   std::map<std::string, double> reset_target_values_;
   bool reset_physical_detach_done_{false};
-  bool reset_scene_cleanup_done_{false};
   ResetCoordinator reset_coordinator_;
   std::atomic<uint8_t> state_{ManipulationState::UNKNOWN};
   std::mutex state_mutex_;
@@ -2204,6 +2372,7 @@ private:
   AttachmentController attachment_;
   TrajectoryExecutor trajectory_executor_;
   DualArmMotionPlanner motion_planner_;
+  std::unique_ptr<PostPlacePlanner> post_place_planner_;
   rclcpp::Publisher<ManipulationState>::SharedPtr state_pub_;
   rclcpp_action::Server<Pick>::SharedPtr pick_action_server_;
   rclcpp_action::Server<Place>::SharedPtr place_action_server_;
