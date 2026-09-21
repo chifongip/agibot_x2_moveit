@@ -1671,6 +1671,17 @@ private:
       return post_place_planner_->plan(empty_start, {}, scene, false, output, error, canceled,
         deadline, config_.post_place_named_target);
     }
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+      // Pose-to-pose mode has no closed-chain constraint to preserve after
+      // release. Plan the one requested disengagement pose, followed by the
+      // named target, instead of searching closed-chain retreat variants.
+      const auto retreat = motion_planner_.graspFromBoxToTcp(
+        pose, left, right, config_.pregrasp_distance);
+      const HandPosePair retreat_target{retreat.left_pregrasp, retreat.right_pregrasp};
+      return post_place_planner_->plan(
+        empty_start, retreat_target, scene, true, output, error, canceled, deadline,
+        config_.post_place_named_target);
+    }
     // Try farther coordinated disengagement endpoints if the nominal endpoint
     // has no named-target continuation. Each complete retreat/return attempt
     // may use the remaining global budget: splitting that budget before the

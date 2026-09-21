@@ -17,6 +17,9 @@ namespace agibot_x2_manipulation
 namespace
 {
 
+constexpr double kControllerSplineValidationPeriod = 0.02;
+constexpr double kControllerSplineSpatialOversampling = 2.0;
+
 double maximumJointDistance(
   const moveit::core::RobotState & a, const moveit::core::RobotState & b,
   const moveit::core::JointModelGroup * group)
@@ -152,15 +155,26 @@ bool validateTimedReturnTrajectory(
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
   std::string & error, const CancelFunction & interrupted)
 {
-  if (!validateReturnTrajectory(trajectory, scene, joint_step, error, interrupted)) {
+  if (!std::isfinite(joint_step) || joint_step <= 0.0 || trajectory.empty() ||
+    !trajectory.getGroup())
+  {
+    error = "empty return trajectory or invalid validation group";
+    return false;
+  }
+  moveit::core::RobotState first(trajectory.getFirstWayPoint());
+  if (!validState(first, scene, trajectory.getGroup(), error)) {
+    error = "return trajectory start invalid: " + error;
     return false;
   }
   moveit_msgs::msg::RobotTrajectory message;
   trajectory.getRobotTrajectoryMsg(message);
   const auto & joints = message.joint_trajectory;
+  if (joints.joint_names.empty() || joints.points.empty()) {
+    error = "return trajectory has no joint samples";
+    return false;
+  }
   joint_trajectory_controller::Trajectory controller;
-  robot_trajectory::RobotTrajectory sampled(trajectory.getRobotModel(), trajectory.getGroupName());
-  sampled.addSuffixWayPoint(trajectory.getFirstWayPoint(), 0.0);
+  const auto * group = trajectory.getGroup();
   for (std::size_t index = 1; index < joints.points.size(); ++index) {
     const auto & a = joints.points[index - 1];
     const auto & b = joints.points[index];
@@ -197,15 +211,21 @@ bool validateTimedReturnTrajectory(
       travel_bound = std::max(travel_bound, bound);
     }
     // Sample the controller's cubic/quintic spline, including overshoot with
-    // identical endpoint positions. The derivative bound also limits joint
-    // increments; temporal sampling matches the 100 Hz controller or finer.
+    // identical endpoint positions. The derivative bound limits the joint
+    // increment to at most half the configured geometric validation step.
+    // This is deliberately less dense than the controller update rate: MoveIt
+    // has already validated the OMPL path, and this pass covers interpolation
+    // that the controller adds between those waypoints.
     const double step_count = std::max(
-      1.0, std::ceil(std::max(duration / 0.01, 10.0 * travel_bound / joint_step)));
+      1.0, std::ceil(std::max(
+        duration / kControllerSplineValidationPeriod,
+        kControllerSplineSpatialOversampling * travel_bound / joint_step)));
     if (!std::isfinite(step_count) || step_count > 1000000.0) {
       error = "return controller spline exceeds validation sample budget";
       return false;
     }
     const auto steps = static_cast<std::size_t>(step_count);
+    moveit::core::RobotState state(trajectory.getFirstWayPoint());
     for (std::size_t sample = 1; sample <= steps; ++sample) {
       if (interrupted()) {
         error = "controller spline validation interrupted";
@@ -215,14 +235,20 @@ bool validateTimedReturnTrajectory(
       const auto sample_time = time_a + rclcpp::Duration::from_seconds(
         duration * static_cast<double>(sample) / steps);
       controller.interpolate_between_points(time_a, a, time_b, b, sample_time, point);
-      moveit::core::RobotState state(trajectory.getFirstWayPoint());
+      if (point.positions.size() != joints.joint_names.size() ||
+        !std::all_of(point.positions.begin(), point.positions.end(),
+        [](double value) {return std::isfinite(value);}))
+      {
+        error = "controller spline invalid: non-finite or incomplete joint position";
+        return false;
+      }
       state.setVariablePositions(joints.joint_names, point.positions);
-      sampled.addSuffixWayPoint(state, duration / steps);
+      if (!validState(state, scene, group, error)) {
+        error = "controller spline invalid: segment " + std::to_string(index) +
+          " sample " + std::to_string(sample) + "/" + std::to_string(steps) + ": " + error;
+        return false;
+      }
     }
-  }
-  if (!validateReturnTrajectory(sampled, scene, joint_step, error, interrupted)) {
-    error = "controller spline invalid: " + error;
-    return false;
   }
   return true;
 }
@@ -448,21 +474,28 @@ bool PostPlacePlanner::plan(
     error = "return named target invalid: " + error;
     return false;
   }
+  const bool direct_pose_to_pose =
+    config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE;
   Eigen::Vector3d up = Eigen::Vector3d::UnitZ();
   Eigen::Vector3d back(-1.0, 0.0, 0.0);
-  const auto table = strict->getWorld()->getObject(config_.table_collision_id);
-  if (table && !table->global_shape_poses_.empty()) {
-    const auto & pose = table->global_shape_poses_.front();
-    up = pose.linear().col(2);
-    back = -pose.translation();
-    back -= up * back.dot(up);
-    if (back.norm() < 1e-6) {
-      back = -pose.linear().col(0);
+  if (!direct_pose_to_pose) {
+    const auto table = strict->getWorld()->getObject(config_.table_collision_id);
+    if (table && !table->global_shape_poses_.empty()) {
+      const auto & pose = table->global_shape_poses_.front();
+      up = pose.linear().col(2);
+      back = -pose.translation();
+      back -= up * back.dot(up);
+      if (back.norm() < 1e-6) {
+        back = -pose.linear().col(0);
+      }
+      back.normalize();
     }
-    back.normalize();
   }
-  // Retry retreat branches when the complete continuation is infeasible.
-  for (int attempt = 0; attempt < config_.return_ik_attempts && !interrupted(); ++attempt) {
+  // Pose-to-pose mode has a single requested retreat endpoint. Closed-chain
+  // mode retains its alternate IK and clearance search because its object
+  // constraint can make the direct return infeasible.
+  const int branch_attempts = direct_pose_to_pose ? 1 : config_.return_ik_attempts;
+  for (int attempt = 0; attempt < branch_attempts && !interrupted(); ++attempt) {
     moveit::core::RobotState retreat_end(start);
     PostPlacePlan candidate;
     if (include_retreat) {
@@ -483,6 +516,9 @@ bool PostPlacePlanner::plan(
       trace("selected", true, "direct return; elapsed=" +
         std::to_string(std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count()));
       return true;
+    }
+    if (direct_pose_to_pose) {
+      break;
     }
     HandPosePair hands{retreat_end.getGlobalLinkTransform(config_.left_tcp),
       retreat_end.getGlobalLinkTransform(config_.right_tcp)};

@@ -36,6 +36,7 @@ def generate_test_description():
                 "table_collision_id": "work_table",
                 "velocity_scaling": 0.1,
                 "acceleration_scaling": 0.1,
+                "motion_planning_mode": "pose_to_pose",
                 "planning_log_directory": "/tmp/x2-post-place-replay-traces",
             },
         ],
