@@ -1428,8 +1428,7 @@ private:
 
   TaskOutcome runPick(
     bool plan_only, const std::string & instance_id, const FeedbackFunction & feedback,
-    const CancelFunction & canceled,
-    const geometry_msgs::msg::PoseStamped * requested_place = nullptr)
+    const CancelFunction & canceled)
   {
     if (canceled()) {
       return outcome(false, kSafetyAbort, "pick canceled before validation");
@@ -1455,20 +1454,8 @@ private:
     }
     const geometry_msgs::msg::PoseStamped box_message = stampedBoxPose(tracked_box);
     Eigen::Isometry3d pick_pose;
-    Eigen::Isometry3d pick_place_target = Eigen::Isometry3d::Identity();
     try {
       pick_pose = toEigen(box_message.pose);
-      if (requested_place) {
-        geometry_msgs::msg::PoseStamped transformed_place;
-        std::string transform_error;
-        if (!resolvePlacePose(
-            *requested_place, transformed_place,
-            transform_error, canceled))
-        {
-          return outcome(false, kInvalidGoal, transform_error);
-        }
-        pick_place_target = toEigen(transformed_place.pose);
-      }
     } catch (const std::exception & exception) {
       return outcome(false, kInvalidGoal, exception.what());
     }
@@ -1497,7 +1484,7 @@ private:
     const Eigen::Isometry3d nominal_carry_pose =
       carryPose(MoveCarryPose::Goal::CARRY_A);
     const ContinuationFunction carry_validator =
-      [this, &pick_pose, &pick_place_target, requested_place, &carry_plan, &canceled,
+      [this, &pick_pose, &carry_plan, &canceled,
       nominal_carry_pose](
       const moveit::core::RobotState & candidate_contact,
       const PlannedGrasp & candidate, std::string & continuation_error) {
@@ -1513,19 +1500,7 @@ private:
           }
           return false;
         }
-        if (!requested_place) {
-          return true;
-        }
-        moveit_msgs::msg::RobotTrajectory place_validation;
-        moveit::core::RobotState place_end(*carry_plan.end_state);
-        Eigen::Isometry3d selected_place_pose = pick_place_target;
-        return motion_planner_.planAdaptivePlace(
-          *carry_plan.end_state, carry_plan.pose, pick_place_target, false, true,
-          candidate.candidate.box_to_left_contact,
-          candidate.candidate.box_to_right_contact,
-          place_validation, place_end, selected_place_pose, continuation_error, canceled,
-          postPlaceContinuation(candidate.candidate.box_to_left_contact,
-            candidate.candidate.box_to_right_contact, canceled));
+        return true;
       };
     if (!motion_planner_.planPickPath(
         box_message, pick_pose, pregrasp_plan, approach, contact_end,
@@ -1697,15 +1672,17 @@ private:
         deadline, config_.post_place_named_target);
     }
     // Try farther coordinated disengagement endpoints if the nominal endpoint
-    // has no named-target continuation. All attempts share the original budget.
+    // has no named-target continuation. Each complete retreat/return attempt
+    // may use the remaining global budget: splitting that budget before the
+    // named-target search can reject a feasible pair merely because retreat
+    // generation consumed its arbitrary per-attempt slice.
     const std::vector<double> distances{1.0, 1.5, 2.0};
     for (std::size_t attempt = 0; attempt < distances.size(); ++attempt) {
       const auto now = std::chrono::steady_clock::now();
       if (canceled() || now >= deadline) {
         break;
       }
-      const auto attempt_deadline = now + (deadline - now) /
-        static_cast<int>(distances.size() - attempt);
+      const auto attempt_deadline = deadline;
       moveit::core::RobotState retreat_end(empty_start);
       PostPlaceSegment retreat;
       auto target = motion_planner_.graspFromBoxToTcp(
@@ -1774,8 +1751,10 @@ private:
     {
       return false;
     }
-    trajectory.addPrefixWayPoint(current, 0.0);
-    if (!validateReturnTrajectory(trajectory, contact, config_.return_validation_joint_step,
+    robot_trajectory::RobotTrajectory start_edge(current.getRobotModel(), config_.planning_group);
+    start_edge.addSuffixWayPoint(current, 0.0);
+    start_edge.addSuffixWayPoint(trajectory.getFirstWayPoint(), 0.0);
+    if (!validateReturnTrajectory(start_edge, contact, config_.return_validation_joint_step,
         error, canceled))
     {
       return false;
@@ -1867,10 +1846,13 @@ private:
     moveit_msgs::msg::RobotTrajectory transport;
     moveit::core::RobotState place_end(*current);
     Eigen::Isometry3d selected_place_pose = place_pose;
+    const PlaceContinuation return_preflight = plan_only ?
+      postPlaceContinuation(held_box_to_left_contact_, held_box_to_right_contact_, canceled) :
+      PlaceContinuation{};
     if (!motion_planner_.planAdaptivePlace(
         *current, from_pose, place_pose, false, false, held_box_to_left_contact_,
         held_box_to_right_contact_, transport, place_end, selected_place_pose, error, canceled,
-        postPlaceContinuation(held_box_to_left_contact_, held_box_to_right_contact_, canceled)))
+        return_preflight))
     {
       return outcome(
         false, kPlanningFailed, "adaptive closed-chain place planning failed: " + error,
@@ -2095,9 +2077,6 @@ private:
         selected_grasp, transport_validator, error, canceled))
     {
       return outcome(false, kPlanningFailed, error);
-    }
-    if (canceled()) {
-      return outcome(false, kSafetyAbort, "PickPlace planning canceled after pregrasp planning");
     }
     if (canceled()) {
       return outcome(false, kSafetyAbort, "PickPlace planning canceled after transport planning");
@@ -2435,8 +2414,7 @@ private:
             message->box_pose = pose;
             goal->publish_feedback(message);
           };
-        task = runPick(
-          false, goal->get_goal()->instance_id, pick_feedback, canceled, &place_pose);
+        task = runPick(false, goal->get_goal()->instance_id, pick_feedback, canceled);
         if (task.success) {
           const FeedbackFunction place_feedback = [goal](
             const std::string & stage, float progress,

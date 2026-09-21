@@ -366,24 +366,17 @@ bool PostPlacePlanner::segment(
   finished.store(true);
   watcher.join();
   if (!planned || response.error_code_.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS ||
-    !response.trajectory_ || interrupted())
+    !response.trajectory_ || canceled())
   {
     error = name + " planning failed, MoveIt code=" + std::to_string(response.error_code_.val);
     trace(name, false, error);
     return false;
   }
   auto & trajectory = *response.trajectory_;
-  // Once MoveIt has returned before the search deadline, finish validating that
-  // trajectory. Treating a deadline that expires during validation as a
-  // collision/spline failure discards a potentially valid safe return route.
-  // Cancellation must still interrupt all validation immediately.
-  if (!validateReturnTrajectory(trajectory, scene, config_.return_validation_joint_step,
-      error, canceled))
-  {
-    trace(name + "/geometric", false, error);
-    return false;
-  }
-  trace(name + "/geometric", true, "geometric trajectory valid");
+  // A successful MoveIt response is a complete route candidate. Treating a
+  // deadline that expires during subsequent processing as a collision/spline
+  // failure discards a potentially valid safe return route. Cancellation must
+  // still interrupt all validation immediately.
   trajectory_processing::TimeOptimalTrajectoryGeneration timing(config_.return_path_tolerance);
   if (!timing.computeTimeStamps(trajectory, config_.velocity_scaling, config_.acceleration_scaling)) {
     error = name + " time parameterization failed";
@@ -616,8 +609,10 @@ bool PostPlacePlanner::validateSegment(
   {
     return false;
   }
-  trajectory.addPrefixWayPoint(current, 0.0);
-  return validateReturnTrajectory(trajectory, validation_scene,
+  robot_trajectory::RobotTrajectory start_edge(current.getRobotModel(), config_.planning_group);
+  start_edge.addSuffixWayPoint(current, 0.0);
+  start_edge.addSuffixWayPoint(trajectory.getFirstWayPoint(), 0.0);
+  return validateReturnTrajectory(start_edge, validation_scene,
     config_.return_validation_joint_step, error, canceled);
 }
 

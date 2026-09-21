@@ -291,6 +291,50 @@ def test_post_place_separates_coordinated_retreat_from_named_target_planning():
     assert "postPlaceRetreatTarget" not in server_source
 
 
+def test_completed_retreat_is_not_rejected_when_only_its_search_deadline_expires():
+    planner_source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "pick_place"
+        / "dual_arm_motion_planner.cpp"
+    ).read_text(encoding="utf-8")
+    retreat_source = planner_source.split("bool DualArmMotionPlanner::buildRetreat(", 1)[1].split(
+        "GraspGeometry DualArmMotionPlanner::graspFromBoxToTcp(", 1
+    )[0]
+
+    assert "deadline expiring while they run is not evidence" in retreat_source
+    assert "error, canceled))" in retreat_source
+    assert "error, interrupted" not in retreat_source
+
+
+def test_execution_planning_does_not_reject_completed_routes_for_deadline_or_preflight_policy():
+    planner_source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "pick_place"
+        / "dual_arm_motion_planner.cpp"
+    ).read_text(encoding="utf-8")
+    post_place_source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "pick_place"
+        / "post_place_planner.cpp"
+    ).read_text(encoding="utf-8")
+    server_source = (
+        Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
+    ).read_text(encoding="utf-8")
+
+    for message in (
+        "route deadline reached before time parameterization",
+        "route deadline reached during time parameterization",
+    ):
+        assert message not in planner_source
+    assert "!response.trajectory_ || canceled())" in post_place_source
+    assert "deadline - now) /" not in server_source
+    assert "const PlaceContinuation return_preflight = plan_only ?" in server_source
+    assert "runPick(false, goal->get_goal()->instance_id, pick_feedback, canceled);" in server_source
+
+
 def test_pose_to_pose_mode_is_selectable_and_closed_chain_remains_default():
     with CONFIG_FILE.open(encoding="utf-8") as stream:
         config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]

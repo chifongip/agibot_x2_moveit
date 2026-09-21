@@ -1153,7 +1153,7 @@ public:
       state.update();
       trajectory.addSuffixWayPoint(state, 0.0);
     }
-    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
+    if (canceled()) {
       return false;
     }
     trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization(
@@ -1163,7 +1163,7 @@ public:
     {
       return false;
     }
-    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
+    if (canceled()) {
       return false;
     }
     trajectory.getRobotTrajectoryMsg(output);
@@ -1410,9 +1410,8 @@ public:
     {
       return false;
     }
-    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
-      error = canceled() ? "carry time parameterization canceled" :
-        "carry route deadline reached before time parameterization";
+    if (canceled()) {
+      error = "carry time parameterization canceled";
       return false;
     }
     trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization;
@@ -1422,9 +1421,8 @@ public:
       error = "carry time parameterization failed";
       return false;
     }
-    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
-      error = canceled() ? "carry time parameterization canceled" :
-        "carry route deadline reached during time parameterization";
+    if (canceled()) {
+      error = "carry time parameterization canceled";
       return false;
     }
     trajectory.getRobotTrajectoryMsg(output);
@@ -1460,9 +1458,8 @@ public:
     {
       return false;
     }
-    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
-      error = canceled() ? "carry transition time parameterization canceled" :
-        "carry transition route deadline reached before time parameterization";
+    if (canceled()) {
+      error = "carry transition time parameterization canceled";
       return false;
     }
     trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization;
@@ -1472,9 +1469,8 @@ public:
       error = "carry transition time parameterization failed";
       return false;
     }
-    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
-      error = canceled() ? "carry transition time parameterization canceled" :
-        "carry transition route deadline reached during time parameterization";
+    if (canceled()) {
+      error = "carry transition time parameterization canceled";
       return false;
     }
     trajectory.getRobotTrajectoryMsg(output);
@@ -1769,9 +1765,8 @@ public:
     {
       return false;
     }
-    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
-      error = canceled() ? "place time parameterization canceled" :
-        "place route deadline reached before time parameterization";
+    if (canceled()) {
+      error = "place time parameterization canceled";
       return false;
     }
     trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization;
@@ -1781,9 +1776,8 @@ public:
       error = "place time parameterization failed";
       return false;
     }
-    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
-      error = canceled() ? "place time parameterization canceled" :
-        "place route deadline reached during time parameterization";
+    if (canceled()) {
+      error = "place time parameterization canceled";
       return false;
     }
     trajectory.getRobotTrajectoryMsg(output);
@@ -2510,11 +2504,13 @@ bool DualArmMotionPlanner::buildRetreat(
   }
   robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), impl_->config_.planning_group);
   trajectory.setRobotTrajectoryMsg(empty_start, output);
-  const auto interrupted = [&]() {return canceled() || std::chrono::steady_clock::now() >= deadline;};
-  if (!validateReturnTrajectory(trajectory, contact, impl_->config_.return_validation_joint_step,
-      error, interrupted) ||
-    !validateTimedReturnTrajectory(trajectory, contact, impl_->config_.return_validation_joint_step,
-      error, interrupted))
+  // buildApproach has returned a complete candidate. The following checks
+  // decide whether that candidate is safe to execute; a
+  // deadline expiring while they run is not evidence that the trajectory or
+  // the controller spline is invalid.  Only an explicit action cancellation
+  // may interrupt the checks.
+  if (!validateTimedReturnTrajectory(trajectory, contact, impl_->config_.return_validation_joint_step,
+      error, canceled))
   {
     return false;
   }
@@ -2525,7 +2521,7 @@ bool DualArmMotionPlanner::buildRetreat(
   robot_trajectory::RobotTrajectory endpoint(start.getRobotModel(), impl_->config_.planning_group);
   endpoint.addSuffixWayPoint(trajectory.getLastWayPoint(), 0.0);
   if (!validateReturnTrajectory(endpoint, strict, impl_->config_.return_validation_joint_step,
-      error, interrupted))
+      error, canceled))
   {
     error = "retreat endpoint is not collision-free: " + error;
     return false;
