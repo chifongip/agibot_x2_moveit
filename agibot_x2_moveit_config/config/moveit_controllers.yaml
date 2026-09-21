@@ -1,7 +1,9 @@
 # MoveIt uses this configuration for controller management
 
 trajectory_execution:
-  allowed_start_tolerance: 0.05
+  # Match the manipulation server's execution_joint_tolerance so MoveIt does
+  # not reject a return segment that the server has already revalidated.
+  allowed_start_tolerance: 0.1
   execution_duration_monitoring: false
 
 moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
