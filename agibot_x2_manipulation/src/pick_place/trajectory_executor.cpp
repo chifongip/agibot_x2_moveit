@@ -3,6 +3,7 @@
 #include "agibot_x2_manipulation/execution_feedback.hpp"
 
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
+#include <moveit/utils/moveit_error_code.h>
 
 #include <chrono>
 #include <cmath>
@@ -14,6 +15,45 @@
 
 namespace agibot_x2_manipulation
 {
+namespace
+{
+
+const char * actionResultCodeName(const rclcpp_action::ResultCode code)
+{
+  switch (code) {
+    case rclcpp_action::ResultCode::SUCCEEDED:
+      return "succeeded";
+    case rclcpp_action::ResultCode::ABORTED:
+      return "aborted";
+    case rclcpp_action::ResultCode::CANCELED:
+      return "canceled";
+    case rclcpp_action::ResultCode::UNKNOWN:
+    default:
+      return "unknown";
+  }
+}
+
+std::string executionFailureMessage(
+  const rclcpp_action::ResultCode action_status,
+  const moveit_msgs::action::ExecuteTrajectory::Result::SharedPtr & moveit_result,
+  const bool cancellation_requested)
+{
+  std::ostringstream message;
+  message << "MoveIt ExecuteTrajectory failed (action_status=" <<
+    actionResultCodeName(action_status) << " (" << static_cast<int>(action_status) << ")";
+  if (moveit_result) {
+    const int error_code = moveit_result->error_code.val;
+    message << ", moveit_error=" <<
+      moveit::core::error_code_to_string(moveit::core::MoveItErrorCode(error_code)) <<
+      " (" << error_code << ")";
+  } else {
+    message << ", moveit_error=result_unavailable";
+  }
+  message << ", cancellation_requested=" << std::boolalpha << cancellation_requested << ")";
+  return message.str();
+}
+
+}  // namespace
 
 TrajectoryExecutor::TrajectoryExecutor(
   const rclcpp::Node::SharedPtr & node, const PickPlaceConfig & config,
@@ -113,7 +153,11 @@ bool TrajectoryExecutor::execute(
   if (result.code != rclcpp_action::ResultCode::SUCCEEDED || !result.result ||
     result.result->error_code.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS)
   {
-    setError("MoveIt ExecuteTrajectory action did not report success");
+    const std::string message = executionFailureMessage(
+      result.code, result.result, cancel_requested_.load() || canceled());
+    setError(message);
+    RCLCPP_ERROR(node_->get_logger(), "%s; requesting MoveIt stop", message.c_str());
+    move_group_.stop();
     return false;
   }
   bool has_prior_feedback = false;
