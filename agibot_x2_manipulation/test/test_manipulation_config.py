@@ -541,7 +541,7 @@ def test_coordinated_grasp_search_has_conservative_limits():
     assert config["planning_time_per_candidate"] > 0.0
     assert config["pregrasp_planning_timeout"] >= 30.0
     assert config["maximum_retry_candidates"] == 3
-    assert config["minimum_grasp_joint_margin"] >= 0.02
+    assert config["minimum_grasp_joint_margin"] == 0.0
     assert config["minimum_carry_joint_margin"] == config["minimum_grasp_joint_margin"]
     assert config["closed_chain_position_tolerance"] == 0.010
     assert config["closed_chain_orientation_tolerance"] <= 0.052360

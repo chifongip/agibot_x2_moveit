@@ -373,8 +373,12 @@ bool PostPlacePlanner::segment(
     return false;
   }
   auto & trajectory = *response.trajectory_;
+  // Once MoveIt has returned before the search deadline, finish validating that
+  // trajectory. Treating a deadline that expires during validation as a
+  // collision/spline failure discards a potentially valid safe return route.
+  // Cancellation must still interrupt all validation immediately.
   if (!validateReturnTrajectory(trajectory, scene, config_.return_validation_joint_step,
-      error, interrupted))
+      error, canceled))
   {
     trace(name + "/geometric", false, error);
     return false;
@@ -386,7 +390,7 @@ bool PostPlacePlanner::segment(
     return false;
   }
   if (!validateTimedReturnTrajectory(trajectory, scene, config_.return_validation_joint_step,
-      error, interrupted) ||
+      error, canceled) ||
     maximumJointDistance(trajectory.getFirstWayPoint(), start, trajectory.getGroup()) > 1e-3 ||
     maximumJointDistance(trajectory.getLastWayPoint(), target, trajectory.getGroup()) >
     std::min(1e-3, config_.reset_joint_tolerance))
