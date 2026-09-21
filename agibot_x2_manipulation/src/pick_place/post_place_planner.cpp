@@ -39,10 +39,6 @@ bool validState(
       return false;
     }
   }
-  if (!state.satisfiesBounds(group)) {
-    error = "joint bounds violated";
-    return false;
-  }
   collision_detection::CollisionRequest request;
   request.group_name = group->getName();
   request.contacts = true;
@@ -320,6 +316,9 @@ bool PostPlacePlanner::endpoint(
     }
   }
   std::string error;
+  if (!target.satisfiesBounds(group)) {
+    return false;
+  }
   return validState(target, scene, group, error);
 }
 
@@ -428,9 +427,18 @@ bool PostPlacePlanner::plan(
   const auto * group = start.getJointModelGroup(config_.planning_group);
   auto strict = contactScene(scene, false);
   auto release = contactScene(scene, include_retreat);
-  moveit::core::RobotState zero(start);
   const auto & target_name = named_target.empty() ? config_.post_place_named_target : named_target;
-  if (!group || !zero.setToDefaultValues(group, target_name)) {
+  if (!group) {
+    error = "return planning group unavailable: " + config_.planning_group;
+    return false;
+  }
+  // Device feedback can lie outside the model limits.  Keep the reported
+  // state for execution-start matching, but plan from its bounded model
+  // representation so MoveIt does not reject the return request.
+  start.enforceBounds(group);
+  start.update();
+  moveit::core::RobotState zero(start);
+  if (!zero.setToDefaultValues(group, target_name)) {
     error = "return named target unavailable: " + target_name;
     return false;
   }
@@ -439,7 +447,7 @@ bool PostPlacePlanner::plan(
     error = "return start invalid: " + error;
     return false;
   }
-  if (!validState(zero, strict, group, error)) {
+  if (!zero.satisfiesBounds(group) || !validState(zero, strict, group, error)) {
     error = "return named target invalid: " + error;
     return false;
   }

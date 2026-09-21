@@ -202,6 +202,28 @@ TEST_F(ReturnSearchTest, FindsValidatedDetoursInTwentyIndependentTrials)
   EXPECT_TRUE(scene->getWorld()->hasObject("work_table"));
 }
 
+TEST_F(ReturnSearchTest, AcceptsMeasuredStartBeyondModelPositionBounds)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  auto settings = config();
+  auto node = std::make_shared<rclcpp::Node>("return_unbounded_start_test");
+  PostPlacePlanner planner(node, settings, robot);
+  moveit::core::RobotState measured_start(robot);
+  measured_start.setToDefaultValues();
+  measured_start.setVariablePosition("slide", 1.01);
+  measured_start.update();
+  ASSERT_FALSE(measured_start.satisfiesBounds(measured_start.getJointModelGroup("arm")));
+
+  PostPlacePlan output;
+  std::string error;
+  ASSERT_TRUE(planner.plan(measured_start, {}, scene, false, output, error,
+      []() {return false;})) << error;
+  ASSERT_EQ(output.segments.size(), 1U);
+  EXPECT_TRUE(planner.validateSegment(output.segments.front(), measured_start, scene, error,
+      []() {return false;})) << error;
+}
+
 TEST_F(ReturnSearchTest, RejectsInvalidTargetsAndHonorsCancellationAndDeadline)
 {
   const auto robot = model();
