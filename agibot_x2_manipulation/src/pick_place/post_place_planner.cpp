@@ -156,26 +156,36 @@ bool validateTimedReturnTrajectory(
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
   std::string & error, const CancelFunction & interrupted)
 {
+  return validateTimedTrajectory(trajectory, joint_step,
+    [&scene, &trajectory](moveit::core::RobotState & state, std::string & detail) {
+      return validState(state, scene, trajectory.getGroup(), detail);
+    }, error, interrupted);
+}
+
+bool validateTimedTrajectory(
+  const robot_trajectory::RobotTrajectory & trajectory, double joint_step,
+  const TrajectoryStateValidator & valid_state,
+  std::string & error, const CancelFunction & interrupted)
+{
   if (!std::isfinite(joint_step) || joint_step <= 0.0 || trajectory.empty() ||
     !trajectory.getGroup())
   {
-    error = "empty return trajectory or invalid validation group";
+    error = "empty timed trajectory or invalid validation group";
     return false;
   }
   moveit::core::RobotState first(trajectory.getFirstWayPoint());
-  if (!validState(first, scene, trajectory.getGroup(), error)) {
-    error = "return trajectory start invalid: " + error;
+  if (!valid_state(first, error)) {
+    error = "trajectory start invalid: " + error;
     return false;
   }
   moveit_msgs::msg::RobotTrajectory message;
   trajectory.getRobotTrajectoryMsg(message);
   const auto & joints = message.joint_trajectory;
   if (joints.joint_names.empty() || joints.points.empty()) {
-    error = "return trajectory has no joint samples";
+    error = "timed trajectory has no joint samples";
     return false;
   }
   joint_trajectory_controller::Trajectory controller;
-  const auto * group = trajectory.getGroup();
   for (std::size_t index = 1; index < joints.points.size(); ++index) {
     const auto & a = joints.points[index - 1];
     const auto & b = joints.points[index];
@@ -183,7 +193,7 @@ bool validateTimedReturnTrajectory(
     const rclcpp::Time time_b(rclcpp::Duration(b.time_from_start).nanoseconds(), RCL_ROS_TIME);
     const double duration = (time_b - time_a).seconds();
     if (!std::isfinite(duration) || duration <= 0.0) {
-      error = "return trajectory has non-increasing timestamps";
+      error = "timed trajectory has non-increasing timestamps";
       return false;
     }
     double travel_bound = 0.0;
@@ -194,7 +204,7 @@ bool validateTimedReturnTrajectory(
           if (point->velocities.size() != joints.joint_names.size() ||
             !std::isfinite(point->velocities[joint]))
           {
-            error = "invalid return trajectory velocity";
+            error = "invalid timed trajectory velocity";
             return false;
           }
           bound += std::abs(point->velocities[joint]) * duration;
@@ -203,7 +213,7 @@ bool validateTimedReturnTrajectory(
           if (point->accelerations.size() != joints.joint_names.size() ||
             !std::isfinite(point->accelerations[joint]))
           {
-            error = "invalid return trajectory acceleration";
+            error = "invalid timed trajectory acceleration";
             return false;
           }
           bound += std::abs(point->accelerations[joint]) * duration * duration;
@@ -214,15 +224,14 @@ bool validateTimedReturnTrajectory(
     // Sample the controller's cubic/quintic spline, including overshoot with
     // identical endpoint positions. The derivative bound limits the joint
     // increment to at most half the configured geometric validation step.
-    // This is deliberately less dense than the controller update rate: MoveIt
-    // has already validated the OMPL path, and this pass covers interpolation
+    // The geometric path is checked separately. This pass covers interpolation
     // that the controller adds between those waypoints.
     const double step_count = std::max(
       1.0, std::ceil(std::max(
         duration / kControllerSplineValidationPeriod,
         kControllerSplineSpatialOversampling * travel_bound / joint_step)));
     if (!std::isfinite(step_count) || step_count > 1000000.0) {
-      error = "return controller spline exceeds validation sample budget";
+      error = "controller spline exceeds validation sample budget";
       return false;
     }
     const auto steps = static_cast<std::size_t>(step_count);
@@ -244,7 +253,7 @@ bool validateTimedReturnTrajectory(
         return false;
       }
       state.setVariablePositions(joints.joint_names, point.positions);
-      if (!validState(state, scene, group, error)) {
+      if (!valid_state(state, error)) {
         error = "controller spline invalid: segment " + std::to_string(index) +
           " sample " + std::to_string(sample) + "/" + std::to_string(steps) + ": " + error;
         return false;

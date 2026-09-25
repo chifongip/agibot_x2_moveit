@@ -357,6 +357,34 @@ TEST_F(ReturnSearchTest, RejectsControllerSplineOvershootWithClearEndpoints)
   EXPECT_NE(error.find("controller spline invalid"), std::string::npos);
 }
 
+TEST_F(ReturnSearchTest, TimedValidatorChecksControllerSamplesAgainstCustomConstraints)
+{
+  const auto robot = model();
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", 0.2);
+  start.setVariableVelocity("slide", -1.0);
+  start.setVariableVelocity("lift", 0.0);
+  start.setVariableAcceleration("slide", 0.0);
+  start.setVariableAcceleration("lift", 0.0);
+  start.update();
+  moveit::core::RobotState end(start);
+  end.setVariableVelocity("slide", 1.0);
+  robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+  trajectory.addSuffixWayPoint(start, 0.0);
+  trajectory.addSuffixWayPoint(end, 1.0);
+  std::string error;
+  EXPECT_FALSE(validateTimedTrajectory(trajectory, 0.01,
+      [](moveit::core::RobotState & sample, std::string & detail) {
+        if (sample.getVariablePosition("slide") < 0.1) {
+          detail = "held-box clearance violated";
+          return false;
+        }
+        return true;
+      }, error, []() {return false;}));
+  EXPECT_NE(error.find("held-box clearance violated"), std::string::npos);
+}
+
 TEST_F(ReturnSearchTest, HypotheticalReleaseClearsOnlyItsAttachedBox)
 {
   const auto robot = model();
