@@ -11,4 +11,6 @@ double adaptiveRetryTimeout(
 double endpointRouteTimeout(
   double remaining_budget, double endpoint_timeout, std::size_t endpoint_count);
 
+double routeShareTimeout(double remaining_budget, std::size_t remaining_routes);
+
 }  // namespace agibot_x2_manipulation

@@ -370,20 +370,23 @@ public:
   bool solveDualArmEndpoint(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & left_pose,
     const Eigen::Isometry3d & right_pose, bool allow_pad_contact,
-    moveit::core::RobotState & target, std::string & error)
+    moveit::core::RobotState & target, std::string & error,
+    const moveit::core::RobotState * preferred = nullptr)
   {
     const auto * dual_group = start.getJointModelGroup(move_group_.getName());
     bool found_ik = false;
     bool found_bounds = false;
-    for (int attempt = 0; attempt < config_.closed_chain_ik_attempts; ++attempt) {
-      moveit::core::RobotState candidate(start);
-      if (attempt > 0) {
-        candidate.setToRandomPositions(dual_group);
-      }
-      if (!setFromDualArmIK(
-          candidate, left_pose, right_pose, false, config_.closed_chain_ik_timeout))
-      {
-        continue;
+    for (int attempt = preferred ? -1 : 0; attempt < config_.closed_chain_ik_attempts; ++attempt) {
+      moveit::core::RobotState candidate(attempt < 0 ? *preferred : start);
+      if (attempt >= 0) {
+        if (attempt > 0) {
+          candidate.setToRandomPositions(dual_group);
+        }
+        if (!setFromDualArmIK(
+            candidate, left_pose, right_pose, false, config_.closed_chain_ik_timeout))
+        {
+          continue;
+        }
       }
       found_ik = true;
       candidate.update();
@@ -507,7 +510,8 @@ public:
     const Eigen::Isometry3d & box_to_right_contact, const std::string & route,
     const CancelFunction & canceled, std::string & error,
     const std::chrono::steady_clock::time_point & deadline =
-    std::chrono::steady_clock::time_point::max(), double minimum_joint_margin = 0.0)
+    std::chrono::steady_clock::time_point::max(), double minimum_joint_margin = 0.0,
+    const moveit::core::RobotState * preferred_endpoint = nullptr)
   {
     if (!validateMinimumJointMargin(
         state, minimum_joint_margin, route + " route start", error))
@@ -523,8 +527,9 @@ public:
       const auto grasp = graspFromBoxToTcp(
         controls[index].pose, box_to_left_contact, box_to_right_contact, 0.0);
       moveit::core::RobotState target(state);
+      const auto * preferred = index + 1 == controls.size() ? preferred_endpoint : nullptr;
       if (!solveDualArmEndpoint(
-          state, grasp.left_contact, grasp.right_contact, true, target, error))
+          state, grasp.left_contact, grasp.right_contact, true, target, error, preferred))
       {
         error = route + " " + controls[index].segment + " endpoint rejected: " + error;
         publishEndpointDiagnostic(route, controls[index].segment, false, error);
@@ -534,7 +539,20 @@ public:
           trajectory, state, target, route, controls[index].segment, canceled, error, deadline,
           minimum_joint_margin))
       {
-        return false;
+        // A valid prechecked IK branch may still be disconnected from this
+        // segment's start. Try the original seed-based branch before rejecting
+        // the route, while observing the same deadline.
+        const auto * group = state.getJointModelGroup(move_group_.getName());
+        if (!preferred || target.distance(*preferred, group) > 1e-6 || canceled() ||
+          std::chrono::steady_clock::now() >= deadline ||
+          !solveDualArmEndpoint(
+            state, grasp.left_contact, grasp.right_contact, true, target, error) ||
+          !appendJointSpacePlan(
+            trajectory, state, target, route, controls[index].segment, canceled, error, deadline,
+            minimum_joint_margin))
+        {
+          return false;
+        }
       }
     }
     return true;
@@ -1333,7 +1351,8 @@ public:
     const Eigen::Isometry3d & box_to_right_contact,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     std::string & error, const std::chrono::steady_clock::time_point & deadline,
-    const CancelFunction & canceled)
+    const CancelFunction & canceled,
+    const moveit::core::RobotState * preferred_endpoint = nullptr)
   {
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
     trajectory.addSuffixWayPoint(start, 0.0);
@@ -1391,7 +1410,8 @@ public:
       }
       const bool planned = appendPoseToPoseObjectPath(
         trajectory, state, controls, box_to_left_contact, box_to_right_contact,
-        carryRouteName(route), canceled, error, deadline, config_.minimum_carry_joint_margin);
+        carryRouteName(route), canceled, error, deadline, config_.minimum_carry_joint_margin,
+        preferred_endpoint);
       std::string restore_error;
       const bool restored = !plan_only || planning_scene_.endVirtualAttachment(
         saved_box,
@@ -1437,7 +1457,8 @@ public:
     const Eigen::Isometry3d & box_to_right_contact,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     std::string & error, const std::chrono::steady_clock::time_point & deadline,
-    const CancelFunction & canceled)
+    const CancelFunction & canceled,
+    const moveit::core::RobotState * preferred_endpoint = nullptr)
   {
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
     trajectory.addSuffixWayPoint(start, 0.0);
@@ -1448,7 +1469,8 @@ public:
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       if (!appendPoseToPoseObjectPath(
           trajectory, state, controls, box_to_left_contact, box_to_right_contact,
-          route_name, canceled, error, deadline, config_.minimum_carry_joint_margin))
+          route_name, canceled, error, deadline, config_.minimum_carry_joint_margin,
+          preferred_endpoint))
       {
         return false;
       }
@@ -1505,6 +1527,7 @@ public:
     struct Endpoint
     {
       Eigen::Isometry3d pose;
+      moveit::core::RobotState state;
       double correction;
       double margin;
       double distance;
@@ -1576,6 +1599,7 @@ public:
       endpoints.push_back(
         {
           pose,
+          endpoint,
           (pose.translation() - nominal_target_pose.translation()).norm() +
           0.1 * poseAngularError(pose, nominal_target_pose),
           joint_margin,
@@ -1626,10 +1650,20 @@ public:
     }
 
     std::string last_error = "no carry route evaluated";
-    // Sweep all prechecked endpoints for a route before trying a more complex
-    // skeleton. This prevents a high but disconnected endpoint from consuming
-    // the budget while lower connected poses remain unevaluated.
-    for (const auto route : routes) {
+    // Reserve a share of the remaining budget for each route in pose-to-pose
+    // mode. Otherwise many endpoints on the first route can prevent every
+    // alternative route from being tried.
+    for (std::size_t route_index = 0; route_index < routes.size(); ++route_index) {
+      const auto route = routes[route_index];
+      const auto route_started = std::chrono::steady_clock::now();
+      const auto route_budget = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE ?
+        routeShareTimeout(
+        std::chrono::duration<double>(deadline - route_started).count(),
+        routes.size() - route_index) :
+        std::chrono::duration<double>(deadline - route_started).count();
+      const auto route_search_deadline = std::min(
+        deadline, route_started + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(std::max(0.0, route_budget))));
       for (const auto & endpoint : endpoints) {
         if (canceled()) {
           error = search_name + " canceled";
@@ -1639,11 +1673,26 @@ public:
           error = search_name + " timed out; last failure: " + last_error;
           return false;
         }
+        if (std::chrono::steady_clock::now() >= route_search_deadline) {
+          break;
+        }
         try {
+          const std::size_t endpoint_count = transition ?
+            makeCarryTransitionWaypoints(
+            from_pose, endpoint.pose, config_.lift_height, config_.carry_search_y_range,
+            route).size() - 1U :
+            (route == CarryRoute::DIRECT || route == CarryRoute::LOW_XY_THEN_LIFT ? 2U : 3U);
+          const double remaining_route_time = std::chrono::duration<double>(
+            route_search_deadline - std::chrono::steady_clock::now()).count();
+          const double attempt_timeout =
+            config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE ?
+            endpointRouteTimeout(
+            remaining_route_time, config_.planning_time_per_candidate, endpoint_count) :
+            std::min(3.25, remaining_route_time);
           const std::chrono::steady_clock::time_point route_deadline = std::min(
-            deadline, std::chrono::steady_clock::now() +
+            route_search_deadline, std::chrono::steady_clock::now() +
             std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-              std::chrono::duration<double>(3.25)));
+              std::chrono::duration<double>(attempt_timeout)));
           moveit_msgs::msg::RobotTrajectory trajectory;
           moveit::core::RobotState end(start);
           std::string candidate_error;
@@ -1651,11 +1700,11 @@ public:
             buildCarryTransitionRoute(
             start, from_pose, endpoint.pose, route,
             box_to_left_contact, box_to_right_contact,
-            trajectory, end, candidate_error, route_deadline, canceled) :
+            trajectory, end, candidate_error, route_deadline, canceled, &endpoint.state) :
             buildCarryRoute(
             start, from_pose, endpoint.pose, nominal_target_pose, route, plan_only,
             box_to_left_contact, box_to_right_contact,
-            trajectory, end, candidate_error, route_deadline, canceled);
+            trajectory, end, candidate_error, route_deadline, canceled, &endpoint.state);
           if (!planned)
           {
             last_error = candidate_error;
@@ -1731,7 +1780,8 @@ public:
     const Eigen::Isometry3d & box_to_right_contact,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     std::string & error, const std::chrono::steady_clock::time_point & deadline,
-    const CancelFunction & canceled)
+    const CancelFunction & canceled,
+    const moveit::core::RobotState * preferred_endpoint = nullptr)
   {
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
     trajectory.addSuffixWayPoint(start, 0.0);
@@ -1747,7 +1797,7 @@ public:
       }
       const bool planned = appendPoseToPoseObjectPath(
         trajectory, state, controls, box_to_left_contact, box_to_right_contact,
-        route_name, canceled, error, deadline);
+        route_name, canceled, error, deadline, 0.0, preferred_endpoint);
       std::string restore_error;
       const bool restored = !ignore_box || planning_scene_.endVirtualAttachment(
         saved_box,
@@ -1842,6 +1892,7 @@ public:
     struct Endpoint
     {
       Eigen::Isometry3d pose;
+      moveit::core::RobotState state;
       double correction;
       double margin;
       double distance;
@@ -1884,6 +1935,7 @@ public:
       endpoints.push_back(
         {
           pose,
+          endpoint,
           (pose.translation() - requested_pose.translation()).norm() +
           0.1 * poseAngularError(pose, requested_pose),
           endpoint.getMinDistanceToPositionBounds(dual_group).first,
@@ -1939,7 +1991,7 @@ public:
           if (!buildPlaceRoute(
               start, from_pose, endpoint.pose, from_pick, route, ignore_box,
               box_to_left_contact, box_to_right_contact, trajectory, candidate_end,
-              candidate_error, route_deadline, canceled))
+              candidate_error, route_deadline, canceled, &endpoint.state))
           {
             last_error = candidate_error;
             continue;

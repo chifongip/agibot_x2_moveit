@@ -30,4 +30,12 @@ double endpointRouteTimeout(
   return std::min(remaining_budget, 2.0 + endpoint_timeout * endpoint_count);
 }
 
+double routeShareTimeout(double remaining_budget, std::size_t remaining_routes)
+{
+  if (!std::isfinite(remaining_budget) || remaining_budget <= 0.0 || remaining_routes == 0U) {
+    return 0.0;
+  }
+  return remaining_budget / static_cast<double>(remaining_routes);
+}
+
 }  // namespace agibot_x2_manipulation
