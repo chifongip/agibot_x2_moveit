@@ -1,4 +1,5 @@
 #include "pick_place/post_place_planner.hpp"
+#include "pick_place/planning_scene_manager.hpp"
 
 #include <moveit/kinematic_constraints/utils.h>
 #include <moveit/robot_state/conversions.h>
@@ -291,15 +292,13 @@ void PostPlacePlanner::trace(const std::string & stage, bool success, const std:
 planning_scene::PlanningScenePtr PostPlacePlanner::contactScene(
   const planning_scene::PlanningScenePtr & scene, bool retreat) const
 {
+  if (retreat) {
+    return retreatContactScene(scene, config_);
+  }
   auto copy = planning_scene::PlanningScene::clone(scene);
   auto & acm = copy->getAllowedCollisionMatrixNonConst();
   acm.setEntry(config_.box_id, false);
   acm.setDefaultEntry(config_.box_id, false);
-  if (retreat) {
-    acm.setEntry(config_.box_id,
-      std::vector<std::string>{"left_hand_pad_link", "right_hand_pad_link", config_.left_tcp,
-        config_.right_tcp}, true);
-  }
   return copy;
 }
 
@@ -644,6 +643,13 @@ bool PostPlacePlanner::validateSegment(
       config_.return_validation_joint_step, error, canceled))
   {
     return false;
+  }
+  if (segment.retreat) {
+    moveit::core::RobotState retreat_end(trajectory.getLastWayPoint());
+    if (!validState(retreat_end, contactScene(scene, false), trajectory.getGroup(), error)) {
+      error = "retreat endpoint has not cleared the placed box: " + error;
+      return false;
+    }
   }
   robot_trajectory::RobotTrajectory start_edge(current.getRobotModel(), config_.planning_group);
   start_edge.addSuffixWayPoint(current, 0.0);
