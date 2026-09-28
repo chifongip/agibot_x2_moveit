@@ -155,6 +155,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
+  ament_add_gtest(test_phase_retry_controller test/test_phase_retry_controller.cpp)
+  target_include_directories(test_phase_retry_controller PRIVATE include)
   ament_add_gtest(test_box_geometry test/test_box_geometry.cpp)
   target_link_libraries(test_box_geometry box_geometry)
   ament_add_gtest(test_box_profile_registry test/test_box_profile_registry.cpp)
@@ -215,6 +217,12 @@ if(BUILD_TESTING)
   add_launch_test(test/test_reload_box_profiles_service.launch.py TIMEOUT 90)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
   add_launch_test(test/test_dummy_workflow.launch.py TIMEOUT 240)
+  add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_pose_to_pose
+    ARGS "mode:=pose_to_pose" TIMEOUT 180)
+  add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_closed_chain
+    ARGS "mode:=closed_chain" TIMEOUT 180)
+  set_tests_properties(test_retry_continue_pose_to_pose test_retry_continue_closed_chain
+    PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 ament_export_include_directories(include)

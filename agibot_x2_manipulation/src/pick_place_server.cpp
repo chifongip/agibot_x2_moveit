@@ -2,6 +2,7 @@
 #include "agibot_x2_manipulation/box_profile_registry.hpp"
 #include "agibot_x2_manipulation/reset_coordinator.hpp"
 #include "agibot_x2_manipulation/reset_utils.hpp"
+#include "agibot_x2_manipulation/phase_retry_controller.hpp"
 #include "pick_place/attachment_controller.hpp"
 #include "pick_place/box_pose_tracker.hpp"
 #include "pick_place/dual_arm_motion_planner.hpp"
@@ -20,6 +21,8 @@
 #include <agibot_x2_manipulation_msgs/action/reset_manipulation.hpp>
 #include <agibot_x2_manipulation_msgs/msg/locomanipulation_posture_status.hpp>
 #include <agibot_x2_manipulation_msgs/msg/manipulation_state.hpp>
+#include <agibot_x2_manipulation_msgs/msg/manipulation_task_status.hpp>
+#include <agibot_x2_manipulation_msgs/srv/continue_manipulation.hpp>
 #include <agibot_x2_manipulation_msgs/srv/clear_locomanipulation_posture_target.hpp>
 #include <agibot_x2_manipulation_msgs/srv/recover_manipulation_state.hpp>
 #include <agibot_x2_manipulation_msgs/srv/reload_box_profiles.hpp>
@@ -39,6 +42,10 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <future>
 #include <map>
 #include <memory>
@@ -62,6 +69,8 @@ using MoveCarryPose = agibot_x2_manipulation_msgs::action::MoveCarryPose;
 using ResetManipulation = agibot_x2_manipulation_msgs::action::ResetManipulation;
 using LocomanipulationPostureStatus =
   agibot_x2_manipulation_msgs::msg::LocomanipulationPostureStatus;
+using ManipulationTaskStatus = agibot_x2_manipulation_msgs::msg::ManipulationTaskStatus;
+using ContinueManipulation = agibot_x2_manipulation_msgs::srv::ContinueManipulation;
 using ManipulationState = agibot_x2_manipulation_msgs::msg::ManipulationState;
 using ClearLocomanipulationPostureTarget =
   agibot_x2_manipulation_msgs::srv::ClearLocomanipulationPostureTarget;
@@ -239,6 +248,10 @@ public:
     state_pub_ = node_->create_publisher<ManipulationState>(
       "/manipulation_state", rclcpp::QoS(1).reliable().transient_local());
 
+    task_status_pub_ = node_->create_publisher<ManipulationTaskStatus>(
+      "/manipulation_task_status", rclcpp::QoS(1).reliable().transient_local());
+    // A restart cannot resume a lost action worker; retain its checkpoint for diagnosis.
+    publishInterruptedTask();
     initializeState();
 
     pick_action_server_ = rclcpp_action::create_server<Pick>(
@@ -270,6 +283,18 @@ public:
       std::bind(&PickPlaceServer::onResetGoal, this, std::placeholders::_1, std::placeholders::_2),
       std::bind(&PickPlaceServer::onResetCancel, this, std::placeholders::_1),
       std::bind(&PickPlaceServer::onResetAccepted, this, std::placeholders::_1));
+    continue_callback_group_ = node_->create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive);
+    continue_service_ = node_->create_service<ContinueManipulation>(
+      "/continue_manipulation",
+      [this](const std::shared_ptr<ContinueManipulation::Request> request,
+      std::shared_ptr<ContinueManipulation::Response> response) {
+        response->success = (!reset_coordinator_.resetRequested() ||
+          phase_controller_.snapshot().action == "reset") &&
+          phase_controller_.requestContinue(request->task_id, request->pause_id, response->message);
+        if (response->success) {response->message = "Continue accepted; replanning unfinished phase";}
+        else if (response->message.empty()) {response->message = "reset is pending";}
+      }, rmw_qos_profile_services_default, continue_callback_group_);
     recovery_callback_group_ = node_->create_callback_group(
       rclcpp::CallbackGroupType::MutuallyExclusive);
     recovery_service_ = node_->create_service<RecoverManipulationState>(
@@ -312,7 +337,159 @@ public:
     publishPostureStatus();
   }
 
+  ~PickPlaceServer()
+  {
+    shutting_down_.store(true);
+    try {trajectory_executor_.requestShutdown();} catch (const std::exception &) {}
+    // Paused actions must leave their wait loop before server members are destroyed.
+    std::vector<Worker> workers;
+    {
+      std::lock_guard<std::mutex> lock(workers_mutex_);
+      workers.swap(workers_);
+    }
+    for (auto & worker : workers) {if (worker.thread.joinable()) {worker.thread.join();}}
+  }
+
 private:
+  struct Worker
+  {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> finished;
+  };
+
+  void startWorker(std::function<void()> operation)
+  {
+    std::lock_guard<std::mutex> lock(workers_mutex_);
+    for (auto worker = workers_.begin(); worker != workers_.end();) {
+      if (worker->finished->load()) {
+        worker->thread.join();
+        worker = workers_.erase(worker);
+      } else {++worker;}
+    }
+    auto finished = std::make_shared<std::atomic<bool>>(false);
+    workers_.push_back(Worker{std::thread([this, operation = std::move(operation), finished]() {
+        try {operation();}
+        catch (const std::exception & error) {
+          RCLCPP_ERROR(node_->get_logger(), "Action worker stopped: %s", error.what());
+        }
+        finished->store(true);
+      }), finished});
+  }
+
+  template<typename GoalHandleT>
+  void beginTask(const std::shared_ptr<GoalHandleT> & goal, const std::string & action)
+  {
+    std::ostringstream id;
+    for (const auto byte : goal->get_goal_id()) {
+      id << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(byte);
+    }
+    phase_controller_.begin(id.str(), action,
+      state_.load() == ManipulationState::HOLDING ? "attached" : "not_attached");
+    publishTaskStatus(phase_controller_.snapshot());
+  }
+
+  void publishTaskStatus(const PhaseRetryStatus & status)
+  {
+    ManipulationTaskStatus message;
+    message.task_id = status.task_id;
+    message.action = status.action;
+    message.status = status.status;
+    message.phase = status.phase;
+    message.last_completed_phase = status.last_completed_phase;
+    message.object_disposition = status.object_disposition;
+    message.failure = status.failure;
+    message.pause_id = status.pause_id;
+    message.attempt = status.attempt;
+    message.maximum_attempts = status.maximum_attempts;
+    message.can_continue = status.can_continue;
+    task_status_pub_->publish(message);
+    if (status.task_id.empty()) {return;}
+    try {
+      const std::filesystem::path path(config_.state_file + ".task");
+      if (!path.parent_path().empty()) {std::filesystem::create_directories(path.parent_path());}
+      const std::string temporary = path.string() + ".tmp";
+      std::ofstream saved(temporary, std::ios::trunc);
+      saved << std::quoted(status.task_id) << ' ' << std::quoted(status.action) << ' ' <<
+        std::quoted(status.status) << ' ' << std::quoted(status.phase) << ' ' <<
+        std::quoted(status.last_completed_phase) << ' ' << std::quoted(status.object_disposition) <<
+        ' ' << std::quoted(status.failure) << '\n';
+      saved.close();
+      if (!saved) {throw std::runtime_error("task checkpoint write failed");}
+      std::filesystem::rename(temporary, path);
+    } catch (const std::exception & error) {
+      RCLCPP_ERROR(node_->get_logger(), "Cannot persist task checkpoint: %s", error.what());
+    }
+  }
+
+  void publishInterruptedTask()
+  {
+    PhaseRetryStatus status;
+    std::ifstream saved(config_.state_file + ".task");
+    if (saved >> std::quoted(status.task_id) >> std::quoted(status.action) >>
+      std::quoted(status.status) >> std::quoted(status.phase) >>
+      std::quoted(status.last_completed_phase) >> std::quoted(status.object_disposition) >>
+      std::quoted(status.failure))
+    {
+      if (status.status == "running" || status.status == "retrying" || status.status == "paused") {
+        status.status = "interrupted";
+        status.failure = "server restarted; verify physical object state using recovery controls";
+        // Diagnostic only: no action worker survives restart.
+      }
+    }
+    // Publish even idle/terminal state so reconnected panels discard stale pauses.
+    publishTaskStatus(status);
+  }
+
+  void taskCheckpoint(const std::string & phase, const std::string & disposition)
+  {
+    phase_controller_.checkpoint(phase, disposition);
+    publishTaskStatus(phase_controller_.snapshot());
+  }
+
+  bool runPhase(const std::string & phase, bool plan_only, const FeedbackFunction & feedback,
+    float progress, const geometry_msgs::msg::PoseStamped & pose,
+    const CancelFunction & canceled, std::string & error,
+    const std::function<bool (const CancelFunction &, std::string &)> & attempt,
+    const CancelFunction & terminal = []() {return false;})
+  {
+    return phase_controller_.run(phase, plan_only, config_.phase_retry_attempts,
+      config_.phase_retry_timeout, config_.phase_retry_delay,
+      [this, &attempt, &canceled](auto deadline, std::string & failure) {
+        phase_deadline_ = deadline;
+        motion_planner_.setPhaseDeadline(deadline);
+        ScopeExit restore([this]() {
+          phase_deadline_ = std::chrono::steady_clock::time_point::max();
+          motion_planner_.setPhaseDeadline(phase_deadline_);
+        });
+        const CancelFunction planning_canceled = [this, canceled, deadline]() {
+            return canceled() || shutting_down_.load() || !rclcpp::ok() ||
+              std::chrono::steady_clock::now() >= deadline;
+          };
+        return attempt(planning_canceled, failure);
+      }, [this, canceled]() {return canceled() || shutting_down_.load() || !rclcpp::ok();},
+      [this, &feedback, progress, &pose](const PhaseRetryStatus & status) {
+        publishTaskStatus(status);
+        if (!status.failure.empty()) {
+          RCLCPP_WARN(node_->get_logger(), "%s %s attempt %d/%d: %s",
+            status.phase.c_str(), status.status.c_str(), status.attempt,
+            status.maximum_attempts, status.failure.c_str());
+        }
+        feedback(status.status == "paused" ? "paused/" + status.phase :
+          status.status == "retrying" ? "retrying/" + status.phase : status.phase, progress, pose);
+      }, error, terminal);
+  }
+
+  bool refreshMotionState(std::string & error, const CancelFunction & canceled,
+    bool held)
+  {
+    if (!trajectory_executor_.waitUntilStopped(canceled, error)) {return false;}
+    if (held) {
+      motion_planner_.updateHeldPoseFromRobot();
+      if (!motion_planner_.validateHeldClosure(error)) {return false;}
+    }
+    return planning_scene_.synchronize(error);
+  }
+
   bool reserveGoal()
   {
     return reset_coordinator_.reserveOperation();
@@ -703,6 +880,19 @@ private:
     }
   }
 
+  bool resolveTaskPlacePose(const geometry_msgs::msg::PoseStamped & requested,
+    geometry_msgs::msg::PoseStamped & output, bool plan_only, const FeedbackFunction & feedback,
+    std::string & error, const CancelFunction & canceled)
+  {
+    if (!requested.header.frame_id.empty() || !config_.use_tag_derived_place_pose) {
+      return resolvePlacePose(requested, output, error, canceled);
+    }
+    return runPhase("place_target", plan_only, feedback, 0.05F, held_pose_, canceled, error,
+      [&](const CancelFunction & planning_canceled, std::string & failure) {
+        return resolvePlacePose(requested, output, failure, planning_canceled);
+      });
+  }
+
   bool waitForStableTableTagPose(
     Eigen::Isometry3d & output, std::string & error, const CancelFunction & canceled) const
   {
@@ -873,22 +1063,22 @@ private:
 
   void onPickAccepted(const std::shared_ptr<PickGoalHandle> goal)
   {
-    std::thread([this, goal]() {executePick(goal);}).detach();
+    startWorker([this, goal]() {executePick(goal);});
   }
 
   void onPlaceAccepted(const std::shared_ptr<PlaceGoalHandle> goal)
   {
-    std::thread([this, goal]() {executePlace(goal);}).detach();
+    startWorker([this, goal]() {executePlace(goal);});
   }
 
   void onPickPlaceAccepted(const std::shared_ptr<PickPlaceGoalHandle> goal)
   {
-    std::thread([this, goal]() {executePickPlace(goal);}).detach();
+    startWorker([this, goal]() {executePickPlace(goal);});
   }
 
   void onMoveCarryPoseAccepted(const std::shared_ptr<MoveCarryPoseGoalHandle> goal)
   {
-    std::thread([this, goal]() {executeMoveCarryPose(goal);}).detach();
+    startWorker([this, goal]() {executeMoveCarryPose(goal);});
   }
 
   void onResetAccepted(const std::shared_ptr<ResetGoalHandle> goal)
@@ -902,7 +1092,7 @@ private:
       goal->abort(result);
       return;
     }
-    std::thread(
+    startWorker(
       [this, goal]() {
         try {
           executeReset(goal);
@@ -922,7 +1112,7 @@ private:
             goal->abort(result);
           }
         }
-      }).detach();
+      });
   }
 
   void initializeState()
@@ -1280,8 +1470,9 @@ private:
     result.success = success;
     result.code = code;
     result.message = message;
-    result.object_held = state_.load() == ManipulationState::HOLDING ||
-      state_.load() == ManipulationState::RECOVERY_REQUIRED;
+    result.object_held = phase_controller_.snapshot().object_disposition != "released" &&
+      (state_.load() == ManipulationState::HOLDING ||
+      state_.load() == ManipulationState::RECOVERY_REQUIRED);
     result.achieved_pose = pose;
     if (result.achieved_pose.header.frame_id.empty()) {
       result.achieved_pose.header.frame_id = config_.planning_frame;
@@ -1354,19 +1545,18 @@ private:
     }
 
     std::string error;
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled)) {
-      return outcome(false, kSafetyAbort, error, held_pose_);
-    }
-    std::vector<TrackedBoxPose> visible_boxes;
-    if (!updateVisibleBoxScene(
-        active_box_instance_id_, false, false, visible_boxes, error, canceled))
+    if (!runPhase("scene", plan_only, feedback, 0.05F, held_pose_, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, failure,
+              planning_canceled)) {return false;}
+          std::vector<TrackedBoxPose> visible;
+          if (!updateVisibleBoxScene(active_box_instance_id_, false, false, visible,
+              failure, planning_canceled)) {return false;}
+          active_visible_boxes_ = visible;
+          return motion_planner_.validateHeldClosure(failure);
+        }))
     {
       return outcome(false, kSafetyAbort, error, held_pose_);
-    }
-    active_visible_boxes_ = visible_boxes;
-    if (!motion_planner_.validateHeldClosure(error)) {
-      setState(ManipulationState::RECOVERY_REQUIRED, error);
-      return outcome(false, kRecoveryRequired, error, held_pose_);
     }
     Eigen::Isometry3d from_pose;
     try {
@@ -1391,50 +1581,44 @@ private:
         true, kSuccess, "box is already at carry pose " + std::string(carryPoseName(target)),
         target_message);
     }
-    if (!perception_.refresh(error)) {
-      return outcome(false, kSafetyAbort, error, held_pose_);
-    }
-    if (!synchronizeTableCollisionScene(error, canceled)) {
+    if (!runPhase("perception", plan_only, feedback, 0.10F, held_pose_, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          return perception_.refresh(failure) && synchronizeTableCollisionScene(failure, planning_canceled);
+        }))
+    {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
     if (canceled()) {
       return outcome(false, kSafetyAbort, "carry transition canceled before planning", held_pose_);
     }
-    feedback("planning_carry_" + std::string(carryPoseName(target)), 0.15F, held_pose_);
-    auto current = move_group_.getCurrentState(2.0);
-    if (!current) {
-      return outcome(false, kSafetyAbort, "current robot state unavailable", held_pose_);
-    }
     AdaptiveCarryPlan carry_plan;
-    if (!motion_planner_.planAdaptiveCarryTransition(
-        *current, from_pose, nominal_target_pose,
-        preferred_target_pose ? &*preferred_target_pose : nullptr,
-        held_box_to_left_contact_, held_box_to_right_contact_, carry_plan, error, canceled))
+    if (!runPhase("carry_" + std::string(carryPoseName(target)), plan_only, feedback,
+        0.50F, held_pose_, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (!plan_only && !refreshMotionState(failure, planning_canceled, true)) {return false;}
+          if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, failure,
+              planning_canceled) || !synchronizeTableCollisionScene(failure, planning_canceled))
+          {return false;}
+          auto current = move_group_.getCurrentState(config_.reset_state_timeout);
+          if (!current) {failure = "carry state unavailable"; return false;}
+          if (!motion_planner_.planAdaptiveCarryTransition(*current, toEigen(held_pose_.pose),
+              nominal_target_pose, preferred_target_pose ? &*preferred_target_pose : nullptr,
+              held_box_to_left_contact_, held_box_to_right_contact_, carry_plan,
+              failure, planning_canceled)) {return false;}
+          if (!plan_only && !trajectory_executor_.execute(carry_plan.trajectory, canceled)) {
+            motion_planner_.updateHeldPoseFromRobot();
+            failure = trajectory_executor_.error("carry transition execution failed");
+            return false;
+          }
+          return true;
+        }))
     {
-      return outcome(
-        false, kPlanningFailed, "carry transition planning failed: " + error, held_pose_);
+      if (!plan_only && canceled()) {setState(ManipulationState::RECOVERY_REQUIRED, error);}
+      return outcome(false, kPlanningFailed, error, held_pose_);
     }
     const auto selected_target_message = stampedPose(carry_plan.pose);
-    if (canceled()) {
-      return outcome(false, kSafetyAbort, "carry transition canceled after planning", held_pose_);
-    }
     if (plan_only) {
-      return outcome(
-        true, kSuccess, "carry transition to pose " + std::string(carryPoseName(target)) +
-        " is feasible", selected_target_message);
-    }
-
-    feedback("moving_to_carry_" + std::string(carryPoseName(target)), 0.50F, held_pose_);
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled)) {
-      return outcome(false, kSafetyAbort, error, held_pose_);
-    }
-    if (!trajectory_executor_.execute(carry_plan.trajectory, canceled)) {
-      motion_planner_.updateHeldPoseFromRobot();
-      setState(ManipulationState::RECOVERY_REQUIRED, "carry transition execution failed");
-      return outcome(
-        false, kRecoveryRequired,
-        trajectory_executor_.error("carry transition execution failed") +
-        "; object remains held", held_pose_);
+      return outcome(true, kSuccess, "carry transition is feasible", selected_target_message);
     }
     if (canceled()) {
       motion_planner_.updateHeldPoseFromRobot();
@@ -1463,7 +1647,7 @@ private:
       return false;
     }
     if (!post_place_planner_->planToNamedTarget(*current, planning_scene_.snapshot(),
-        config_.prepare_named_target, output, error, canceled))
+        config_.prepare_named_target, output, error, canceled, phase_deadline_))
     {
       error = "Pick prepare planning failed: " + error;
       return false;
@@ -1486,20 +1670,19 @@ private:
       return outcome(false, kInvalidState, "Pick requires manipulation state EMPTY");
     }
     TrackedBoxPose tracked_box;
-    std::string selection_error;
-    if (!selectBox(instance_id, tracked_box, selection_error, canceled)) {
-      return outcome(false, kNoStableBoxPose, selection_error);
-    }
     active_visible_boxes_.clear();
     std::vector<TrackedBoxPose> visible_boxes;
     std::string error;
-    if (!updateVisibleBoxScene(
-        tracked_box.instance_id, true, true, visible_boxes, error, canceled))
+    if (!runPhase("select_box", plan_only, feedback, 0.05F,
+        geometry_msgs::msg::PoseStamped(), canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          return selectBox(instance_id, tracked_box, failure, planning_canceled) &&
+            updateVisibleBoxScene(tracked_box.instance_id, true, true,
+              visible_boxes, failure, planning_canceled) &&
+            refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, failure);
+        }))
     {
-      return outcome(false, kSafetyAbort, error);
-    }
-    if (!refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, error)) {
-      return outcome(false, kSafetyAbort, error);
+      return outcome(false, kNoStableBoxPose, error);
     }
     const geometry_msgs::msg::PoseStamped box_message = stampedBoxPose(tracked_box);
     Eigen::Isometry3d pick_pose;
@@ -1509,25 +1692,21 @@ private:
       return outcome(false, kInvalidGoal, exception.what());
     }
 
-    if (!planning_scene_.applyBox(pick_pose, error)) {
+    if (!runPhase("pick_scene", plan_only, feedback, 0.05F, box_message, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          return planning_scene_.applyBox(pick_pose, failure) && perception_.refresh(failure) &&
+            synchronizeTableCollisionScene(failure, planning_canceled);
+        }))
+    {
       return outcome(false, kSafetyAbort, error);
-    }
-    if (canceled()) {
-      return outcome(false, kSafetyAbort, "pick canceled before perception refresh");
-    }
-    if (!perception_.refresh(error)) {
-      return outcome(false, kSafetyAbort, error);
-    }
-    if (!synchronizeTableCollisionScene(error, canceled)) {
-      return outcome(false, kSafetyAbort, error);
-    }
-    if (canceled()) {
-      return outcome(false, kSafetyAbort, "pick canceled before planning");
     }
     feedback("planning_prepare", 0.10F, box_message);
     PostPlacePlan prepare_plan;
     moveit::core::RobotState prepare_end(move_group_.getRobotModel());
-    if (!planPickPreparation(prepare_plan, prepare_end, error, canceled)) {
+    if (!runPhase("planning_prepare", plan_only, feedback, 0.10F, box_message, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          return planPickPreparation(prepare_plan, prepare_end, failure, planning_canceled);
+        })) {
       return outcome(false, kPlanningFailed, error);
     }
     feedback("planning_pregrasp", 0.15F, box_message);
@@ -1547,7 +1726,9 @@ private:
             candidate_contact, pick_pose, nominal_carry_pose, true,
             candidate.candidate.box_to_left_contact,
             candidate.candidate.box_to_right_contact,
-            carry_plan, continuation_error, canceled))
+            carry_plan, continuation_error, [this, &canceled]() {
+              return canceled() || std::chrono::steady_clock::now() >= phase_deadline_;
+            }))
         {
           if (!active_profile_id_.empty()) {
             continuation_error = "profile '" + active_profile_id_ + "' Carry A: " +
@@ -1557,9 +1738,12 @@ private:
         }
         return true;
       };
-    if (!motion_planner_.planPickPath(
-        box_message, pick_pose, pregrasp_plan, approach, contact_end,
-        selected_grasp, carry_validator, error, canceled, &prepare_end))
+    if (!runPhase("planning_pick", plan_only, feedback, 0.15F, box_message, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          return motion_planner_.planPickPath(
+            box_message, pick_pose, pregrasp_plan, approach, contact_end,
+            selected_grasp, carry_validator, failure, planning_canceled, &prepare_end);
+        }))
     {
       return outcome(false, kPlanningFailed, error);
     }
@@ -1572,58 +1756,72 @@ private:
         stampedPose(carry_plan.pose));
     }
 
-    feedback("moving_to_prepare", 0.25F, box_message);
-    for (const auto & segment : prepare_plan.segments) {
-      if (!validateVisibleBoxScene(visible_boxes, "", error, canceled) ||
-        !planning_scene_.synchronize(error))
-      {
-        return outcome(false, kSafetyAbort, error);
-      }
-      auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
-      if (!measured || !post_place_planner_->validateSegment(segment, *measured,
-          planning_scene_.snapshot(), error, canceled, true))
-      {
-        return outcome(false, kSafetyAbort,
-          measured ? "prepare revalidation failed: " + error : "prepare state unavailable");
-      }
-      if (!trajectory_executor_.execute(segment.trajectory, canceled)) {
-        return outcome(false, kExecutionFailed,
-          trajectory_executor_.error("prepare execution failed"));
-      }
+    if (!runPhase("prepare", false, feedback, 0.25F, box_message, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (!refreshMotionState(failure, planning_canceled, false) ||
+            !validateVisibleBoxScene(visible_boxes, "", failure, planning_canceled) ||
+            !planPickPreparation(prepare_plan, prepare_end, failure, planning_canceled))
+          {
+            return false;
+          }
+          for (const auto & segment : prepare_plan.segments) {
+            auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
+            if (!measured) {failure = "prepare state unavailable"; return false;}
+            if (!post_place_planner_->validateSegment(segment, *measured,
+                planning_scene_.snapshot(), failure, planning_canceled, true)) {return false;}
+            if (!trajectory_executor_.execute(segment.trajectory, canceled)) {
+              failure = trajectory_executor_.error("prepare execution failed");
+              return false;
+            }
+          }
+          return true;
+        }))
+    {
+      return outcome(false, kExecutionFailed, error);
     }
-    feedback("executing_pregrasp", 0.30F, box_message);
-    if (canceled()) {
-      return outcome(false, kSafetyAbort, "pick canceled before pregrasp execution");
-    }
-    if (!validateVisibleBoxScene(visible_boxes, "", error, canceled)) {
-      return outcome(false, kSafetyAbort, error);
-    }
-    if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
-      return outcome(
-        false, kExecutionFailed, trajectory_executor_.error(
-          "pregrasp execution failed"));
+    // The prepare phase can finish at a different IK state than the preflight prediction.
+    // Every pregrasp attempt plans from actual feedback, including after partial execution.
+    if (!runPhase("pregrasp", false, feedback, 0.30F, box_message, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (!refreshMotionState(failure, planning_canceled, false) ||
+            !validateVisibleBoxScene(visible_boxes, "", failure, planning_canceled)) {return false;}
+          auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
+          if (!measured) {failure = "pregrasp state unavailable"; return false;}
+          if (!motion_planner_.planPickPath(box_message, pick_pose, pregrasp_plan, approach,
+              contact_end, selected_grasp, carry_validator, failure, planning_canceled,
+              measured.get())) {return false;}
+          if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
+            failure = trajectory_executor_.error("pregrasp execution failed");
+            return false;
+          }
+          return true;
+        }))
+    {
+      return outcome(false, kExecutionFailed, error);
     }
     if (canceled()) {
       return outcome(false, kExecutionFailed, "pick canceled before approach");
     }
-    if (!validateVisibleBoxScene(visible_boxes, "", error, canceled)) {
-      return outcome(false, kSafetyAbort, error);
-    }
-    const auto & pick_grasp = selected_grasp.candidate.grasp;
-    auto current = move_group_.getCurrentState(2.0);
-    if (!current ||
-      !motion_planner_.buildApproach(*current, pick_grasp, approach, contact_end, canceled))
+    std::shared_ptr<moveit::core::RobotState> current;
+    if (!runPhase("approach", false, feedback, 0.45F, box_message, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (!refreshMotionState(failure, planning_canceled, false) ||
+            !validateVisibleBoxScene(visible_boxes, "", failure, planning_canceled)) {return false;}
+          current = move_group_.getCurrentState(config_.reset_state_timeout);
+          if (!current) {failure = "approach state unavailable"; return false;}
+          auto grasp = selected_grasp.candidate.grasp;
+          grasp.left_pregrasp = current->getGlobalLinkTransform(config_.left_tcp);
+          grasp.right_pregrasp = current->getGlobalLinkTransform(config_.right_tcp);
+          if (!motion_planner_.buildApproach(*current, grasp, approach, contact_end,
+              failure, planning_canceled)) {return false;}
+          if (!trajectory_executor_.execute(approach, canceled)) {
+            failure = trajectory_executor_.error("approach execution failed");
+            return false;
+          }
+          return true;
+        }))
     {
-      return outcome(false, kSafetyAbort, "approach revalidation failed");
-    }
-    if (canceled()) {
-      return outcome(false, kSafetyAbort, "pick canceled before approach execution");
-    }
-    feedback("approaching", 0.45F, box_message);
-    if (!trajectory_executor_.execute(approach, canceled)) {
-      return outcome(
-        false, kExecutionFailed, trajectory_executor_.error(
-          "approach execution failed"));
+      return outcome(false, kSafetyAbort, "approach failed: " + error);
     }
     if (canceled()) {
       return outcome(false, kExecutionFailed, "pick canceled before attachment");
@@ -1634,8 +1832,13 @@ private:
       return outcome(false, kExecutionFailed, "pick canceled before physical attachment");
     }
     bool attach_dispatched = false;
-    if (!attachment_.attach(error, &attach_dispatched)) {
+    if (!runPhase("attach", false, feedback, 0.60F, box_message, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (planning_canceled()) {failure = "attachment canceled"; return false;}
+          return attachment_.attach(failure, &attach_dispatched);
+        }, [&]() {return attach_dispatched;})) {
       if (attach_dispatched) {
+        taskCheckpoint("attach_uncertain", "uncertain");
         attachment_.setExpected(true);
         held_pose_ = box_message;
         held_box_to_left_contact_ = selected_grasp.candidate.box_to_left_contact;
@@ -1665,7 +1868,12 @@ private:
         false, kRecoveryRequired,
         "pick canceled after physical attachment; object may remain held", held_pose_);
     }
-    if (!planning_scene_.attachBox(error)) {
+    taskCheckpoint("attach", "attached");
+    setState(ManipulationState::HOLDING, "box attached; synchronizing planning scene");
+    if (!runPhase("attach_scene", false, feedback, 0.60F, box_message, canceled, error,
+        [&](const CancelFunction &, std::string & failure) {
+          return planning_scene_.attachBox(failure);
+        })) {
       setState(
         ManipulationState::RECOVERY_REQUIRED,
         "physical attachment may exist but MoveIt attachment failed");
@@ -1679,38 +1887,28 @@ private:
       return outcome(false, kRecoveryRequired, "pick canceled; object remains held", held_pose_);
     }
 
-    current = move_group_.getCurrentState(2.0);
-    const auto carry_revalidation_deadline = std::chrono::steady_clock::now() +
-      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-      std::chrono::duration<double>(config_.carry_search_timeout));
-    if (!current || !motion_planner_.buildCarryRoute(
-        *current, pick_pose, carry_plan.pose,
-        carryPose(MoveCarryPose::Goal::CARRY_A), carry_plan.route, false,
-        held_box_to_left_contact_, held_box_to_right_contact_,
-        carry_plan.trajectory, *carry_plan.end_state, error,
-        carry_revalidation_deadline, canceled))
+    if (!runPhase("carry", false, feedback, 0.80F, box_message, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (!refreshMotionState(failure, planning_canceled, true) ||
+            !validateVisibleBoxScene(visible_boxes, active_box_instance_id_, failure,
+              planning_canceled)) {return false;}
+          current = move_group_.getCurrentState(config_.reset_state_timeout);
+          if (!current) {failure = "carry state unavailable"; return false;}
+          const auto preferred = carry_plan.pose;
+          if (!motion_planner_.planAdaptiveCarryTransition(*current, toEigen(held_pose_.pose),
+              carryPose(MoveCarryPose::Goal::CARRY_A), &preferred,
+              held_box_to_left_contact_, held_box_to_right_contact_, carry_plan,
+              failure, planning_canceled)) {return false;}
+          if (!trajectory_executor_.execute(carry_plan.trajectory, canceled)) {
+            motion_planner_.updateHeldPoseFromRobot();
+            failure = trajectory_executor_.error("carry execution failed");
+            return false;
+          }
+          return true;
+        }))
     {
-      setState(ManipulationState::RECOVERY_REQUIRED, "carry revalidation failed");
-      motion_planner_.updateHeldPoseFromRobot();
-      return outcome(
-        false, kRecoveryRequired, "carry revalidation failed; object remains held",
-        held_pose_);
-    }
-    feedback("moving_to_carry", 0.80F, box_message);
-    if (canceled()) {
-      setState(ManipulationState::RECOVERY_REQUIRED, "pick canceled before carry execution");
-      return outcome(false, kRecoveryRequired, "pick canceled; object remains held", held_pose_);
-    }
-    if (!validateVisibleBoxScene(visible_boxes, active_box_instance_id_, error, canceled)) {
       setState(ManipulationState::RECOVERY_REQUIRED, error);
       return outcome(false, kRecoveryRequired, error + "; object remains held", held_pose_);
-    }
-    if (!trajectory_executor_.execute(carry_plan.trajectory, canceled)) {
-      motion_planner_.updateHeldPoseFromRobot();
-      setState(ManipulationState::RECOVERY_REQUIRED, "carry execution failed");
-      return outcome(
-        false, kRecoveryRequired,
-        trajectory_executor_.error("carry execution failed") + "; object remains held", held_pose_);
     }
     if (canceled()) {
       motion_planner_.updateHeldPoseFromRobot();
@@ -1729,9 +1927,10 @@ private:
     const Eigen::Isometry3d & left, const Eigen::Isometry3d & right,
     const planning_scene::PlanningScenePtr & scene, bool include_retreat,
     PostPlacePlan & output, std::string & error, const CancelFunction & canceled,
-    std::chrono::steady_clock::time_point deadline)
+    std::chrono::steady_clock::time_point deadline, bool include_prepare = true)
   {
     output.segments.clear();
+    const std::string intermediate = include_prepare ? config_.prepare_named_target : "";
     moveit::core::RobotState empty_start(start);
     empty_start.clearAttachedBody(config_.box_id);
     empty_start.update();
@@ -1743,7 +1942,7 @@ private:
     }
     if (!include_retreat) {
       return post_place_planner_->plan(empty_start, {}, scene, false, output, error, canceled,
-        deadline, config_.post_place_named_target, config_.prepare_named_target);
+        deadline, config_.post_place_named_target, intermediate);
     }
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       // Pose-to-pose mode has no closed-chain constraint to preserve after
@@ -1754,7 +1953,7 @@ private:
       const HandPosePair retreat_target{retreat.left_pregrasp, retreat.right_pregrasp};
       return post_place_planner_->plan(
         empty_start, retreat_target, scene, true, output, error, canceled, deadline,
-        config_.post_place_named_target, config_.prepare_named_target);
+        config_.post_place_named_target, intermediate);
     }
     // Try farther coordinated disengagement endpoints if the nominal endpoint
     // has no named-target continuation. Each complete retreat/return attempt
@@ -1786,7 +1985,7 @@ private:
       }
       PostPlacePlan named;
       if (!post_place_planner_->plan(retreat_end, {}, scene, false, named, error, canceled,
-          attempt_deadline, config_.post_place_named_target, config_.prepare_named_target))
+          attempt_deadline, config_.post_place_named_target, intermediate))
       {
         continue;
       }
@@ -1864,7 +2063,8 @@ private:
       std::string & error) {
         PostPlacePlan plan;
         const bool feasible = planPostPlaceSequence(release_state, pose, left, right,
-          planning_scene_.releasedBoxSnapshot(pose), true, plan, error, canceled, deadline);
+          planning_scene_.releasedBoxSnapshot(pose), true, plan, error, canceled,
+          std::min(deadline, phase_deadline_));
         if (!feasible) {
           RCLCPP_WARN(node_->get_logger(), "Post-place preflight rejected placement: %s", error.c_str());
         }
@@ -1885,17 +2085,7 @@ private:
     }
     geometry_msgs::msg::PoseStamped place_message;
     std::string error;
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled)) {
-      return outcome(false, kSafetyAbort, error, held_pose_);
-    }
-    std::vector<TrackedBoxPose> visible_boxes;
-    if (!updateVisibleBoxScene(
-        active_box_instance_id_, false, false, visible_boxes, error, canceled))
-    {
-      return outcome(false, kSafetyAbort, error, held_pose_);
-    }
-    active_visible_boxes_ = visible_boxes;
-    if (!resolvePlacePose(requested_pose, place_message, error, canceled)) {
+    if (!resolveTaskPlacePose(requested_pose, place_message, plan_only, feedback, error, canceled)) {
       return outcome(false, kInvalidGoal, error);
     }
     Eigen::Isometry3d place_pose;
@@ -1904,9 +2094,18 @@ private:
     } catch (const std::exception & exception) {
       return outcome(false, kInvalidGoal, exception.what());
     }
-    if (!motion_planner_.validateHeldClosure(error)) {
-      setState(ManipulationState::RECOVERY_REQUIRED, error);
-      return outcome(false, kRecoveryRequired, error, held_pose_);
+    if (!runPhase("scene", plan_only, feedback, 0.05F, held_pose_, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, failure,
+              planning_canceled)) {return false;}
+          std::vector<TrackedBoxPose> visible;
+          if (!updateVisibleBoxScene(active_box_instance_id_, false, false, visible,
+              failure, planning_canceled)) {return false;}
+          active_visible_boxes_ = visible;
+          return motion_planner_.validateHeldClosure(failure);
+        }))
+    {
+      return outcome(false, kSafetyAbort, error, held_pose_);
     }
     Eigen::Isometry3d from_pose;
     try {
@@ -1914,56 +2113,50 @@ private:
     } catch (const std::exception & exception) {
       return outcome(false, kRecoveryRequired, exception.what(), held_pose_);
     }
-    if (!perception_.refresh(error)) {
-      return outcome(false, kSafetyAbort, error, held_pose_);
-    }
-    if (!synchronizeTableCollisionScene(error, canceled)) {
+    if (!runPhase("perception", plan_only, feedback, 0.10F, held_pose_, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          return perception_.refresh(failure) && synchronizeTableCollisionScene(failure, planning_canceled);
+        }))
+    {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
     if (canceled()) {
       return outcome(false, kSafetyAbort, "place canceled before planning", held_pose_);
     }
-    feedback("planning_place", 0.15F, held_pose_);
-    auto current = move_group_.getCurrentState(2.0);
-    if (!current) {
-      return outcome(false, kSafetyAbort, "current robot state unavailable", held_pose_);
-    }
+    std::shared_ptr<moveit::core::RobotState> current;
     moveit_msgs::msg::RobotTrajectory transport;
-    moveit::core::RobotState place_end(*current);
     Eigen::Isometry3d selected_place_pose = place_pose;
-    const PlaceContinuation return_preflight = plan_only ?
-      postPlaceContinuation(held_box_to_left_contact_, held_box_to_right_contact_, canceled) :
-      PlaceContinuation{};
-    if (!motion_planner_.planAdaptivePlace(
-        *current, from_pose, place_pose, false, false, held_box_to_left_contact_,
-        held_box_to_right_contact_, transport, place_end, selected_place_pose, error, canceled,
-        return_preflight))
+    if (!runPhase("place", plan_only, feedback, 0.45F, held_pose_, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (!plan_only && !refreshMotionState(failure, planning_canceled, true)) {return false;}
+          if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, failure,
+              planning_canceled) || !synchronizeTableCollisionScene(failure, planning_canceled))
+          {return false;}
+          current = move_group_.getCurrentState(config_.reset_state_timeout);
+          if (!current) {failure = "place state unavailable"; return false;}
+          moveit::core::RobotState place_end(*current);
+          const PlaceContinuation return_preflight = plan_only ?
+            postPlaceContinuation(held_box_to_left_contact_, held_box_to_right_contact_,
+              planning_canceled) : PlaceContinuation{};
+          if (!motion_planner_.planAdaptivePlace(*current, toEigen(held_pose_.pose), place_pose,
+              false, false, held_box_to_left_contact_, held_box_to_right_contact_,
+              transport, place_end, selected_place_pose, failure, planning_canceled,
+              return_preflight)) {return false;}
+          if (!plan_only && !trajectory_executor_.execute(transport, canceled)) {
+            motion_planner_.updateHeldPoseFromRobot();
+            failure = trajectory_executor_.error("place execution failed");
+            return false;
+          }
+          return true;
+        }))
     {
-      return outcome(
-        false, kPlanningFailed, "adaptive closed-chain place planning failed: " + error,
-        held_pose_);
+      if (!plan_only && canceled()) {setState(ManipulationState::RECOVERY_REQUIRED, error);}
+      return outcome(false, kPlanningFailed, error, held_pose_);
     }
     place_pose = selected_place_pose;
     place_message = stampedPose(place_pose);
-    if (canceled()) {
-      return outcome(false, kSafetyAbort, "place canceled after planning", held_pose_);
-    }
     if (plan_only) {
       return outcome(true, kSuccess, "place, retreat, and return path is feasible", place_message);
-    }
-    if (canceled()) {
-      return outcome(false, kExecutionFailed, "place canceled before motion", held_pose_);
-    }
-    feedback("moving_to_place", 0.45F, held_pose_);
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled)) {
-      return outcome(false, kSafetyAbort, error, held_pose_);
-    }
-    if (!trajectory_executor_.execute(transport, canceled)) {
-      motion_planner_.updateHeldPoseFromRobot();
-      setState(ManipulationState::RECOVERY_REQUIRED, "place motion failed");
-      return outcome(
-        false, kRecoveryRequired,
-        trajectory_executor_.error("place motion failed") + "; object remains held", held_pose_);
     }
     held_pose_ = place_message;
     if (canceled()) {
@@ -1972,12 +2165,23 @@ private:
     }
 
     feedback("detaching", 0.70F, place_message);
-    if (!attachment_.detach(error)) {
+    bool detach_dispatched = false;
+    if (!runPhase("release", false, feedback, 0.70F, place_message, canceled, error,
+        [&](const CancelFunction & planning_canceled, std::string & failure) {
+          if (planning_canceled()) {failure = "release canceled"; return false;}
+          return attachment_.detach(failure, &detach_dispatched);
+        }, [&]() {return detach_dispatched;})) {
+      if (detach_dispatched) {taskCheckpoint("release_uncertain", "uncertain");}
       setState(ManipulationState::RECOVERY_REQUIRED, "detach service failed");
       return outcome(false, kRecoveryRequired, error + "; object remains held", held_pose_);
     }
     attachment_.setExpected(false);
-    if (!planning_scene_.placeBox(place_pose, error)) {
+    taskCheckpoint("release", "released");
+    setState(ManipulationState::EMPTY, "box released; synchronizing planning scene");
+    if (!runPhase("release_scene", false, feedback, 0.70F, place_message, canceled, error,
+        [&](const CancelFunction &, std::string & failure) {
+          return planning_scene_.placeBox(place_pose, failure);
+        })) {
       setState(
         ManipulationState::RECOVERY_REQUIRED,
         "box release completed but planning-scene transition failed");
@@ -1995,68 +2199,52 @@ private:
     held_pose_ = geometry_msgs::msg::PoseStamped();
     PostPlacePlan return_plan;
     bool include_retreat = true;
+    bool include_prepare = true;
     std::size_t segment_index = 0;
-    int replans = 0;
-    const auto plan_remaining = [&]() {
-        if (!planning_scene_.synchronize(error)) {
-          return false;
-        }
-        current = move_group_.getCurrentState(config_.reset_state_timeout);
-        if (!current) {
-          error = "measured return state is unavailable";
-          return false;
-        }
-        const auto deadline = std::chrono::steady_clock::now() +
-          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-          std::chrono::duration<double>(config_.return_planning_timeout));
-        return planPostPlaceSequence(*current, place_pose,
-          held_box_to_left_contact_, held_box_to_right_contact_, planning_scene_.snapshot(),
-          include_retreat, return_plan, error, canceled, deadline);
-      };
-    feedback("planning_return", 0.80F, place_message);
-    if (!plan_remaining()) {
-      setState(ManipulationState::EMPTY, "box placed; return planning failed: " + error);
-      return outcome(false, kPlanningFailed,
-        "box placed, but return planning failed: " + error, place_message);
-    }
-    while (segment_index < return_plan.segments.size()) {
-      if (canceled()) {
-        return outcome(false, kExecutionFailed, "box placed, but return canceled", place_message);
+    while (true) {
+      // Copy the target before replanning can replace the sequence.
+      std::optional<PostPlaceSegment> target_segment;
+      if (segment_index < return_plan.segments.size()) {
+        target_segment = return_plan.segments[segment_index];
       }
-      if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled) ||
-        !planning_scene_.synchronize(error))
+      const std::string phase = target_segment ?
+        (target_segment->retreat ? "retreat" : target_segment->name) : "return";
+      if (!runPhase(phase, false, feedback, 0.90F, place_message, canceled, error,
+          [&](const CancelFunction & planning_canceled, std::string & failure) {
+            if (!refreshMotionState(failure, planning_canceled, false) ||
+              !validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_,
+                failure, planning_canceled)) {return false;}
+            current = move_group_.getCurrentState(config_.reset_state_timeout);
+            if (!current) {failure = "measured return state unavailable"; return false;}
+            if (!target_segment || !validatePostPlaceSegment(*target_segment, *current,
+                planning_scene_.snapshot(), failure, planning_canceled))
+            {
+              const auto deadline = std::min(phase_deadline_, std::chrono::steady_clock::now() +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(config_.return_planning_timeout)));
+              if (!planPostPlaceSequence(*current, place_pose, held_box_to_left_contact_,
+                  held_box_to_right_contact_, planning_scene_.snapshot(), include_retreat,
+                  return_plan, failure, planning_canceled, deadline, include_prepare)) {return false;}
+              segment_index = 0;
+              if (return_plan.segments.empty()) {failure = "empty return sequence"; return false;}
+              target_segment = return_plan.segments.front();
+            }
+            if (!trajectory_executor_.execute(target_segment->trajectory, canceled)) {
+              failure = trajectory_executor_.error("return execution failed");
+              // Invalidate the old start. Replan from measured feedback on the next attempt.
+              target_segment.reset();
+              return false;
+            }
+            return true;
+          }))
       {
-        return outcome(false, kSafetyAbort, error, place_message);
+        return outcome(false, kPlanningFailed, "box placed; " + error, place_message);
       }
-      current = move_group_.getCurrentState(config_.reset_state_timeout);
-      if (!current) {
-        return outcome(false, kSafetyAbort,
-          "box placed, but measured return state is unavailable", place_message);
-      }
-      const auto & segment = return_plan.segments[segment_index];
-      if (!validatePostPlaceSegment(
-          segment, *current, planning_scene_.snapshot(), error, canceled))
-      {
-        if (++replans > 2 || !plan_remaining()) {
-          setState(ManipulationState::EMPTY, "box placed; return revalidation failed: " + error);
-          return outcome(false, kPlanningFailed,
-            "box placed, but return revalidation failed: " + error, place_message);
-        }
-        segment_index = 0;
-        continue;
-      }
-      feedback(segment.retreat ? "retreating" :
-        segment.name == "to_" + config_.prepare_named_target ? "returning_to_prepare" :
-        "returning_to_" + config_.post_place_named_target, 0.90F, place_message);
-      if (!trajectory_executor_.execute(segment.trajectory, canceled)) {
-        setState(ManipulationState::EMPTY, "box placed; return execution failed");
-        return outcome(false, kExecutionFailed,
-          trajectory_executor_.error("box placed, but return execution failed"), place_message);
-      }
-      if (segment.retreat) {
-        include_retreat = false;
-      }
+      if (target_segment->retreat) {include_retreat = false;}
+      if (target_segment->name == "to_" + config_.prepare_named_target) {include_prepare = false;}
+      taskCheckpoint(target_segment->retreat ? "retreat" : target_segment->name, "released");
       ++segment_index;
+      if (segment_index >= return_plan.segments.size()) {break;}
     }
     if (canceled()) {
       setState(ManipulationState::EMPTY,
@@ -2230,6 +2418,10 @@ private:
         if (clear_reset_latch) {
           reset_physical_detach_done_ = false;
         }
+        if (phase_controller_.snapshot().action == "reset") {
+          phase_controller_.finish(canceling ? "canceled" : success ? "completed" : "failed");
+          publishTaskStatus(phase_controller_.snapshot());
+        }
         reset_coordinator_.finishReset(clear_reset_latch);
         if (canceling) {
           goal->canceled(result);
@@ -2251,7 +2443,7 @@ private:
     const auto timeout = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(config_.reset_preemption_timeout));
     const auto access = reset_coordinator_.waitForResetAccess(
-      timeout, [goal]() {return goal->is_canceling();});
+      timeout, [this, goal]() {return goal->is_canceling() || shutting_down_.load() || !rclcpp::ok();});
     if (access == ResetAcquireResult::CANCELED) {
       fail(
         ResetManipulation::Result::CANCELED,
@@ -2265,6 +2457,8 @@ private:
       return;
     }
 
+    beginTask(goal, "reset");
+    taskCheckpoint("reset_confirm_empty", "released");
     try {
       std::string error;
       feedback("preparing_scene", 0.20F);
@@ -2286,17 +2480,17 @@ private:
       motion_planner_.clearGraspMarkers();
       move_group_.clearPoseTargets();
 
-      feedback("refreshing_octomap", 0.35F);
-      if (config_.perception_source == Perception3dSource::NONE) {
-        if (!perception_.clear(error) || !planning_scene_.synchronize(error)) {
-          fail(ResetManipulation::Result::CLEANUP_FAILED, error);
-          return;
-        }
-      } else if (!perception_.refresh(error)) {
-        fail(ResetManipulation::Result::CLEANUP_FAILED, error);
-        return;
-      }
-      if (!refreshResetScene(error, [goal]() {return goal->is_canceling();})) {
+      const FeedbackFunction reset_scene_feedback = [&feedback](const std::string & stage,
+          float progress, const geometry_msgs::msg::PoseStamped &) {feedback(stage, progress);};
+      if (!runPhase("reset_scene", false, reset_scene_feedback, 0.35F, held_pose_,
+          [this, goal]() {return goal->is_canceling() || shutting_down_.load() || !rclcpp::ok();}, error,
+          [&](const CancelFunction & planning_canceled, std::string & failure) {
+            if (config_.perception_source == Perception3dSource::NONE) {
+              if (!perception_.clear(failure) || !planning_scene_.synchronize(failure)) {return false;}
+            } else if (!perception_.refresh(failure)) {return false;}
+            return refreshResetScene(failure, planning_canceled);
+          }))
+      {
         fail(ResetManipulation::Result::CLEANUP_FAILED, error);
         return;
       }
@@ -2306,74 +2500,44 @@ private:
         return;
       }
 
-      const CancelFunction canceled = [goal]() {return goal->is_canceling();};
+      const CancelFunction canceled = [this, goal]() {return goal->is_canceling() || shutting_down_.load() || !rclcpp::ok();};
       PostPlacePlan reset_plan;
-      uint16_t planning_failure_code = ResetManipulation::Result::PLANNING_FAILED;
       std::map<std::string, double> settled_reset_positions;
       trajectory_executor_.resetCancellation();
-      const auto plan_reset = [&]() {
-          auto current = move_group_.getCurrentState(config_.reset_state_timeout);
-          if (!current) {
-            planning_failure_code = ResetManipulation::Result::STATE_UNAVAILABLE;
-            error = "current robot state unavailable";
-            return false;
-          }
-          planning_failure_code = ResetManipulation::Result::PLANNING_FAILED;
-          return post_place_planner_->planToNamedTarget(*current, planning_scene_.snapshot(),
-            config_.reset_named_target, reset_plan, error, canceled);
-        };
-      feedback("planning_" + config_.reset_named_target, 0.50F);
-      if (!plan_reset()) {
+      const FeedbackFunction reset_feedback = [&feedback](const std::string & stage,
+          float progress, const geometry_msgs::msg::PoseStamped &) {feedback(stage, progress);};
+      if (!runPhase("reset_to_" + config_.reset_named_target, false, reset_feedback, 0.70F,
+          held_pose_, canceled, error,
+          [&](const CancelFunction & planning_canceled, std::string & failure) {
+            if (!refreshMotionState(failure, planning_canceled, false) ||
+              !refreshResetScene(failure, planning_canceled)) {return false;}
+            auto current = move_group_.getCurrentState(config_.reset_state_timeout);
+            if (!current) {failure = "current reset state unavailable"; return false;}
+            if (!post_place_planner_->planToNamedTarget(*current, planning_scene_.snapshot(),
+                config_.reset_named_target, reset_plan, failure, planning_canceled,
+                phase_deadline_)) {return false;}
+            for (const auto & segment : reset_plan.segments) {
+              current = move_group_.getCurrentState(config_.reset_state_timeout);
+              if (!current) {failure = "reset state unavailable before execution"; return false;}
+              if (!post_place_planner_->validateSegment(segment, *current, planning_scene_.snapshot(),
+                  failure, planning_canceled, true)) {return false;}
+              if (!trajectory_executor_.execute(segment.trajectory, canceled, &settled_reset_positions)) {
+                failure = trajectory_executor_.error("reset execution failed");
+                return false;
+              }
+            }
+            feedback("verifying", 0.90F);
+            const auto verification = verifyJointTarget(reset_target_values_, settled_reset_positions,
+              config_.reset_joint_tolerance);
+            if (!verification.within_tolerance) {
+              failure = "reset verification failed at " + verification.joint_name;
+              return false;
+            }
+            return true;
+          }))
+      {
         fail(canceled() ? ResetManipulation::Result::CANCELED :
-          planning_failure_code, "reset planning failed: " + error);
-        return;
-      }
-      std::size_t segment_index = 0;
-      int replans = 0;
-      while (segment_index < reset_plan.segments.size()) {
-        if (canceled()) {
-          fail(ResetManipulation::Result::CANCELED, "reset canceled before execution");
-          return;
-        }
-        if (!refreshResetScene(error, canceled)) {
-          fail(ResetManipulation::Result::CLEANUP_FAILED, error);
-          return;
-        }
-        auto current = move_group_.getCurrentState(config_.reset_state_timeout);
-        if (!current) {
-          fail(ResetManipulation::Result::STATE_UNAVAILABLE, "current robot state unavailable");
-          return;
-        }
-        const auto & segment = reset_plan.segments[segment_index];
-        if (!post_place_planner_->validateSegment(
-            segment, *current, planning_scene_.snapshot(), error, canceled, true))
-        {
-          if (++replans > 2 || !plan_reset()) {
-            fail(canceled() ? ResetManipulation::Result::CANCELED :
-              planning_failure_code, "reset revalidation failed: " + error);
-            return;
-          }
-          segment_index = 0;
-          continue;
-        }
-        feedback("executing_" + config_.reset_named_target, 0.70F);
-        if (!trajectory_executor_.execute(segment.trajectory, canceled, &settled_reset_positions)) {
-          fail(canceled() ? ResetManipulation::Result::CANCELED :
-            ResetManipulation::Result::EXECUTION_FAILED,
-            trajectory_executor_.error("execution to the reset target failed"));
-          return;
-        }
-        ++segment_index;
-      }
-
-      feedback("verifying", 0.90F);
-      const auto verification = verifyJointTarget(
-        reset_target_values_, settled_reset_positions, config_.reset_joint_tolerance);
-      if (!verification.within_tolerance) {
-        fail(
-          ResetManipulation::Result::VERIFICATION_FAILED,
-          "reset verification failed at " + verification.joint_name + " (error " +
-          std::to_string(verification.error) + " rad)");
+          ResetManipulation::Result::PLANNING_FAILED, error);
         return;
       }
       if (goal->is_canceling()) {
@@ -2398,6 +2562,7 @@ private:
 
   void executePick(const std::shared_ptr<PickGoalHandle> & goal)
   {
+    beginTask(goal, "pick");
     ScopeExit release([this]() {releaseOperation();});
     const FeedbackFunction feedback = detectionAwareFeedback([goal](
       const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
@@ -2411,7 +2576,8 @@ private:
     try {
       task = runPick(
         goal->get_goal()->plan_only, goal->get_goal()->instance_id, feedback,
-        [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested();});
+        [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested() ||
+          shutting_down_.load() || !rclcpp::ok();});
     } catch (const std::exception & exception) {
       move_group_.stop();
       if (goal->get_goal()->plan_only) {
@@ -2424,12 +2590,16 @@ private:
         "Pick failed with exception: " + std::string(exception.what()));
     }
     clearSceneAfterEmptyOperation(task);
+    phase_controller_.finish(task.success ? "completed" : goal->is_canceling() ? "canceled" : "failed",
+      task.success ? "" : task.message);
+    publishTaskStatus(phase_controller_.snapshot());
     release.run();
     finishGoal(goal, task, std::make_shared<Pick::Result>());
   }
 
   void executePlace(const std::shared_ptr<PlaceGoalHandle> & goal)
   {
+    beginTask(goal, "place");
     ScopeExit release([this]() {releaseOperation();});
     const FeedbackFunction feedback = detectionAwareFeedback([goal](
       const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
@@ -2443,7 +2613,8 @@ private:
     try {
       task = runPlace(
         goal->get_goal()->place_pose, goal->get_goal()->plan_only, feedback,
-        [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested();});
+        [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested() ||
+          shutting_down_.load() || !rclcpp::ok();});
     } catch (const std::exception & exception) {
       move_group_.stop();
       setState(ManipulationState::RECOVERY_REQUIRED, "unexpected Place exception");
@@ -2452,12 +2623,16 @@ private:
         held_pose_);
     }
     clearSceneAfterEmptyOperation(task);
+    phase_controller_.finish(task.success ? "completed" : goal->is_canceling() ? "canceled" : "failed",
+      task.success ? "" : task.message);
+    publishTaskStatus(phase_controller_.snapshot());
     release.run();
     finishGoal(goal, task, std::make_shared<Place::Result>());
   }
 
   void executeMoveCarryPose(const std::shared_ptr<MoveCarryPoseGoalHandle> & goal)
   {
+    beginTask(goal, "move_carry_pose");
     ScopeExit release([this]() {releaseOperation();});
     const FeedbackFunction feedback = detectionAwareFeedback([goal](
       const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
@@ -2471,7 +2646,8 @@ private:
     try {
       task = runMoveCarryPose(
         goal->get_goal()->target_pose, goal->get_goal()->plan_only, feedback,
-        [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested();});
+        [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested() ||
+          shutting_down_.load() || !rclcpp::ok();});
     } catch (const std::exception & exception) {
       move_group_.stop();
       if (!goal->get_goal()->plan_only) {
@@ -2481,12 +2657,16 @@ private:
         false, goal->get_goal()->plan_only ? kSafetyAbort : kRecoveryRequired,
         "MoveCarryPose failed with exception: " + std::string(exception.what()), held_pose_);
     }
+    phase_controller_.finish(task.success ? "completed" : goal->is_canceling() ? "canceled" : "failed",
+      task.success ? "" : task.message);
+    publishTaskStatus(phase_controller_.snapshot());
     release.run();
     finishGoal(goal, task, std::make_shared<MoveCarryPose::Result>());
   }
 
   void executePickPlace(const std::shared_ptr<PickPlaceGoalHandle> & goal)
   {
+    beginTask(goal, "pick_place");
     ScopeExit release([this]() {releaseOperation();});
     const auto feedback = detectionAwareFeedback([goal](
         const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
@@ -2499,17 +2679,28 @@ private:
     feedback("checking_detections", 0.0F, geometry_msgs::msg::PoseStamped());
     TaskOutcome task;
     const CancelFunction canceled =
-      [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested();};
+      [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested() ||
+          shutting_down_.load() || !rclcpp::ok();};
     try {
       geometry_msgs::msg::PoseStamped place_pose;
       std::string place_error;
       TrackedBoxPose selected_box;
-      if (!selectBox(goal->get_goal()->instance_id, selected_box, place_error, canceled)) {
+      if (!runPhase("select_box", goal->get_goal()->plan_only, feedback, 0.05F,
+          geometry_msgs::msg::PoseStamped(), canceled, place_error,
+          [&](const CancelFunction & planning_canceled, std::string & failure) {
+            return selectBox(goal->get_goal()->instance_id, selected_box, failure, planning_canceled);
+          })) {
         task = outcome(false, kNoStableBoxPose, place_error);
-      } else if (!resolvePlacePose(goal->get_goal()->place_pose, place_pose, place_error, canceled)) {
+      } else if (!resolveTaskPlacePose(goal->get_goal()->place_pose, place_pose,
+          goal->get_goal()->plan_only, feedback, place_error, canceled)) {
         task = outcome(false, kInvalidGoal, place_error);
       } else if (goal->get_goal()->plan_only) {
-        task = planCompletePath(goal->get_goal()->instance_id, place_pose, canceled);
+        runPhase("planning_complete_path", true, feedback, 0.15F, place_pose, canceled, place_error,
+          [&](const CancelFunction & planning_canceled, std::string & failure) {
+            task = planCompletePath(goal->get_goal()->instance_id, place_pose, planning_canceled);
+            failure = task.message;
+            return task.success;
+          });
       } else {
         const FeedbackFunction pick_feedback = detectionAwareFeedback([goal](
           const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
@@ -2548,6 +2739,9 @@ private:
         "PickPlace failed with exception: " + std::string(exception.what()), held_pose_);
     }
     clearSceneAfterEmptyOperation(task);
+    phase_controller_.finish(task.success ? "completed" : goal->is_canceling() ? "canceled" : "failed",
+      task.success ? "" : task.message);
+    publishTaskStatus(phase_controller_.snapshot());
     release.run();
     finishGoal(goal, task, std::make_shared<PickPlace::Result>());
   }
@@ -2589,6 +2783,15 @@ private:
   TrajectoryExecutor trajectory_executor_;
   DualArmMotionPlanner motion_planner_;
   std::unique_ptr<PostPlacePlanner> post_place_planner_;
+  PhaseRetryController phase_controller_;
+  std::atomic<bool> shutting_down_{false};
+  std::mutex workers_mutex_;
+  std::vector<Worker> workers_;
+  std::chrono::steady_clock::time_point phase_deadline_{
+    std::chrono::steady_clock::time_point::max()};
+  rclcpp::Publisher<ManipulationTaskStatus>::SharedPtr task_status_pub_;
+  rclcpp::CallbackGroup::SharedPtr continue_callback_group_;
+  rclcpp::Service<ContinueManipulation>::SharedPtr continue_service_;
   rclcpp::Publisher<ManipulationState>::SharedPtr state_pub_;
   rclcpp_action::Server<Pick>::SharedPtr pick_action_server_;
   rclcpp_action::Server<Place>::SharedPtr place_action_server_;

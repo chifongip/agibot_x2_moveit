@@ -663,7 +663,7 @@ bool PostPlacePlanner::plan(
 bool PostPlacePlanner::planToNamedTarget(
   const moveit::core::RobotState & start, const planning_scene::PlanningScenePtr & scene,
   const std::string & named_target, PostPlacePlan & output, std::string & error,
-  const CancelFunction & canceled)
+  const CancelFunction & canceled, std::chrono::steady_clock::time_point deadline)
 {
   output.segments.clear();
   if (named_target.empty()) {
@@ -681,7 +681,7 @@ bool PostPlacePlanner::planToNamedTarget(
     return false;
   }
   return plan(start, {}, scene, false, output, error, canceled,
-    std::chrono::steady_clock::time_point::max(), named_target);
+    deadline, named_target);
 }
 
 bool PostPlacePlanner::validateSegment(

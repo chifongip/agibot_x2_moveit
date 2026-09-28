@@ -660,6 +660,16 @@ bool PlanningSceneManager::detachBox(std::string & error)
 bool PlanningSceneManager::attachBox(std::string & error)
 {
   try {
+    // A previous request may have succeeded before its verification timed out.
+    // Verify that attachment rather than reapplying an ADD without geometry.
+    const auto existing = scene_interface_.getAttachedObjects({config_.box_id});
+    if (!existing.empty()) {
+      if (existing.begin()->second.link_name != config_.left_tcp) {
+        error = "planning-scene box is attached to an unexpected link";
+        return false;
+      }
+      return verifyBoxState(true, false, error);
+    }
     moveit_msgs::msg::AttachedCollisionObject object;
     object.link_name = config_.left_tcp;
     object.object.id = config_.box_id;

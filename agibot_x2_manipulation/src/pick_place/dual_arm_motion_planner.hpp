@@ -62,6 +62,11 @@ public:
     const moveit::core::RobotState & start, const GraspGeometry & target,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     const CancelFunction & canceled);
+  bool buildApproach(
+    const moveit::core::RobotState & start, const GraspGeometry & target,
+    moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
+    std::string & error, const CancelFunction & canceled);
+  void setPhaseDeadline(std::chrono::steady_clock::time_point deadline);
   bool buildRetreat(
     const moveit::core::RobotState & start, const GraspGeometry & target,
     const planning_scene::PlanningScenePtr & scene,

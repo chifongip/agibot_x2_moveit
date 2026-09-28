@@ -118,6 +118,10 @@ bool TrajectoryExecutor::execute(
   }
 
   while (goal_future.wait_for(std::chrono::milliseconds(20)) != std::future_status::ready) {
+    if (shutdown_requested_.load() || !rclcpp::ok()) {
+      setError("server shut down while waiting for trajectory admission");
+      return false;
+    }
     if (cancel_requested_.load() || canceled()) {
       move_group_.stop();
     }
@@ -139,6 +143,12 @@ bool TrajectoryExecutor::execute(
 
   auto result_future = execute_client_->async_get_result(handle);
   while (result_future.wait_for(std::chrono::milliseconds(20)) != std::future_status::ready) {
+    if (shutdown_requested_.load() || !rclcpp::ok()) {
+      std::lock_guard<std::mutex> lock(transition_mutex_);
+      active_goal_.reset();
+      setError("server shut down while waiting for trajectory completion");
+      return false;
+    }
     if (cancel_requested_.load() || canceled()) {
       (void)execute_client_->async_cancel_goal(handle);
     }
@@ -171,6 +181,48 @@ bool TrajectoryExecutor::execute(
   }
   const uint64_t generation = feedback_generation_.load(std::memory_order_acquire);
   return waitForSettled(trajectory, generation, canceled, settled_positions);
+}
+
+bool TrajectoryExecutor::waitUntilStopped(
+  const ExecutionCancelFunction & canceled, std::string & error)
+{
+  {
+    std::lock_guard<std::mutex> lock(transition_mutex_);
+    if (active_goal_) {
+      error = "previous trajectory has not reached a terminal controller result";
+      return false;
+    }
+  }
+  const auto deadline = std::chrono::steady_clock::now() +
+    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+    std::chrono::duration<double>(config_.execution_settle_timeout));
+  auto generation = feedback_generation_.load();
+  int samples = 0;
+  const auto * group = move_group_.getRobotModel()->getJointModelGroup(config_.planning_group);
+  while (!canceled() && !cancel_requested_.load() && std::chrono::steady_clock::now() < deadline) {
+    const auto next = feedback_generation_.load();
+    if (next != generation) {
+      generation = next;
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
+      bool stationary = latest_feedback_.valid;
+      for (const auto & name : group->getVariableNames()) {
+        const auto found = latest_feedback_.joints.find(name);
+        stationary = stationary && found != latest_feedback_.joints.end() &&
+          std::abs(found->second.velocity) <= config_.execution_velocity_tolerance;
+      }
+      samples = stationary ? samples + 1 : 0;
+      if (samples >= config_.execution_settle_samples) {return true;}
+    }
+    rclcpp::sleep_for(std::chrono::milliseconds(10));
+  }
+  error = "fresh stationary arm feedback is unavailable; waiting before replanning";
+  return false;
+}
+
+void TrajectoryExecutor::requestShutdown()
+{
+  shutdown_requested_.store(true);
+  requestStop();
 }
 
 void TrajectoryExecutor::requestStop()

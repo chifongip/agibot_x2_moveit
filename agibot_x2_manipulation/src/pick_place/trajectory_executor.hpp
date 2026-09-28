@@ -37,6 +37,8 @@ public:
     const moveit_msgs::msg::RobotTrajectory & trajectory,
     const ExecutionCancelFunction & canceled,
     std::map<std::string, double> * settled_positions = nullptr);
+  bool waitUntilStopped(const ExecutionCancelFunction & canceled, std::string & error);
+  void requestShutdown();
   void requestStop();
   void resetCancellation();
   std::string error(const std::string & prefix) const;
@@ -63,6 +65,7 @@ private:
   mutable std::mutex transition_mutex_;
   mutable std::mutex error_mutex_;
   std::atomic<bool> cancel_requested_{false};
+  std::atomic<bool> shutdown_requested_{false};
   GoalHandle::SharedPtr active_goal_;
   std::string last_error_;
   std::atomic<uint64_t> feedback_generation_{0};

@@ -1,4 +1,5 @@
 import os
+import time
 import unittest
 
 from action_msgs.msg import GoalStatus
@@ -78,7 +79,7 @@ class TestResetReturn(unittest.TestCase):
         request.scene.world.collision_objects = [object_msg]
         self.assertTrue(self.call(ApplyPlanningScene, "/apply_planning_scene", request).success)
 
-    def reset(self, confirm=True):
+    def reset(self, confirm=True, wait=True):
         client = ActionClient(self.node, ResetManipulation, "/reset_manipulation")
         self.assertTrue(client.wait_for_server(timeout_sec=40.0))
         goal = ResetManipulation.Goal()
@@ -92,13 +93,15 @@ class TestResetReturn(unittest.TestCase):
         handle = future.result()
         self.assertTrue(handle.accepted)
         result_future = handle.get_result_async()
+        if not wait:
+            return handle, result_future, stages
         rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=75.0)
         self.assertTrue(result_future.done())
         result = result_future.result()
         client.destroy()
         return result, stages
 
-    def test_reset_clears_stale_detections_and_rejects_external_blocker(self):
+    def test_reset_clears_stale_detections_and_pauses_for_external_blocker(self):
         refused, _ = self.reset(confirm=False)
         self.assertEqual(refused.result.error_code, ResetManipulation.Result.CONFIRMATION_REQUIRED)
         self.obstacle("work_table", [0.4, 0.0, -0.29], [0.5, 0.3, 0.6])
@@ -107,8 +110,7 @@ class TestResetReturn(unittest.TestCase):
         completed, stages = self.reset()
         self.assertEqual(completed.status, GoalStatus.STATUS_SUCCEEDED, completed.result.message)
         self.assertTrue(completed.result.success)
-        self.assertIn("planning_zero", stages)
-        self.assertIn("executing_zero", stages)
+        self.assertIn("reset_to_ready", stages)
         self.assertIn("verifying", stages)
         request = GetPlanningScene.Request()
         request.components.components = (
@@ -127,10 +129,17 @@ class TestResetReturn(unittest.TestCase):
         self.assertEqual(response.error_code.val, response.error_code.SUCCESS)
         wrist = response.pose_stamped[0].pose.position
         self.obstacle("reset_blocker", [wrist.x, wrist.y, wrist.z], [0.1, 0.1, 0.1])
-        blocked, stages = self.reset()
-        self.assertEqual(blocked.status, GoalStatus.STATUS_ABORTED)
-        self.assertEqual(blocked.result.error_code, ResetManipulation.Result.PLANNING_FAILED)
-        self.assertNotIn("executing_zero", stages)
+        handle, blocked, stages = self.reset(wait=False)
+        deadline = time.monotonic() + 20.0
+        while "paused/reset_to_ready" not in stages and time.monotonic() < deadline:
+            rclpy.spin_once(self.node, timeout_sec=0.05)
+        self.assertIn("paused/reset_to_ready", stages)
+        self.assertFalse(blocked.done())
+        canceled = handle.cancel_goal_async()
+        rclpy.spin_until_future_complete(self.node, canceled, timeout_sec=5.0)
+        rclpy.spin_until_future_complete(self.node, blocked, timeout_sec=5.0)
+        self.assertTrue(blocked.done())
+        self.assertEqual(blocked.result().status, GoalStatus.STATUS_CANCELED)
 
 
 @launch_testing.post_shutdown_test()

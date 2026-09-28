@@ -1,0 +1,6 @@
+# Resume only this pause of the existing active action; duplicate/stale requests fail.
+string task_id
+uint32 pause_id
+---
+bool success
+string message

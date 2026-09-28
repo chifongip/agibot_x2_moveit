@@ -8,6 +8,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 from moveit_configs_utils import MoveItConfigsBuilder
 from ament_index_python.packages import get_package_share_directory
 import os
+import yaml
 
 
 def apriltag_remappings(image_topic, camera_info_topic):
@@ -135,6 +136,9 @@ def generate_launch_description():
     config_share = get_package_share_directory("agibot_x2_moveit_config")
     manipulation_share = get_package_share_directory("agibot_x2_manipulation")
     params_file = os.path.join(manipulation_share, "config", "box_manipulation.yaml")
+    with open(params_file, encoding="utf-8") as stream:
+        server_params = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
+    retry_defaults = server_params
     default_box_profiles_file = os.path.join(
         manipulation_share, "config", "box_profiles.yaml"
     )
@@ -237,6 +241,18 @@ def generate_launch_description():
                 default_value="false",
                 choices=["true", "false"],
                 description="Explicit opt-in for any robot motion, including reset.",
+            ),
+            DeclareLaunchArgument(
+                "phase_retry_attempts", default_value=str(retry_defaults["phase_retry_attempts"]),
+                description="Total attempts per phase before pausing for Continue.",
+            ),
+            DeclareLaunchArgument(
+                "phase_retry_timeout", default_value=str(retry_defaults["phase_retry_timeout"]),
+                description="Shared automatic planning retry budget per phase in seconds.",
+            ),
+            DeclareLaunchArgument(
+                "phase_retry_delay", default_value=str(retry_defaults["phase_retry_delay"]),
+                description="Cancelable delay between phase attempts in seconds.",
             ),
             DeclareLaunchArgument(
                 "motion_planning_mode",
@@ -510,7 +526,9 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     moveit_config.to_dict(),
-                    params_file,
+                    # Flatten this node's YAML so explicit launch overrides have
+                    # the same ROS parameter scope and take precedence.
+                    server_params,
                     box_profiles_file,
                     {
                         "perception_3d_source": perception_3d_source,
@@ -523,6 +541,12 @@ def generate_launch_description():
                             use_dummy_apriltag, value_type=bool
                         ),
                         "motion_planning_mode": motion_planning_mode,
+                        "phase_retry_attempts": ParameterValue(
+                            LaunchConfiguration("phase_retry_attempts"), value_type=int),
+                        "phase_retry_timeout": ParameterValue(
+                            LaunchConfiguration("phase_retry_timeout"), value_type=float),
+                        "phase_retry_delay": ParameterValue(
+                            LaunchConfiguration("phase_retry_delay"), value_type=float),
                         # The execution gate consumes direct HAL measurements,
                         # not the potentially cached joint-state broadcaster.
                         "arm_state_topic": arm_state_topic,

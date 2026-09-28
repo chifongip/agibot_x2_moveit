@@ -61,7 +61,8 @@ public:
   bool planToNamedTarget(
     const moveit::core::RobotState & start, const planning_scene::PlanningScenePtr & scene,
     const std::string & named_target, PostPlacePlan & output, std::string & error,
-    const CancelFunction & canceled);
+    const CancelFunction & canceled, std::chrono::steady_clock::time_point deadline =
+    std::chrono::steady_clock::time_point::max());
   bool validateSegment(
     const PostPlaceSegment & segment, const moveit::core::RobotState & current,
     const planning_scene::PlanningScenePtr & scene, std::string & error,

@@ -45,6 +45,9 @@ def generate_launch_description():
                 "fake_zmq_endpoint", default_value="tcp://127.0.0.1:8559"
             ),
             DeclareLaunchArgument("use_rviz", default_value="true"),
+            DeclareLaunchArgument("phase_retry_attempts", default_value="3"),
+            DeclareLaunchArgument("phase_retry_timeout", default_value="30.0"),
+            DeclareLaunchArgument("phase_retry_delay", default_value="0.5"),
             DeclareLaunchArgument(
                 "allow_execution",
                 default_value="true",
@@ -100,6 +103,9 @@ def generate_launch_description():
                     "head_state_topic": "/x2_replay/aima/hal/joint/head/state",
                     "allow_execution": allow_execution,
                     "motion_planning_mode": motion_planning_mode,
+                    "phase_retry_attempts": LaunchConfiguration("phase_retry_attempts"),
+                    "phase_retry_timeout": LaunchConfiguration("phase_retry_timeout"),
+                    "phase_retry_delay": LaunchConfiguration("phase_retry_delay"),
                     "manipulation_state_file": manipulation_state_file,
                 }.items(),
             ),

@@ -287,6 +287,15 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.return_planning_time_per_attempt = parameter<double>(
     node, "return_planning_time_per_attempt", 2.0);
   config.return_planning_attempts = parameter<int>(node, "return_planning_attempts", 3);
+  config.phase_retry_attempts = parameter<int>(node, "phase_retry_attempts", 3);
+  config.phase_retry_timeout = parameter<double>(node, "phase_retry_timeout", 30.0);
+  config.phase_retry_delay = parameter<double>(node, "phase_retry_delay", 0.5);
+  if (config.phase_retry_attempts < 1 || config.phase_retry_attempts > 64 ||
+    !std::isfinite(config.phase_retry_timeout) || config.phase_retry_timeout <= 0.0 ||
+    !std::isfinite(config.phase_retry_delay) || config.phase_retry_delay < 0.0)
+  {
+    throw std::runtime_error("invalid phase retry parameters");
+  }
   config.return_ik_attempts = parameter<int>(node, "return_ik_attempts", 8);
   config.return_validation_joint_step = parameter<double>(node, "return_validation_joint_step", 0.01);
   config.return_longest_valid_segment_fraction = parameter<double>(

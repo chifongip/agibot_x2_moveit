@@ -1055,3 +1055,51 @@ merely to pass an approach or reset.
   closed-chain-feasible box poses instead of requiring a hard-coded target.
   Endpoint diagnostics must separately report the number of candidates rejected
   by left/right IK, joint bounds, collision, and precheck-budget exhaustion.
+
+### Automatic retries and Continue
+
+Execution actions retain their active ROS goal when a recoverable phase fails.
+The server retries the unfinished phase, then pauses for operator input when the
+attempt or time budget is exhausted. Pick, Place, PickPlace, MoveCarryPose, and
+reset motion use this policy in both `pose_to_pose` and `closed_chain` modes.
+Plan-only goals return a failure after their retry budget; they never wait for
+Continue.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `phase_retry_attempts` | `3` | Total phase attempts, including the first. |
+| `phase_retry_timeout` | `30.0` | Shared planning retry budget in seconds per phase and Continue cycle. |
+| `phase_retry_delay` | `0.5` | Cancelable delay between attempts in seconds. |
+
+These parameters are available in `box_manipulation.yaml` and as launch arguments
+in `box_pick_place.launch.py` and the recorded simulation launch. Internal return
+search retries share the phase deadline. A successful motion may finish after the
+planning budget; expiration alone does not cancel that motion.
+
+`/manipulation_task_status` (`ManipulationTaskStatus`, reliable/transient-local)
+reports the action UUID as `task_id`, current phase, last completed phase,
+`running`/`retrying`/`paused`/terminal status, failure detail, attempt counts,
+object disposition, and whether Continue is available. Physical
+`/manipulation_state` remains independent: a paused task can still hold an object.
+
+Call `/continue_manipulation` (`ContinueManipulation`) with the current `task_id`
+and `pause_id`. The service signals the retained action worker and starts a new
+retry cycle. Stale or duplicate requests fail. Continue replans the unfinished
+motion from fresh measured positions after confirming stationary arm feedback;
+it does not resend a trajectory from its old start. Completed attachment,
+release, retreat, and return-to-prepare checkpoints are preserved. Other motion
+goals are rejected while the task is active or paused. Standard action
+cancellation and reset preemption remain available.
+
+Attachment/release failures known to occur before dispatch may retry. An
+uncertain result after dispatch requires explicit recovery; the physical
+operation is not automatically repeated. Collision and closure validation remain
+required before motion. Invalid goals, cancellation, and unexpected exceptions
+do not enter an automatic motion retry loop.
+
+Task checkpoint diagnostics are saved beside `state_file` in `state_file.task`.
+The live action worker retains the complete goal and planning context. After a
+server restart, that worker is gone: the last active checkpoint is published as
+`interrupted` with Continue disabled, and the existing physical-state recovery
+controls must be used. Browser reconnection while the server remains running can
+resume the same paused task.

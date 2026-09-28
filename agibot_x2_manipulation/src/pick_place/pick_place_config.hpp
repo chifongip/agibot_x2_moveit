@@ -115,6 +115,9 @@ struct PickPlaceConfig
   double return_planning_timeout{30.0};
   double return_planning_time_per_attempt{2.0};
   int return_planning_attempts{3};
+  int phase_retry_attempts{3};
+  double phase_retry_timeout{30.0};
+  double phase_retry_delay{0.5};
   int return_ik_attempts{8};
   double return_validation_joint_step{0.01};
   double return_longest_valid_segment_fraction{0.005};

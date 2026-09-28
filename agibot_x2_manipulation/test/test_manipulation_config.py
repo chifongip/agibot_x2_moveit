@@ -158,7 +158,7 @@ def test_box_profiles_are_shared_by_localization_and_planning():
     launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
     assert '"box_profiles_file"' in launch_source
     assert "parameters=[params_file, box_profiles_file]" in launch_source
-    assert "params_file,\n                    box_profiles_file," in launch_source
+    assert "server_params,\n                    box_profiles_file," in launch_source
 
 
 def test_profile_carry_pose_configuration_and_manual_transition_action_are_available():

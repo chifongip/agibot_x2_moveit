@@ -460,7 +460,7 @@ public:
     }
     moveit::planning_interface::MoveGroupInterface::Plan plan;
     const double remaining = std::chrono::duration<double>(
-      deadline - std::chrono::steady_clock::now()).count();
+      std::min(deadline, phase_deadline_) - std::chrono::steady_clock::now()).count();
     if (remaining <= 0.0) {
       error = segment + " route deadline reached before endpoint planning";
       return false;
@@ -931,13 +931,12 @@ public:
   bool buildApproach(
     const moveit::core::RobotState & start, const GraspGeometry & target,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
-    const CancelFunction & canceled,
+    std::string & error, const CancelFunction & canceled,
     const planning_scene::PlanningScenePtr & retreat_scene = nullptr,
     std::chrono::steady_clock::time_point outer_deadline =
     std::chrono::steady_clock::time_point::max())
   {
     if (!retreat_scene && config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
-      std::string error;
       moveit::core::RobotState endpoint(start);
       if (!solveDualArmEndpoint(
           start, target.left_contact, target.right_contact, true, endpoint, error))
@@ -958,6 +957,7 @@ public:
       std::string restore_error;
       const bool restored = planning_scene_.restoreWorldBox(saved_box, restore_error);
       if (!restored) {
+        error = restore_error;
         RCLCPP_ERROR(node_->get_logger(), "%s", restore_error.c_str());
         return false;
       }
@@ -1164,6 +1164,8 @@ public:
         "ik_mode=%s, attempts=%zu)",
         report.waypoint, report.detail.c_str(), closedChainFailureName(report.failure),
         report.failed_arm.c_str(), report.ik_mode.c_str(), report.attempts);
+      error = "approach search failed: " + std::string(closedChainFailureName(report.failure)) +
+        "; " + report.detail;
       return false;
     }
     for (const auto & solution : path.states) {
@@ -1172,6 +1174,7 @@ public:
       trajectory.addSuffixWayPoint(state, 0.0);
     }
     if (canceled()) {
+      error = "approach planning canceled or phase deadline reached";
       return false;
     }
     trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization(
@@ -1179,9 +1182,11 @@ public:
     if (!time_parameterization.computeTimeStamps(
         trajectory, config_.velocity_scaling, config_.acceleration_scaling))
     {
+      error = "approach trajectory time parameterization failed";
       return false;
     }
     if (canceled()) {
+      error = "approach planning canceled or phase deadline reached";
       return false;
     }
     trajectory.getRobotTrajectoryMsg(output);
@@ -2264,7 +2269,10 @@ public:
             index + 1U);
         }
         moveit::planning_interface::MoveGroupInterface::Plan candidate_plan;
-        move_group_.setPlanningTime(timeout);
+        const double phase_remaining = std::chrono::duration<double>(
+          phase_deadline_ - std::chrono::steady_clock::now()).count();
+        if (phase_remaining <= 0.0) {return CandidateAttempt::OMPL_REJECTED;}
+        move_group_.setPlanningTime(std::min(timeout, phase_remaining));
         const auto attempt_started = std::chrono::steady_clock::now();
         const auto plan_result = move_group_.plan(candidate_plan);
         const double attempt_elapsed = std::chrono::duration<double>(
@@ -2284,7 +2292,7 @@ public:
         auto candidate_contact_end = pregrasp_end;
         if (!buildApproach(
             pregrasp_end, feasible[index].grasp.candidate.grasp,
-            candidate_approach, candidate_contact_end, canceled))
+            candidate_approach, candidate_contact_end, target_error, canceled))
         {
           ++approach_rejected;
           RCLCPP_WARN(
@@ -2489,6 +2497,8 @@ private:
   std::string active_grasp_id_{"unassigned"};
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr box_path_pub_;
+  std::chrono::steady_clock::time_point phase_deadline_{
+    std::chrono::steady_clock::time_point::max()};
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;
   std::unique_ptr<PlanningTraceLogger> planning_trace_;
 };
@@ -2513,7 +2523,21 @@ bool DualArmMotionPlanner::buildApproach(
   moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
   const CancelFunction & canceled)
 {
-  return impl_->buildApproach(start, target, output, end_state, canceled);
+  std::string error;
+  return impl_->buildApproach(start, target, output, end_state, error, canceled);
+}
+
+bool DualArmMotionPlanner::buildApproach(
+  const moveit::core::RobotState & start, const GraspGeometry & target,
+  moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
+  std::string & error, const CancelFunction & canceled)
+{
+  return impl_->buildApproach(start, target, output, end_state, error, canceled);
+}
+
+void DualArmMotionPlanner::setPhaseDeadline(std::chrono::steady_clock::time_point deadline)
+{
+  impl_->phase_deadline_ = deadline;
 }
 
 bool DualArmMotionPlanner::buildRetreat(
@@ -2526,8 +2550,8 @@ bool DualArmMotionPlanner::buildRetreat(
   auto contact = retreatContactScene(scene, impl_->config_);
   moveit::core::RobotState empty_start(start);
   empty_start.clearAttachedBody(impl_->config_.box_id);
-  if (!impl_->buildApproach(empty_start, target, output, end_state, canceled, contact, deadline)) {
-    error = "coordinated retreat search failed";
+  if (!impl_->buildApproach(empty_start, target, output, end_state, error, canceled, contact, deadline)) {
+    error = "coordinated retreat search failed: " + error;
     return false;
   }
   robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), impl_->config_.planning_group);

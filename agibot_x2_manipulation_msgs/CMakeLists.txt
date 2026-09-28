@@ -16,6 +16,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BoxStateArray.msg"
   "msg/LocomanipulationPostureStatus.msg"
   "msg/ManipulationState.msg"
+  "msg/ManipulationTaskStatus.msg"
+  "srv/ContinueManipulation.srv"
   "srv/ClearLocomanipulationPostureTarget.srv"
   "srv/RecoverManipulationState.srv"
   "srv/ReloadBoxProfiles.srv"

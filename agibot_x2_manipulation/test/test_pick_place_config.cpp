@@ -43,6 +43,9 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_EQ(config.planning_group, "dual_arm");
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::CLOSED_CHAIN);
   EXPECT_EQ(config.prepare_named_target, "prepare");
+  EXPECT_EQ(config.phase_retry_attempts, 3);
+  EXPECT_DOUBLE_EQ(config.phase_retry_timeout, 30.0);
+  EXPECT_DOUBLE_EQ(config.phase_retry_delay, 0.5);
   EXPECT_EQ(config.post_place_named_target, "ready");
   EXPECT_EQ(config.reset_named_target, "ready");
   EXPECT_DOUBLE_EQ(config.tag_reacquisition_timeout, config.table_tag_stability_timeout);
@@ -249,4 +252,22 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidSearchBudgetsAndInitialState)
 }
 
 }  // namespace
+}  // namespace agibot_x2_manipulation
+
+namespace agibot_x2_manipulation
+{
+TEST(PhaseRetryConfig, RejectsInvalidParameters)
+{
+  rclcpp::init(0, nullptr);
+  for (const auto & parameter : {
+      rclcpp::Parameter("phase_retry_attempts", 0),
+      rclcpp::Parameter("phase_retry_timeout", -1.0),
+      rclcpp::Parameter("phase_retry_delay", std::numeric_limits<double>::quiet_NaN())})
+  {
+    auto node = std::make_shared<rclcpp::Node>("invalid_phase_retry",
+      rclcpp::NodeOptions().parameter_overrides({parameter}));
+    EXPECT_THROW(loadPickPlaceConfig(node), std::runtime_error);
+  }
+  rclcpp::shutdown();
+}
 }  // namespace agibot_x2_manipulation
