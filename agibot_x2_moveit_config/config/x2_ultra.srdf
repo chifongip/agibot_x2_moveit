@@ -44,6 +44,22 @@
         <joint name="right_wrist_roll_joint" value="0"/>
         <joint name="right_wrist_yaw_joint" value="0"/>
     </group_state>
+    <group_state name="ready" group="dual_arm">
+        <joint name="left_elbow_joint" value="-0.87"/>
+        <joint name="left_shoulder_pitch_joint" value="0.35"/>
+        <joint name="left_shoulder_roll_joint" value="0.1"/>
+        <joint name="left_shoulder_yaw_joint" value="0"/>
+        <joint name="left_wrist_pitch_joint" value="0"/>
+        <joint name="left_wrist_roll_joint" value="0"/>
+        <joint name="left_wrist_yaw_joint" value="0"/>
+        <joint name="right_elbow_joint" value="-0.87"/>
+        <joint name="right_shoulder_pitch_joint" value="0.35"/>
+        <joint name="right_shoulder_roll_joint" value="-0.1"/>
+        <joint name="right_shoulder_yaw_joint" value="0"/>
+        <joint name="right_wrist_pitch_joint" value="0"/>
+        <joint name="right_wrist_roll_joint" value="0"/>
+        <joint name="right_wrist_yaw_joint" value="0"/>
+    </group_state>
     <group_state name="prepare" group="dual_arm">
         <joint name="left_elbow_joint" value="-2.2"/>
         <joint name="left_shoulder_pitch_joint" value="1.5"/>

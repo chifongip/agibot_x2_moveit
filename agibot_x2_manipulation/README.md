@@ -65,6 +65,8 @@ These defaults leave scheduling headroom for the independent 100 ms RoboJuDo
 and ros2_control state watchdogs. Enable RViz or request a higher controller
 rate only after monitoring the joint and torso-IMU streams on the target host.
 
+`initial_arm_command_mode:=ready` is the default and uses the configured ready
+arm positions at the first controller claim.
 `initial_arm_command_mode:=measured` keeps the measured pose at the first
 dual-arm-controller claim. To issue a temporary all-zero arm startup target to
 the low-level controller, explicitly pass `initial_arm_command_mode:=zero`.
@@ -640,7 +642,7 @@ repeat Pick's mandatory lift.
 
 `/pick_place` (`PickPlace`) remains available for the immediate Pick-then-Place
 workflow. After a successful Place, the arms retreat and return to
-`post_place_named_target` (`zero` by default). The package never commands the
+`post_place_named_target` (`ready` by default). The package never commands the
 mobile base.
 
 Test the complete sequence without executing motion:
@@ -667,7 +669,7 @@ Pick and Place use the dual-arm SRDF state `prepare` as an empty-arm intermediat
 (`prepare_named_target: prepare`). Pick plans current state → prepare → pregrasp
 → contact → Carry A before starting motion. Grasp IK and pregrasp planning are
 seeded from the planned prepare endpoint. Place returns through retreat →
-prepare → `post_place_named_target` (normally zero). These routes apply to both
+prepare → `post_place_named_target` (normally ready). These routes apply to both
 planning modes and to plan-only PickPlace checks. The prepare segments use
 MoveIt joint-space planning with timed/controller-spline collision validation,
 the existing return retries, and measured-start checks before execution.
@@ -675,7 +677,7 @@ Missing, out-of-bounds, or colliding prepare states fail planning; the named
 state is never silently skipped. Reset continues to use its explicit reset target.
 
 In `pose_to_pose` mode, the server retains the same pregrasp, contact, lift,
-carry, place, retreat, and zero endpoints. It solves dual-arm IK at each
+carry, place, retreat, and idle endpoints. It solves dual-arm IK at each
 carry/place endpoint, then asks MoveIt for a collision-checked joint-space plan
 to the next endpoint. Retreat always uses coordinated interpolation rather than
 endpoint-only free-space planning. Joint bounds, obstacle avoidance, attached-box collision geometry,
@@ -853,7 +855,7 @@ values directly.
 
 For a fault recovery after the operator has stopped the base and verified that
 the arms hold no box, reset the manipulation state and move the dual arms to
-the configured `reset_named_target` (`zero` by default):
+the configured `reset_named_target` (`ready` by default):
 
 ```bash
 ros2 action send_goal /reset_manipulation \

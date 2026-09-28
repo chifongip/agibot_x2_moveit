@@ -139,11 +139,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "initial_arm_command_mode",
-                default_value="measured",
-                choices=["measured", "zero"],
+                default_value="ready",
+                choices=["ready", "measured", "zero"],
                 description=(
-                    "Startup arm target. Zero initializes the arm controller's first "
-                    "claim to zero, then resumes controller trajectories."
+                    "Startup arm target. Ready uses configured initial positions on the first "
+                    "claim; measured holds feedback and zero selects zero-radian targets."
                 ),
             ),
             DeclareLaunchArgument(

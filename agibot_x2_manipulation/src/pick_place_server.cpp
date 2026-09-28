@@ -2047,7 +2047,7 @@ private:
       }
       feedback(segment.retreat ? "retreating" :
         segment.name == "to_" + config_.prepare_named_target ? "returning_to_prepare" :
-        "returning_to_zero", 0.90F, place_message);
+        "returning_to_" + config_.post_place_named_target, 0.90F, place_message);
       if (!trajectory_executor_.execute(segment.trajectory, canceled)) {
         setState(ManipulationState::EMPTY, "box placed; return execution failed");
         return outcome(false, kExecutionFailed,
@@ -2059,14 +2059,17 @@ private:
       ++segment_index;
     }
     if (canceled()) {
-      setState(ManipulationState::EMPTY, "box placed; reset requested after return to zero");
+      setState(ManipulationState::EMPTY,
+        "box placed; reset requested after return to " + config_.post_place_named_target);
       return outcome(
-        false, kExecutionFailed, "box placed and arms reached zero, but the action was canceled",
+        false, kExecutionFailed, "box placed and arms reached " + config_.post_place_named_target +
+        ", but the action was canceled",
         place_message);
     }
-    setState(ManipulationState::EMPTY, "ready to pick; arms at zero");
+    setState(ManipulationState::EMPTY, "ready to pick; arms at " + config_.post_place_named_target);
     feedback("complete", 1.0F, place_message);
-    return outcome(true, kSuccess, "box placed and arms returned to zero", place_message);
+    return outcome(true, kSuccess,
+      "box placed and arms returned to " + config_.post_place_named_target, place_message);
   }
 
   TaskOutcome planCompletePath(
@@ -2298,7 +2301,8 @@ private:
         return;
       }
       if (goal->is_canceling()) {
-        fail(ResetManipulation::Result::CANCELED, "reset canceled before zero planning");
+        fail(ResetManipulation::Result::CANCELED,
+          "reset canceled before planning to " + config_.reset_named_target);
         return;
       }
 
@@ -2318,7 +2322,7 @@ private:
           return post_place_planner_->planToNamedTarget(*current, planning_scene_.snapshot(),
             config_.reset_named_target, reset_plan, error, canceled);
         };
-      feedback("planning_zero", 0.50F);
+      feedback("planning_" + config_.reset_named_target, 0.50F);
       if (!plan_reset()) {
         fail(canceled() ? ResetManipulation::Result::CANCELED :
           planning_failure_code, "reset planning failed: " + error);
@@ -2352,7 +2356,7 @@ private:
           segment_index = 0;
           continue;
         }
-        feedback("executing_zero", 0.70F);
+        feedback("executing_" + config_.reset_named_target, 0.70F);
         if (!trajectory_executor_.execute(segment.trajectory, canceled, &settled_reset_positions)) {
           fail(canceled() ? ResetManipulation::Result::CANCELED :
             ResetManipulation::Result::EXECUTION_FAILED,

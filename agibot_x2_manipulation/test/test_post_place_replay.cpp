@@ -77,14 +77,14 @@ TEST(PostPlaceReplay, ReturnsFromRecordedStateWithRepresentativePlacedObstacles)
         measured.setVariablePositions(trajectory.joint_names, trajectory.points.back().positions);
         measured.update();
       }
-      moveit::core::RobotState zero(start);
-      ASSERT_TRUE(zero.setToDefaultValues(config.planning_group, config.post_place_named_target));
-      EXPECT_LT(measured.distance(zero, model->getJointModelGroup(config.planning_group)), 0.01);
+      moveit::core::RobotState idle(start);
+      ASSERT_TRUE(idle.setToDefaultValues(config.planning_group, config.post_place_named_target));
+      EXPECT_LT(measured.distance(idle, model->getJointModelGroup(config.planning_group)), 0.01);
       EXPECT_TRUE(scene->getWorld()->hasObject(config.box_id));
       EXPECT_TRUE(scene->getWorld()->hasObject("work_table"));
     }
   }
-  // Exercise paired IK and complete retreat-to-zero planning without a carry
+  // Exercise paired IK and complete retreat-to-idle planning without a carry
   // action or changes to the user's profile calibration.
   auto scene = std::make_shared<planning_scene::PlanningScene>(model);
   Eigen::Isometry3d table = Eigen::Isometry3d::Identity();

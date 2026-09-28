@@ -498,8 +498,8 @@ bool PostPlacePlanner::plan(
   // representation so MoveIt does not reject the return request.
   start.enforceBounds(group);
   start.update();
-  moveit::core::RobotState zero(start);
-  if (!zero.setToDefaultValues(group, target_name)) {
+  moveit::core::RobotState target_state(start);
+  if (!target_state.setToDefaultValues(group, target_name)) {
     error = "return named target unavailable: " + target_name;
     return false;
   }
@@ -508,11 +508,11 @@ bool PostPlacePlanner::plan(
     error = "return start invalid: " + error;
     return false;
   }
-  if (!zero.satisfiesBounds(group) || !validState(zero, strict, group, error)) {
+  if (!target_state.satisfiesBounds(group) || !validState(target_state, strict, group, error)) {
     error = "return named target invalid: " + error;
     return false;
   }
-  moveit::core::RobotState intermediate(zero);
+  moveit::core::RobotState intermediate(target_state);
   if (!intermediate_target.empty()) {
     if (!intermediate.setToDefaultValues(group, intermediate_target)) {
       error = "return intermediate target unavailable: " + intermediate_target;
@@ -535,7 +535,7 @@ bool PostPlacePlanner::plan(
       }
       if (!intermediate_target.empty()) {
         PostPlaceSegment last;
-        if (!segment(intermediate, zero, strict, "from_" + intermediate_target + "_to_" +
+        if (!segment(intermediate, target_state, strict, "from_" + intermediate_target + "_to_" +
             target_name, deadline, last, error, canceled))
         {
           return false;
@@ -582,7 +582,7 @@ bool PostPlacePlanner::plan(
       retreat.retreat = true;
       candidate.segments.push_back(std::move(retreat));
     }
-    if (append_named(retreat_end, "zero_direct", candidate)) {
+    if (append_named(retreat_end, target_name + "_direct", candidate)) {
       output = std::move(candidate);
       trace("selected", true, "direct return; elapsed=" +
         std::to_string(std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count()));
@@ -641,7 +641,7 @@ bool PostPlacePlanner::plan(
       PostPlaceSegment first;
       PostPlacePlan continuation;
       if (!segment(retreat_end, clearance.state, strict, label, deadline, first, error, canceled) ||
-        !append_named(clearance.state, "zero_from_" + label, continuation))
+        !append_named(clearance.state, target_name + "_from_" + label, continuation))
       {
         continue;
       }

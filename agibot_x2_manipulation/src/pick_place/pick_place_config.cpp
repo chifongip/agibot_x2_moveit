@@ -281,7 +281,7 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     node, "place_start_state_bounds_tolerance", 0.02);
   config.state_file = parameter<std::string>(node, "state_file", defaultStateFile());
   config.initial_state = parameter<std::string>(node, "initial_state", "empty");
-  config.post_place_named_target = parameter<std::string>(node, "post_place_named_target", "zero");
+  config.post_place_named_target = parameter<std::string>(node, "post_place_named_target", "ready");
   config.prepare_named_target = parameter<std::string>(node, "prepare_named_target", "prepare");
   config.return_planning_timeout = parameter<double>(node, "return_planning_timeout", 30.0);
   config.return_planning_time_per_attempt = parameter<double>(
@@ -317,7 +317,7 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   {
     throw std::runtime_error("invalid post-place return search parameters");
   }
-  config.reset_named_target = parameter<std::string>(node, "reset_named_target", "zero");
+  config.reset_named_target = parameter<std::string>(node, "reset_named_target", "ready");
   config.reset_preemption_timeout = parameter<double>(node, "reset_preemption_timeout", 15.0);
   config.reset_state_timeout = parameter<double>(node, "reset_state_timeout", 2.0);
   config.reset_joint_tolerance = parameter<double>(node, "reset_joint_tolerance", 0.02);

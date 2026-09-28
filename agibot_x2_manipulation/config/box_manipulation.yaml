@@ -127,7 +127,7 @@ pick_place_server:
     # not a replacement for calibrated URDF position limits.
     place_start_state_bounds_tolerance: 0.02  # rad, about 1.15 degrees
     initial_state: empty
-    post_place_named_target: zero
+    post_place_named_target: ready
     # Independent post-release OMPL search; calibration and held-box mode are unchanged.
     return_planning_timeout: 30.0
     # Empty-arm intermediate before Pick and between Place retreat and return.
@@ -142,7 +142,7 @@ pick_place_server:
     return_longest_valid_segment_fraction: 0.005
     return_validation_joint_step: 0.01  # rad; check interpolated edges after timing
     return_path_tolerance: 0.01  # TOTG joint-space deviation tolerance
-    reset_named_target: zero
+    reset_named_target: ready
     reset_preemption_timeout: 15.0
     reset_state_timeout: 2.0
     reset_joint_tolerance: 0.1

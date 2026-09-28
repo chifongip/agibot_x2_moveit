@@ -57,12 +57,13 @@ also pass `spawn_dual_arm_controller:=false` to avoid configuring it a second
 time. Leave this argument at its default when the controller is inactive or
 unconfigured.
 
-The arm-controller handoff defaults to `initial_arm_command_mode:=measured`,
-which holds the measured arm pose. To supply a zero-radian command for all
-fourteen arm joints, explicitly pass `initial_arm_command_mode:=zero`. This is
-a low-level startup command at the controller's first joint claim, not a
-collision-checked MoveIt trajectory; later arm targets again follow the active
-controller.
+The arm-controller handoff defaults to `initial_arm_command_mode:=ready`,
+using the arm positions in `x2_bringup/config/initial_positions.yaml`. Use
+`initial_arm_command_mode:=measured` to hold the measured arm pose, or
+`initial_arm_command_mode:=zero` for zero-radian arm targets. The startup target
+is applied directly at the controller's first joint claim and can move the arms
+if they are elsewhere; it does not run a MoveIt plan. Measured feedback remains
+unchanged, and later arm commands follow the active controller.
 
 `command_transport` is selected at launch and must be one of the following:
 
