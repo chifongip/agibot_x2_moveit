@@ -353,6 +353,44 @@ bool PostPlacePlanner::segment(
   Deadline deadline, PostPlaceSegment & output, std::string & error,
   const CancelFunction & canceled)
 {
+  error.clear();
+  for (int attempt = 0; attempt < config_.return_planning_attempts; ++attempt) {
+    if (canceled() || std::chrono::steady_clock::now() >= deadline) {
+      if (error.empty()) {
+        error = "return planning canceled or deadline exhausted";
+      }
+      return false;
+    }
+    const auto stage = name + "/attempt_" + std::to_string(attempt + 1);
+    trace(stage, true, "starting trajectory planning attempt");
+    PostPlaceSegment candidate;
+    std::string attempt_error;
+    // Retry the entire pipeline, including timing and controller spline checks.
+    // Every attempt shares the original deadline and collision scene.
+    if (segmentOnce(start, target, scene, name, deadline, candidate, attempt_error, canceled)) {
+      output = std::move(candidate);
+      error.clear();
+      return true;
+    }
+    error = std::move(attempt_error);
+    trace(stage, false, error);
+    if (attempt + 1 < config_.return_planning_attempts && !canceled() &&
+      std::chrono::steady_clock::now() < deadline)
+    {
+      RCLCPP_WARN(node_->get_logger(),
+        "Return segment %s attempt %d/%d rejected: %s; replanning",
+        name.c_str(), attempt + 1, config_.return_planning_attempts, error.c_str());
+    }
+  }
+  return false;
+}
+
+bool PostPlacePlanner::segmentOnce(
+  const moveit::core::RobotState & start, const moveit::core::RobotState & target,
+  const planning_scene::PlanningScenePtr & scene, const std::string & name,
+  Deadline deadline, PostPlaceSegment & output, std::string & error,
+  const CancelFunction & canceled)
+{
   const auto interrupted = [&]() {return canceled() || std::chrono::steady_clock::now() >= deadline;};
   if (interrupted()) {
     error = "return planning canceled or deadline exhausted";

@@ -280,6 +280,7 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.return_planning_timeout = parameter<double>(node, "return_planning_timeout", 30.0);
   config.return_planning_time_per_attempt = parameter<double>(
     node, "return_planning_time_per_attempt", 2.0);
+  config.return_planning_attempts = parameter<int>(node, "return_planning_attempts", 3);
   config.return_ik_attempts = parameter<int>(node, "return_ik_attempts", 8);
   config.return_validation_joint_step = parameter<double>(node, "return_validation_joint_step", 0.01);
   config.return_longest_valid_segment_fraction = parameter<double>(
@@ -299,6 +300,7 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
       });
     };
   if (!positive(config.return_planning_timeout) ||
+    config.return_planning_attempts < 1 || config.return_planning_attempts > 64 ||
     !positive(config.return_planning_time_per_attempt) || config.return_ik_attempts < 1 ||
     config.return_ik_attempts > 64 || !positive(config.return_validation_joint_step) ||
     !positive(config.return_longest_valid_segment_fraction) ||

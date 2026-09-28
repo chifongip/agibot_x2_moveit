@@ -129,6 +129,8 @@ pick_place_server:
     # Independent post-release OMPL search; calibration and held-box mode are unchanged.
     return_planning_timeout: 30.0
     return_planning_time_per_attempt: 2.0
+    # Total attempts per retreat/return segment, including the initial plan.
+    return_planning_attempts: 3
     return_ik_attempts: 8
     return_up_offsets: [0.05, 0.10, 0.15, 0.20]
     return_back_offsets: [0.0, 0.05, 0.10]

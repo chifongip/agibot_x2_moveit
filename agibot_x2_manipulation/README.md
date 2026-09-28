@@ -705,6 +705,12 @@ continuation must be feasible before any post-place segment executes.
 
 The return-specific defaults are `return_planning_timeout: 30.0` seconds,
 `return_planning_time_per_attempt: 2.0` seconds, and `return_ik_attempts: 8`.
+`return_planning_attempts: 3` limits the total trajectory planning attempts per
+retreat or return segment, including the initial attempt. MoveIt failures and
+rejected timed/controller-spline trajectories trigger a fresh plan between the
+same endpoints. This applies to both planning modes and reset. Attempts share
+the original return deadline; cancellation stops retries. Set it to `1` to
+disable retries. Collision checks and route geometry are unchanged.
 Clearance offsets in metres are `return_up_offsets: [0.05, 0.10, 0.15, 0.20]`,
 `return_back_offsets: [0.0, 0.05, 0.10]`, and `return_out_offsets: [0.0, 0.04]`.
 Up follows the table normal, back follows the tabletop direction toward the

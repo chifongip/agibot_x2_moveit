@@ -5,6 +5,8 @@
 #include <urdf_parser/urdf_parser.h>
 #include <geometric_shapes/shapes.h>
 #include <limits>
+#include <cstdio>
+#include <fstream>
 
 namespace agibot_x2_manipulation
 {
@@ -330,6 +332,46 @@ TEST_F(ReturnSearchTest, RejectsInvalidTargetsAndHonorsCancellationAndDeadline)
   EXPECT_FALSE(planner.plan(start, {}, scene, false, output, error, []() {return false;}));
   EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count(), 1.0);
   EXPECT_TRUE(output.segments.empty());
+}
+
+TEST_F(ReturnSearchTest, RetriesFailedPoseToPoseReturnUpToConfiguredLimit)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  // Valid endpoints on opposite sides of an impassable wall force every
+  // MoveIt attempt to fail, independently of the randomized planner seed.
+  obstacle(scene, 0.0, 3.0);
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", -0.2);
+  start.update();
+  for (const int attempts : {1, 3}) {
+    auto settings = config();
+    settings.motion_planning_mode = MotionPlanningMode::POSE_TO_POSE;
+    settings.return_planning_attempts = attempts;
+    settings.return_planning_time_per_attempt = 0.04;
+    settings.return_planning_timeout = 1.0;
+    settings.planning_log_file = ::testing::TempDir() + "return_retry_" +
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".jsonl";
+    auto node = std::make_shared<rclcpp::Node>("return_retry_limit_test");
+    PostPlacePlanner planner(node, settings, robot);
+    PostPlacePlan output;
+    std::string error;
+    EXPECT_FALSE(planner.planToNamedTarget(start, scene, "zero", output, error,
+        []() {return false;}));
+    EXPECT_TRUE(output.segments.empty());
+    EXPECT_NE(error.find("zero_direct planning failed"), std::string::npos);
+    std::ifstream trace_file(settings.planning_log_file);
+    int recorded_attempts = 0;
+    for (std::string line; std::getline(trace_file, line); ) {
+      if (line.find("starting trajectory planning attempt") != std::string::npos) {
+        ++recorded_attempts;
+      }
+    }
+    EXPECT_EQ(recorded_attempts, attempts);
+    trace_file.close();
+    std::remove(settings.planning_log_file.c_str());
+  }
 }
 
 TEST_F(ReturnSearchTest, RejectsControllerSplineOvershootWithClearEndpoints)

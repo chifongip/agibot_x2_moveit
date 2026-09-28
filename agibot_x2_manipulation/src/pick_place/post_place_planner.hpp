@@ -79,6 +79,11 @@ private:
     const planning_scene::PlanningScenePtr & scene, const std::string & name,
     Deadline deadline, PostPlaceSegment & output, std::string & error,
     const CancelFunction & canceled);
+  bool segmentOnce(
+    const moveit::core::RobotState & start, const moveit::core::RobotState & target,
+    const planning_scene::PlanningScenePtr & scene, const std::string & name,
+    Deadline deadline, PostPlaceSegment & output, std::string & error,
+    const CancelFunction & canceled);
   void trace(const std::string & stage, bool success, const std::string & detail);
 
   rclcpp::Node::SharedPtr node_;
