@@ -35,6 +35,8 @@ pick_place_server:
     lift_height: 0.08
     cartesian_step: 0.01
     maximum_box_pose_age: 2.5
+    # Shared cancellable wait for fresh box/table detections before motion.
+    tag_reacquisition_timeout: 10.0
     ik_timeout: 0.05
     # Coordinated dual-arm search. These are shared grasp hypotheses, not
     # independent per-hand pose tolerances.

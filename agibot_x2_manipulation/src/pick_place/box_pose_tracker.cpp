@@ -118,6 +118,7 @@ BoxPoseTracker::BoxPoseTracker(
     [this](const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr message) {
       std::lock_guard<std::mutex> lock(mutex_);
       latest_poses_["legacy"] = TrackedBoxPose{"legacy", "", *message};
+      pose_condition_.notify_all();
     });
   states_subscription_ = node_->create_subscription<
     agibot_x2_manipulation_msgs::msg::BoxStateArray>(
@@ -134,6 +135,7 @@ BoxPoseTracker::BoxPoseTracker(
         latest_poses_[state.instance_id] = TrackedBoxPose{
           state.instance_id, state.profile_id, std::move(pose)};
       }
+      pose_condition_.notify_all();
     });
 }
 
@@ -172,6 +174,73 @@ bool BoxPoseTracker::stablePose(
   return true;
 }
 
+bool BoxPoseTracker::waitForFresh(
+  const std::function<bool(std::string &)> & ready, double timeout,
+  const std::function<bool()> & canceled, const std::function<void()> & waiting,
+  const std::string & description, std::string & error) const
+{
+  error.clear();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout);
+  bool announced = false;
+  while (true) {
+    if (canceled()) {
+      error = "waiting for " + description + " canceled";
+      return false;
+    }
+    if (ready(error)) {
+      return true;
+    }
+    // A changed profile/pose is not a transient freshness failure.
+    if (!error.empty()) {
+      return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      error = "timed out waiting for " + description;
+      return false;
+    }
+    if (!announced && waiting) {
+      waiting();
+      announced = true;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    pose_condition_.wait_for(lock, std::min(std::chrono::milliseconds(100),
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+  }
+}
+
+bool BoxPoseTracker::waitForStablePose(
+  const std::string & instance_id, double timeout, const std::function<bool()> & canceled,
+  TrackedBoxPose & pose, std::string & error, const std::function<void()> & waiting) const
+{
+  return waitForFresh([&](std::string &) {return stablePose(instance_id, pose);},
+    timeout, canceled, waiting, instance_id.empty() ? "a uniquely selectable fresh box pose" :
+    "fresh box pose for instance " + instance_id, error);
+}
+
+bool BoxPoseTracker::waitForUnchangedPoses(
+  const std::vector<TrackedBoxPose> & references, double timeout,
+  const std::function<bool()> & canceled, std::string & error,
+  const std::function<void()> & waiting) const
+{
+  // One deadline for the whole snapshot, rather than a timeout per missing tag.
+  return waitForFresh([&](std::string & check_error) {
+      const auto fresh = freshPoses();
+      bool missing = false;
+      for (const auto & reference : references) {
+        const auto found = fresh.find(reference.instance_id);
+        if (found == fresh.end()) {
+          missing = true;
+        } else if (!withinTolerance(reference, found->second, check_error)) {
+          check_error = "visible box instance '" + reference.instance_id +
+            "' changed before motion: " + check_error;
+          return false;
+        }
+      }
+      return !missing;
+    }, timeout, canceled, waiting, "fresh detections for the planned box snapshot", error);
+}
+
 std::map<std::string, TrackedBoxPose> BoxPoseTracker::freshPoses() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -195,6 +264,12 @@ bool BoxPoseTracker::stillWithinTolerance(
     error = "box pose became stale before approach";
     return false;
   }
+  return withinTolerance(reference, latest, error);
+}
+
+bool BoxPoseTracker::withinTolerance(
+  const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error) const
+{
   if (latest.profile_id != reference.profile_id) {
     error = "box profile changed before approach";
     return false;
@@ -351,9 +426,12 @@ void TableTagPoseTracker::updateStablePose(
 
 bool TableTagPoseTracker::waitForStablePose(
   double timeout, const std::function<bool()> & canceled,
-  geometry_msgs::msg::PoseStamped & output, std::string & error) const
+  geometry_msgs::msg::PoseStamped & output, std::string & error,
+  const std::function<void()> & waiting) const
 {
+  error.clear();
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout);
+  bool announced = false;
   std::unique_lock<std::mutex> lock(mutex_);
   while (true) {
     if (canceled()) {
@@ -370,6 +448,12 @@ bool TableTagPoseTracker::waitForStablePose(
     if (now >= deadline) {
       error = "no fresh stable table tag pose";
       return false;
+    }
+    if (!announced && waiting) {
+      lock.unlock();
+      waiting();
+      lock.lock();
+      announced = true;
     }
     stable_pose_condition_.wait_for(
       lock, std::min(std::chrono::milliseconds(100),

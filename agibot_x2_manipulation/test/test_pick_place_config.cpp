@@ -5,6 +5,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <memory>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,7 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_EQ(config.planning_group, "dual_arm");
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::CLOSED_CHAIN);
   EXPECT_EQ(config.prepare_named_target, "prepare");
+  EXPECT_DOUBLE_EQ(config.tag_reacquisition_timeout, config.table_tag_stability_timeout);
   EXPECT_FALSE(config.allow_execution);
   EXPECT_TRUE(config.visible_boxes_as_obstacles);
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, config.reset_state_timeout);
@@ -93,6 +95,7 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   test_node->declare_parameter<bool>("posture_zmq_enabled", false);
   test_node->declare_parameter<double>("minimum_grasp_joint_margin", 0.03);
   test_node->declare_parameter<double>("minimum_carry_joint_margin", 0.04);
+  test_node->declare_parameter<double>("tag_reacquisition_timeout", 4.0);
 
   const auto config = loadPickPlaceConfig(test_node);
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::POSE_TO_POSE);
@@ -115,6 +118,7 @@ TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
   EXPECT_FALSE(config.posture_zmq_enabled);
   EXPECT_DOUBLE_EQ(config.minimum_grasp_joint_margin, 0.03);
   EXPECT_DOUBLE_EQ(config.minimum_carry_joint_margin, 0.04);
+  EXPECT_DOUBLE_EQ(config.tag_reacquisition_timeout, 4.0);
 }
 
 TEST_F(PickPlaceConfigTest, CarriesUseTheGraspMarginWhenNoCarryOverrideIsSet)
@@ -139,6 +143,15 @@ TEST_F(PickPlaceConfigTest, RejectsUnsafeReturnSearchSettings)
   const auto bad_budget = node("bad_return_budget");
   bad_budget->declare_parameter<double>("return_planning_timeout", 0.0);
   EXPECT_THROW(loadPickPlaceConfig(bad_budget), std::runtime_error);
+}
+
+TEST_F(PickPlaceConfigTest, RejectsInvalidDetectionWaitTimeout)
+{
+  for (const double timeout : {0.0, -1.0, std::numeric_limits<double>::infinity()}) {
+    const auto test_node = node("bad_detection_timeout");
+    test_node->declare_parameter<double>("tag_reacquisition_timeout", timeout);
+    EXPECT_THROW(loadPickPlaceConfig(test_node), std::runtime_error);
+  }
 }
 
 TEST_F(PickPlaceConfigTest, UsesLegacyCarryPoseForBothTargetsWhenNewPosesAreUnset)

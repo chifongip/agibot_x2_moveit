@@ -224,10 +224,14 @@ def test_late_visible_box_detections_do_not_interrupt_a_planned_task():
         Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
     ).read_text(encoding="utf-8")
 
-    assert "A newly\n    // detected instance may be a late/stale tag observation" in server_source
+    tracker_source = (
+        Path(__file__).parents[1] / "src" / "pick_place" / "box_pose_tracker.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "box_pose_tracker_.waitForUnchangedPoses(expected" in server_source
     assert "if (actual.size() != expected.size())" not in server_source
-    assert "visible box instance became stale before motion" in server_source
-    assert "changed before motion:" in server_source
+    assert "for (const auto & reference : references)" in tracker_source
+    assert "changed before motion:" in tracker_source
 
 
 def test_detailed_planning_trace_file_is_automatic_and_launch_configurable():
@@ -270,7 +274,7 @@ def test_empty_operations_reconcile_detections_and_restart_cleanup_remains_avail
     assert "scene_interface_.getAttachedObjects()" in scene_source
     assert "clearManagedBoxes(error)" in scene_source
     assert "clearSceneAfterEmptyOperation(task);" in server_source
-    assert 'updateVisibleBoxScene("", false, true, visible_boxes, error)' in server_source
+    assert 'updateVisibleBoxScene("", false, true, visible_boxes, error,' in server_source
     assert (
         "planning_scene_.updateDetectionScene(observations, protected_ids, false, error)"
         in server_source

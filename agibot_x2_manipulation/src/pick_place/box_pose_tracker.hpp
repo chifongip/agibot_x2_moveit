@@ -19,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace agibot_x2_manipulation
 {
@@ -40,6 +41,14 @@ public:
     double orientation_tolerance);
 
   bool stablePose(const std::string & instance_id, TrackedBoxPose & pose) const;
+  bool waitForStablePose(
+    const std::string & instance_id, double timeout, const std::function<bool()> & canceled,
+    TrackedBoxPose & pose, std::string & error,
+    const std::function<void()> & waiting = {}) const;
+  bool waitForUnchangedPoses(
+    const std::vector<TrackedBoxPose> & references, double timeout,
+    const std::function<bool()> & canceled, std::string & error,
+    const std::function<void()> & waiting = {}) const;
   std::map<std::string, TrackedBoxPose> freshPoses() const;
   bool stillWithinTolerance(
     const TrackedBoxPose & reference, TrackedBoxPose & latest,
@@ -50,12 +59,19 @@ public:
   void clear();
 
 private:
+  bool withinTolerance(
+    const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error) const;
+  bool waitForFresh(
+    const std::function<bool(std::string &)> & ready, double timeout,
+    const std::function<bool()> & canceled, const std::function<void()> & waiting,
+    const std::string & description, std::string & error) const;
   rclcpp::Node::SharedPtr node_;
   std::string planning_frame_;
   double maximum_age_;
   double position_tolerance_;
   double orientation_tolerance_;
   mutable std::mutex mutex_;
+  mutable std::condition_variable pose_condition_;
   std::map<std::string, TrackedBoxPose> latest_poses_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
@@ -108,7 +124,8 @@ public:
 
   bool waitForStablePose(
     double timeout, const std::function<bool()> & canceled,
-    geometry_msgs::msg::PoseStamped & output, std::string & error) const;
+    geometry_msgs::msg::PoseStamped & output, std::string & error,
+    const std::function<void()> & waiting = {}) const;
 
 private:
   void onDetections(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message);

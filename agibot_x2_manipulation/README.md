@@ -684,6 +684,29 @@ guarantee straight TCP motion or continuous rigid two-hand closure between
 endpoints, so validate with `plan_only: true` and fake-ZMQ simulation before
 enabling robot motion.
 
+### Waiting for tag detections
+
+`tag_reacquisition_timeout: 10.0` seconds is the shared wait limit for fresh box
+selection, planned visible-box checks, and stable table-tag acquisition in Pick,
+Place, PickPlace, and MoveCarryPose. Actions publish `waiting_for_detection`
+feedback while waiting before the next motion, retain the current held-object
+state, and respond to cancellation/reset requests. All boxes in a planned
+snapshot share one deadline. The held box is excluded from visible-box checks;
+its state continues to come from robot feedback and attachment tracking.
+
+Freshness remains controlled by `maximum_box_pose_age` and
+`maximum_table_tag_pose_age`; waiting does not make an old observation valid.
+Fresh observations must retain the planned instance/profile and stay within the
+existing movement tolerances. A moved box invalidates the existing plan rather
+than resuming motion toward an old target. Exhausted waits report an error.
+These checks run between motions, so a tag dropout alone does not interrupt an
+executing trajectory. Controller faults and collision validation remain active.
+
+When `tag_reacquisition_timeout` is not set, it inherits the legacy
+`table_tag_stability_timeout` value. Explicitly set the shared parameter to tune
+all action detection waits together. Reset retains its existing optional scene
+refresh behavior and does not require reacquiring tags that are absent.
+
 ### Post-place return planning
 
 Place and PickPlace feasibility checks include release, retreat, and return to

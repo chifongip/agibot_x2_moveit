@@ -96,6 +96,7 @@ struct PickPlaceConfig
   double table_tag_maximum_angular_spread{0.0};
   double table_tag_maximum_sample_gap{0.0};
   double table_tag_stability_timeout{0.0};
+  double tag_reacquisition_timeout{10.0};
   double max_joint_step{0.0};
   bool allow_execution{false};
   double velocity_scaling{0.0};

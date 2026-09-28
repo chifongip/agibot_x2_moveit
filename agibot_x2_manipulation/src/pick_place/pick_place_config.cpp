@@ -217,6 +217,11 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     node, "table_tag_maximum_sample_gap", 2.5);
   config.table_tag_stability_timeout = parameter<double>(
     node, "table_tag_stability_timeout", 6.0);
+  config.tag_reacquisition_timeout = parameter<double>(
+    node, "tag_reacquisition_timeout", config.table_tag_stability_timeout);
+  if (!std::isfinite(config.tag_reacquisition_timeout) || config.tag_reacquisition_timeout <= 0.0) {
+    throw std::runtime_error("tag_reacquisition_timeout must be finite and positive");
+  }
   if ((config.use_tag_derived_place_pose || config.table_collision_enabled) &&
     (config.table_tag_frame.empty() ||
     !config.table_tag_to_tabletop_center.allFinite() ||

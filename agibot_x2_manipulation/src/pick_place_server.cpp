@@ -320,7 +320,45 @@ private:
 
   void releaseOperation()
   {
+    detection_wait_feedback_ = {};
+    detection_resume_feedback_ = {};
     reset_coordinator_.releaseOperation();
+  }
+
+  FeedbackFunction detectionAwareFeedback(const FeedbackFunction & publish)
+  {
+    detection_wait_feedback_ = [this, publish]() {
+        publish("waiting_for_detection", 0.0F, held_pose_);
+      };
+    detection_resume_feedback_ = [this, publish]() {
+        publish("checking_detections", 0.0F, held_pose_);
+      };
+    return [this, publish](const std::string & stage, float progress,
+             const geometry_msgs::msg::PoseStamped & pose) {
+        detection_wait_feedback_ = [publish, progress, pose]() {
+            publish("waiting_for_detection", progress, pose);
+          };
+        detection_resume_feedback_ = [publish, stage, progress, pose]() {
+            publish(stage, progress, pose);
+          };
+        publish(stage, progress, pose);
+      };
+  }
+
+  bool waitForDetections(
+    const std::function<bool(const std::function<void()> &)> & wait) const
+  {
+    bool announced = false;
+    const bool ready = wait([&]() {
+        announced = true;
+        if (detection_wait_feedback_) {
+          detection_wait_feedback_();
+        }
+      });
+    if (ready && announced && detection_resume_feedback_) {
+      detection_resume_feedback_();
+    }
+    return ready;
   }
 
   bool reloadLocalizer(
@@ -477,12 +515,14 @@ private:
   }
 
   bool selectBox(
-    const std::string & instance_id, TrackedBoxPose & box, std::string & error)
+    const std::string & instance_id, TrackedBoxPose & box, std::string & error,
+    const CancelFunction & canceled)
   {
-    if (!box_pose_tracker_.stablePose(instance_id, box)) {
-      error = instance_id.empty() ?
-        "no uniquely selectable fresh box state; specify instance_id" :
-        "no fresh stable pose for box instance: " + instance_id;
+    if (!waitForDetections([&](const auto & waiting) {
+        return box_pose_tracker_.waitForStablePose(instance_id, config_.tag_reacquisition_timeout,
+          canceled, box, error, waiting);
+      }))
+    {
       return false;
     }
     return activateBoxProfile(box, error);
@@ -491,9 +531,20 @@ private:
   bool collectFreshBoxes(
     const std::string & target_instance_id, bool require_target,
     DetectionSceneSnapshot & observations,
-    std::vector<TrackedBoxPose> & visible_boxes, std::string & error)
+    std::vector<TrackedBoxPose> & visible_boxes, std::string & error,
+    const CancelFunction & canceled)
   {
     visible_boxes.clear();
+    if (require_target) {
+      TrackedBoxPose target;
+      if (!waitForDetections([&](const auto & waiting) {
+          return box_pose_tracker_.waitForStablePose(target_instance_id,
+            config_.tag_reacquisition_timeout, canceled, target, error, waiting);
+        }))
+      {
+        return false;
+      }
+    }
     const auto fresh_boxes = box_pose_tracker_.freshPoses();
     const auto target = fresh_boxes.find(target_instance_id);
     if (require_target && target == fresh_boxes.end()) {
@@ -532,10 +583,12 @@ private:
 
   bool updateVisibleBoxScene(
     const std::string & target_instance_id, bool require_target, bool clear_owned_boxes,
-    std::vector<TrackedBoxPose> & visible_boxes, std::string & error)
+    std::vector<TrackedBoxPose> & visible_boxes, std::string & error,
+    const CancelFunction & canceled)
   {
     DetectionSceneSnapshot observations;
-    if (!collectFreshBoxes(target_instance_id, require_target, observations, visible_boxes, error) ||
+    if (!collectFreshBoxes(target_instance_id, require_target, observations, visible_boxes,
+        error, canceled) ||
       !collectFreshTable(observations, error))
     {
       return false;
@@ -575,7 +628,7 @@ private:
     }
     DetectionSceneSnapshot observations;
     std::vector<TrackedBoxPose> visible_boxes;
-    return collectFreshBoxes("", false, observations, visible_boxes, error) &&
+    return collectFreshBoxes("", false, observations, visible_boxes, error, canceled) &&
       collectFreshTable(observations, error) &&
       planning_scene_.updateDetectionScene(observations, {}, true, error);
   }
@@ -602,50 +655,22 @@ private:
 
   bool validateVisibleBoxScene(
     const std::vector<TrackedBoxPose> & expected_boxes,
-    const std::string & ignored_instance_id, std::string & error) const
+    const std::string & ignored_instance_id, std::string & error,
+    const CancelFunction & canceled) const
   {
-    std::map<std::string, TrackedBoxPose> expected;
+    std::vector<TrackedBoxPose> expected;
     for (const auto & box : expected_boxes) {
       if (box.instance_id != ignored_instance_id) {
-        expected.emplace(box.instance_id, box);
+        expected.push_back(box);
       }
     }
-    if (!config_.visible_boxes_as_obstacles) {
-      for (const auto & entry : expected) {
-        TrackedBoxPose latest;
-        if (!box_pose_tracker_.stillWithinTolerance(entry.second, latest, error)) {
-          return false;
-        }
-      }
-      return true;
-    }
-    const auto fresh_boxes = box_pose_tracker_.freshPoses();
-    std::map<std::string, TrackedBoxPose> actual;
-    for (const auto & entry : fresh_boxes) {
-      if (entry.first != ignored_instance_id) {
-        actual.emplace(entry.first, entry.second);
-      }
-    }
-    // The snapshot was already applied to the planning scene.  A newly
-    // detected instance may be a late/stale tag observation, so it must not
-    // interrupt an in-progress task.  Keep checking every obstacle that was
-    // part of the snapshot; a missing or moved planned obstacle still makes
-    // the trajectory invalid.
-    for (const auto & entry : expected) {
-      const auto actual_box = actual.find(entry.first);
-      if (actual_box == actual.end()) {
-        error = "visible box instance became stale before motion: " + entry.first;
-        return false;
-      }
-      TrackedBoxPose latest;
-      std::string tolerance_error;
-      if (!box_pose_tracker_.stillWithinTolerance(entry.second, latest, tolerance_error)) {
-        error = "visible box instance '" + entry.first + "' changed before motion: " +
-          tolerance_error;
-        return false;
-      }
-    }
-    return true;
+    // Keep checking the planned snapshot, including previously visible obstacles.
+    // Freshness loss pauses the next motion; moved/profile-changed observations
+    // still invalidate the existing plan. The held box is excluded by instance ID.
+    return waitForDetections([&](const auto & waiting) {
+        return box_pose_tracker_.waitForUnchangedPoses(expected, config_.tag_reacquisition_timeout,
+          canceled, error, waiting);
+      });
   }
 
   bool resolvePlacePose(
@@ -686,8 +711,10 @@ private:
       return false;
     }
     geometry_msgs::msg::PoseStamped tag_pose;
-    if (!table_tag_pose_tracker_->waitForStablePose(
-        config_.table_tag_stability_timeout, canceled, tag_pose, error))
+    if (!waitForDetections([&](const auto & waiting) {
+        return table_tag_pose_tracker_->waitForStablePose(
+          config_.tag_reacquisition_timeout, canceled, tag_pose, error, waiting);
+      }))
     {
       return false;
     }
@@ -708,7 +735,7 @@ private:
       return false;
     }
     std::vector<TrackedBoxPose> visible_boxes;
-    return updateVisibleBoxScene(active_box_instance_id_, false, false, visible_boxes, error);
+    return updateVisibleBoxScene(active_box_instance_id_, false, false, visible_boxes, error, canceled);
   }
 
   void publishTrackedTableMarker(const geometry_msgs::msg::PoseStamped & tag_pose)
@@ -1269,7 +1296,7 @@ private:
     }
     std::string error;
     std::vector<TrackedBoxPose> visible_boxes;
-    if (updateVisibleBoxScene("", false, true, visible_boxes, error)) {
+    if (updateVisibleBoxScene("", false, true, visible_boxes, error, []() {return false;})) {
       active_visible_boxes_.clear();
       return;
     }
@@ -1327,12 +1354,12 @@ private:
     }
 
     std::string error;
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled)) {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
     std::vector<TrackedBoxPose> visible_boxes;
     if (!updateVisibleBoxScene(
-        active_box_instance_id_, false, false, visible_boxes, error))
+        active_box_instance_id_, false, false, visible_boxes, error, canceled))
     {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
@@ -1398,7 +1425,7 @@ private:
     }
 
     feedback("moving_to_carry_" + std::string(carryPoseName(target)), 0.50F, held_pose_);
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled)) {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
     if (!trajectory_executor_.execute(carry_plan.trajectory, canceled)) {
@@ -1460,14 +1487,14 @@ private:
     }
     TrackedBoxPose tracked_box;
     std::string selection_error;
-    if (!selectBox(instance_id, tracked_box, selection_error)) {
+    if (!selectBox(instance_id, tracked_box, selection_error, canceled)) {
       return outcome(false, kNoStableBoxPose, selection_error);
     }
     active_visible_boxes_.clear();
     std::vector<TrackedBoxPose> visible_boxes;
     std::string error;
     if (!updateVisibleBoxScene(
-        tracked_box.instance_id, true, true, visible_boxes, error))
+        tracked_box.instance_id, true, true, visible_boxes, error, canceled))
     {
       return outcome(false, kSafetyAbort, error);
     }
@@ -1547,7 +1574,7 @@ private:
 
     feedback("moving_to_prepare", 0.25F, box_message);
     for (const auto & segment : prepare_plan.segments) {
-      if (!validateVisibleBoxScene(visible_boxes, "", error) ||
+      if (!validateVisibleBoxScene(visible_boxes, "", error, canceled) ||
         !planning_scene_.synchronize(error))
       {
         return outcome(false, kSafetyAbort, error);
@@ -1568,7 +1595,7 @@ private:
     if (canceled()) {
       return outcome(false, kSafetyAbort, "pick canceled before pregrasp execution");
     }
-    if (!validateVisibleBoxScene(visible_boxes, "", error)) {
+    if (!validateVisibleBoxScene(visible_boxes, "", error, canceled)) {
       return outcome(false, kSafetyAbort, error);
     }
     if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
@@ -1579,7 +1606,7 @@ private:
     if (canceled()) {
       return outcome(false, kExecutionFailed, "pick canceled before approach");
     }
-    if (!validateVisibleBoxScene(visible_boxes, "", error)) {
+    if (!validateVisibleBoxScene(visible_boxes, "", error, canceled)) {
       return outcome(false, kSafetyAbort, error);
     }
     const auto & pick_grasp = selected_grasp.candidate.grasp;
@@ -1674,7 +1701,7 @@ private:
       setState(ManipulationState::RECOVERY_REQUIRED, "pick canceled before carry execution");
       return outcome(false, kRecoveryRequired, "pick canceled; object remains held", held_pose_);
     }
-    if (!validateVisibleBoxScene(visible_boxes, active_box_instance_id_, error)) {
+    if (!validateVisibleBoxScene(visible_boxes, active_box_instance_id_, error, canceled)) {
       setState(ManipulationState::RECOVERY_REQUIRED, error);
       return outcome(false, kRecoveryRequired, error + "; object remains held", held_pose_);
     }
@@ -1858,12 +1885,12 @@ private:
     }
     geometry_msgs::msg::PoseStamped place_message;
     std::string error;
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled)) {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
     std::vector<TrackedBoxPose> visible_boxes;
     if (!updateVisibleBoxScene(
-        active_box_instance_id_, false, false, visible_boxes, error))
+        active_box_instance_id_, false, false, visible_boxes, error, canceled))
     {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
@@ -1928,7 +1955,7 @@ private:
       return outcome(false, kExecutionFailed, "place canceled before motion", held_pose_);
     }
     feedback("moving_to_place", 0.45F, held_pose_);
-    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error)) {
+    if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled)) {
       return outcome(false, kSafetyAbort, error, held_pose_);
     }
     if (!trajectory_executor_.execute(transport, canceled)) {
@@ -1996,7 +2023,7 @@ private:
       if (canceled()) {
         return outcome(false, kExecutionFailed, "box placed, but return canceled", place_message);
       }
-      if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error) ||
+      if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, error, canceled) ||
         !planning_scene_.synchronize(error))
       {
         return outcome(false, kSafetyAbort, error, place_message);
@@ -2054,14 +2081,14 @@ private:
     }
     TrackedBoxPose tracked_box;
     std::string selection_error;
-    if (!selectBox(instance_id, tracked_box, selection_error)) {
+    if (!selectBox(instance_id, tracked_box, selection_error, canceled)) {
       return outcome(false, kNoStableBoxPose, selection_error);
     }
     active_visible_boxes_.clear();
     std::vector<TrackedBoxPose> visible_boxes;
     std::string error;
     if (!updateVisibleBoxScene(
-        tracked_box.instance_id, true, true, visible_boxes, error))
+        tracked_box.instance_id, true, true, visible_boxes, error, canceled))
     {
       return outcome(false, kSafetyAbort, error);
     }
@@ -2368,14 +2395,14 @@ private:
   void executePick(const std::shared_ptr<PickGoalHandle> & goal)
   {
     ScopeExit release([this]() {releaseOperation();});
-    const FeedbackFunction feedback = [goal](
+    const FeedbackFunction feedback = detectionAwareFeedback([goal](
       const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
         auto message = std::make_shared<Pick::Feedback>();
         message->stage = stage;
         message->progress = progress;
         message->box_pose = pose;
         goal->publish_feedback(message);
-      };
+      });
     TaskOutcome task;
     try {
       task = runPick(
@@ -2400,14 +2427,14 @@ private:
   void executePlace(const std::shared_ptr<PlaceGoalHandle> & goal)
   {
     ScopeExit release([this]() {releaseOperation();});
-    const FeedbackFunction feedback = [goal](
+    const FeedbackFunction feedback = detectionAwareFeedback([goal](
       const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
         auto message = std::make_shared<Place::Feedback>();
         message->stage = stage;
         message->progress = progress;
         message->box_pose = pose;
         goal->publish_feedback(message);
-      };
+      });
     TaskOutcome task;
     try {
       task = runPlace(
@@ -2428,14 +2455,14 @@ private:
   void executeMoveCarryPose(const std::shared_ptr<MoveCarryPoseGoalHandle> & goal)
   {
     ScopeExit release([this]() {releaseOperation();});
-    const FeedbackFunction feedback = [goal](
+    const FeedbackFunction feedback = detectionAwareFeedback([goal](
       const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
         auto message = std::make_shared<MoveCarryPose::Feedback>();
         message->stage = stage;
         message->progress = progress;
         message->box_pose = pose;
         goal->publish_feedback(message);
-      };
+      });
     TaskOutcome task;
     try {
       task = runMoveCarryPose(
@@ -2457,6 +2484,15 @@ private:
   void executePickPlace(const std::shared_ptr<PickPlaceGoalHandle> & goal)
   {
     ScopeExit release([this]() {releaseOperation();});
+    const auto feedback = detectionAwareFeedback([goal](
+        const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
+        auto message = std::make_shared<PickPlace::Feedback>();
+        message->stage = stage;
+        message->progress = progress;
+        message->box_pose = pose;
+        goal->publish_feedback(message);
+      });
+    feedback("checking_detections", 0.0F, geometry_msgs::msg::PoseStamped());
     TaskOutcome task;
     const CancelFunction canceled =
       [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested();};
@@ -2464,24 +2500,24 @@ private:
       geometry_msgs::msg::PoseStamped place_pose;
       std::string place_error;
       TrackedBoxPose selected_box;
-      if (!selectBox(goal->get_goal()->instance_id, selected_box, place_error)) {
+      if (!selectBox(goal->get_goal()->instance_id, selected_box, place_error, canceled)) {
         task = outcome(false, kNoStableBoxPose, place_error);
       } else if (!resolvePlacePose(goal->get_goal()->place_pose, place_pose, place_error, canceled)) {
         task = outcome(false, kInvalidGoal, place_error);
       } else if (goal->get_goal()->plan_only) {
         task = planCompletePath(goal->get_goal()->instance_id, place_pose, canceled);
       } else {
-        const FeedbackFunction pick_feedback = [goal](
+        const FeedbackFunction pick_feedback = detectionAwareFeedback([goal](
           const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
             auto message = std::make_shared<PickPlace::Feedback>();
             message->stage = "pick/" + stage;
             message->progress = progress * 0.5F;
             message->box_pose = pose;
             goal->publish_feedback(message);
-          };
+          });
         task = runPick(false, goal->get_goal()->instance_id, pick_feedback, canceled);
         if (task.success) {
-          const FeedbackFunction place_feedback = [goal](
+          const FeedbackFunction place_feedback = detectionAwareFeedback([goal](
             const std::string & stage, float progress,
             const geometry_msgs::msg::PoseStamped & pose) {
               auto message = std::make_shared<PickPlace::Feedback>();
@@ -2489,7 +2525,7 @@ private:
               message->progress = 0.5F + progress * 0.5F;
               message->box_pose = pose;
               goal->publish_feedback(message);
-            };
+            });
           task = runPlace(place_pose, false, place_feedback, canceled);
         }
         if (!task.success && task.object_held) {
@@ -2524,6 +2560,10 @@ private:
   uint64_t profile_version_{0};
   ManipulationStateStore state_store_;
   BoxPoseTracker box_pose_tracker_;
+  // Only the reserved action worker reads/writes this callback; clear it before
+  // releasing the reservation so the next action cannot receive old feedback.
+  std::function<void()> detection_wait_feedback_;
+  std::function<void()> detection_resume_feedback_;
   std::unique_ptr<TableTagPoseTracker> table_tag_pose_tracker_;
   Eigen::Isometry3d held_box_to_left_contact_{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d held_box_to_right_contact_{Eigen::Isometry3d::Identity()};
