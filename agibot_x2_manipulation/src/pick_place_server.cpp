@@ -1426,6 +1426,28 @@ private:
   }
 
 
+  bool planPickPreparation(
+    PostPlacePlan & output, moveit::core::RobotState & end_state,
+    std::string & error, const CancelFunction & canceled)
+  {
+    auto current = move_group_.getCurrentState(config_.reset_state_timeout);
+    if (!current) {
+      error = "current robot state unavailable before prepare planning";
+      return false;
+    }
+    if (!post_place_planner_->planToNamedTarget(*current, planning_scene_.snapshot(),
+        config_.prepare_named_target, output, error, canceled))
+    {
+      error = "Pick prepare planning failed: " + error;
+      return false;
+    }
+    const auto & trajectory = output.segments.back().trajectory.joint_trajectory;
+    end_state = *current;
+    end_state.setVariablePositions(trajectory.joint_names, trajectory.points.back().positions);
+    end_state.update();
+    return true;
+  }
+
   TaskOutcome runPick(
     bool plan_only, const std::string & instance_id, const FeedbackFunction & feedback,
     const CancelFunction & canceled)
@@ -1475,6 +1497,12 @@ private:
     if (canceled()) {
       return outcome(false, kSafetyAbort, "pick canceled before planning");
     }
+    feedback("planning_prepare", 0.10F, box_message);
+    PostPlacePlan prepare_plan;
+    moveit::core::RobotState prepare_end(move_group_.getRobotModel());
+    if (!planPickPreparation(prepare_plan, prepare_end, error, canceled)) {
+      return outcome(false, kPlanningFailed, error);
+    }
     feedback("planning_pregrasp", 0.15F, box_message);
     moveit::planning_interface::MoveGroupInterface::Plan pregrasp_plan;
     moveit_msgs::msg::RobotTrajectory approach;
@@ -1504,7 +1532,7 @@ private:
       };
     if (!motion_planner_.planPickPath(
         box_message, pick_pose, pregrasp_plan, approach, contact_end,
-        selected_grasp, carry_validator, error, canceled))
+        selected_grasp, carry_validator, error, canceled, &prepare_end))
     {
       return outcome(false, kPlanningFailed, error);
     }
@@ -1517,6 +1545,25 @@ private:
         stampedPose(carry_plan.pose));
     }
 
+    feedback("moving_to_prepare", 0.25F, box_message);
+    for (const auto & segment : prepare_plan.segments) {
+      if (!validateVisibleBoxScene(visible_boxes, "", error) ||
+        !planning_scene_.synchronize(error))
+      {
+        return outcome(false, kSafetyAbort, error);
+      }
+      auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
+      if (!measured || !post_place_planner_->validateSegment(segment, *measured,
+          planning_scene_.snapshot(), error, canceled, true))
+      {
+        return outcome(false, kSafetyAbort,
+          measured ? "prepare revalidation failed: " + error : "prepare state unavailable");
+      }
+      if (!trajectory_executor_.execute(segment.trajectory, canceled)) {
+        return outcome(false, kExecutionFailed,
+          trajectory_executor_.error("prepare execution failed"));
+      }
+    }
     feedback("executing_pregrasp", 0.30F, box_message);
     if (canceled()) {
       return outcome(false, kSafetyAbort, "pick canceled before pregrasp execution");
@@ -1669,7 +1716,7 @@ private:
     }
     if (!include_retreat) {
       return post_place_planner_->plan(empty_start, {}, scene, false, output, error, canceled,
-        deadline, config_.post_place_named_target);
+        deadline, config_.post_place_named_target, config_.prepare_named_target);
     }
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       // Pose-to-pose mode has no closed-chain constraint to preserve after
@@ -1680,7 +1727,7 @@ private:
       const HandPosePair retreat_target{retreat.left_pregrasp, retreat.right_pregrasp};
       return post_place_planner_->plan(
         empty_start, retreat_target, scene, true, output, error, canceled, deadline,
-        config_.post_place_named_target);
+        config_.post_place_named_target, config_.prepare_named_target);
     }
     // Try farther coordinated disengagement endpoints if the nominal endpoint
     // has no named-target continuation. Each complete retreat/return attempt
@@ -1712,7 +1759,7 @@ private:
       }
       PostPlacePlan named;
       if (!post_place_planner_->plan(retreat_end, {}, scene, false, named, error, canceled,
-          attempt_deadline, config_.post_place_named_target))
+          attempt_deadline, config_.post_place_named_target, config_.prepare_named_target))
       {
         continue;
       }
@@ -1971,7 +2018,9 @@ private:
         segment_index = 0;
         continue;
       }
-      feedback(segment.retreat ? "retreating" : "returning_to_zero", 0.90F, place_message);
+      feedback(segment.retreat ? "retreating" :
+        segment.name == "to_" + config_.prepare_named_target ? "returning_to_prepare" :
+        "returning_to_zero", 0.90F, place_message);
       if (!trajectory_executor_.execute(segment.trajectory, canceled)) {
         setState(ManipulationState::EMPTY, "box placed; return execution failed");
         return outcome(false, kExecutionFailed,
@@ -2047,6 +2096,11 @@ private:
     if (canceled()) {
       return outcome(false, kSafetyAbort, "PickPlace planning canceled before motion planning");
     }
+    PostPlacePlan prepare_plan;
+    moveit::core::RobotState prepare_end(move_group_.getRobotModel());
+    if (!planPickPreparation(prepare_plan, prepare_end, error, canceled)) {
+      return outcome(false, kPlanningFailed, error);
+    }
     moveit::planning_interface::MoveGroupInterface::Plan pregrasp_plan;
     moveit_msgs::msg::RobotTrajectory approach;
     moveit::core::RobotState contact_end(move_group_.getRobotModel());
@@ -2085,7 +2139,7 @@ private:
       };
     if (!motion_planner_.planPickPath(
         box_message, pick_pose, pregrasp_plan, approach, contact_end,
-        selected_grasp, transport_validator, error, canceled))
+        selected_grasp, transport_validator, error, canceled, &prepare_end))
     {
       return outcome(false, kPlanningFailed, error);
     }

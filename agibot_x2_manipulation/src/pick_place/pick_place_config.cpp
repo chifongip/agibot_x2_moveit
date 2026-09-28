@@ -277,6 +277,7 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.state_file = parameter<std::string>(node, "state_file", defaultStateFile());
   config.initial_state = parameter<std::string>(node, "initial_state", "empty");
   config.post_place_named_target = parameter<std::string>(node, "post_place_named_target", "zero");
+  config.prepare_named_target = parameter<std::string>(node, "prepare_named_target", "prepare");
   config.return_planning_timeout = parameter<double>(node, "return_planning_timeout", 30.0);
   config.return_planning_time_per_attempt = parameter<double>(
     node, "return_planning_time_per_attempt", 2.0);
@@ -300,6 +301,7 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
       });
     };
   if (!positive(config.return_planning_timeout) ||
+    config.prepare_named_target.empty() ||
     config.return_planning_attempts < 1 || config.return_planning_attempts > 64 ||
     !positive(config.return_planning_time_per_attempt) || config.return_ik_attempts < 1 ||
     config.return_ik_attempts > 64 || !positive(config.return_validation_joint_step) ||

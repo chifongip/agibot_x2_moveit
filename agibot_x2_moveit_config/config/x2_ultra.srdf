@@ -44,6 +44,22 @@
         <joint name="right_wrist_roll_joint" value="0"/>
         <joint name="right_wrist_yaw_joint" value="0"/>
     </group_state>
+    <group_state name="prepare" group="dual_arm">
+        <joint name="left_elbow_joint" value="-2.2"/>
+        <joint name="left_shoulder_pitch_joint" value="1.5"/>
+        <joint name="left_shoulder_roll_joint" value="0.2"/>
+        <joint name="left_shoulder_yaw_joint" value="0.3"/>
+        <joint name="left_wrist_pitch_joint" value="-0.4"/>
+        <joint name="left_wrist_roll_joint" value="0"/>
+        <joint name="left_wrist_yaw_joint" value="0"/>
+        <joint name="right_elbow_joint" value="-2.2"/>
+        <joint name="right_shoulder_pitch_joint" value="1.5"/>
+        <joint name="right_shoulder_roll_joint" value="-0.2"/>
+        <joint name="right_shoulder_yaw_joint" value="-0.3"/>
+        <joint name="right_wrist_pitch_joint" value="-0.4"/>
+        <joint name="right_wrist_roll_joint" value="0"/>
+        <joint name="right_wrist_yaw_joint" value="0"/>
+    </group_state>
     <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
     <disable_collisions link1="left_wrist_roll_link" link2="left_hand_pad_link" reason="Adjacent"/>
     <disable_collisions link1="left_hand_pad_link" link2="left_hand_tcp_link" reason="Adjacent"/>

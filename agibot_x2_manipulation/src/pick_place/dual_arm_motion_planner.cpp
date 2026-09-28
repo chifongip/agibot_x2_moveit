@@ -2117,9 +2117,10 @@ public:
     moveit::planning_interface::MoveGroupInterface::Plan & pregrasp_plan,
     moveit_msgs::msg::RobotTrajectory & approach, moveit::core::RobotState & contact_end,
     PlannedGrasp & selected, const ContinuationFunction & continuation, std::string & error,
-    const CancelFunction & canceled)
+    const CancelFunction & canceled, const moveit::core::RobotState * supplied_start)
   {
-    auto current = move_group_.getCurrentState(2.0);
+    auto current = supplied_start ? std::make_shared<moveit::core::RobotState>(*supplied_start) :
+      move_group_.getCurrentState(2.0);
     if (!current) {
       error = "current robot state unavailable";
       return false;
@@ -2641,11 +2642,12 @@ bool DualArmMotionPlanner::planPickPath(
   moveit::planning_interface::MoveGroupInterface::Plan & pregrasp_plan,
   moveit_msgs::msg::RobotTrajectory & approach, moveit::core::RobotState & contact_end,
   PlannedGrasp & selected, const ContinuationFunction & continuation,
-  std::string & error, const CancelFunction & canceled)
+  std::string & error, const CancelFunction & canceled,
+  const moveit::core::RobotState * start)
 {
   return impl_->planPickPath(
     box_message, pick_pose, pregrasp_plan, approach, contact_end, selected,
-    continuation, error, canceled);
+    continuation, error, canceled, start);
 }
 
 void DualArmMotionPlanner::updateHeldPoseFromRobot()

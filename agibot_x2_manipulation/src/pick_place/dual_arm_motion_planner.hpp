@@ -116,7 +116,8 @@ public:
     moveit::planning_interface::MoveGroupInterface::Plan & pregrasp_plan,
     moveit_msgs::msg::RobotTrajectory & approach, moveit::core::RobotState & contact_end,
     PlannedGrasp & selected, const ContinuationFunction & continuation,
-    std::string & error, const CancelFunction & canceled);
+    std::string & error, const CancelFunction & canceled,
+    const moveit::core::RobotState * start = nullptr);
   void updateHeldPoseFromRobot();
   bool validateHeldClosure(std::string & error);
   void clearGraspMarkers();

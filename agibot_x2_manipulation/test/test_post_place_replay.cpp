@@ -62,11 +62,14 @@ TEST(PostPlaceReplay, ReturnsFromRecordedStateWithRepresentativePlacedObstacles)
       PostPlacePlan result;
       std::string error;
       const auto began = std::chrono::steady_clock::now();
-      ASSERT_TRUE(planner.plan(start, {}, scene, false, result, error, []() {return false;})) <<
+      ASSERT_TRUE(planner.plan(start, {}, scene, false, result, error, []() {return false;},
+          std::chrono::steady_clock::time_point::max(), config.post_place_named_target,
+          config.prepare_named_target)) <<
         "scenario=" << scenario << " trial=" << trial << " " << error;
       EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count(),
         config.return_planning_timeout + 0.5);
       moveit::core::RobotState measured(start);
+      ASSERT_EQ(result.segments.size(), 2U);
       for (const auto & segment : result.segments) {
         ASSERT_TRUE(planner.validateSegment(segment, measured, scene, error,
             []() {return false;})) << error;
@@ -97,8 +100,9 @@ TEST(PostPlaceReplay, ReturnsFromRecordedStateWithRepresentativePlacedObstacles)
   PostPlacePlan result;
   std::string error;
   ASSERT_TRUE(planner.plan(start, retreat, scene, true, result, error,
-      []() {return false;})) << error;
-  ASSERT_GE(result.segments.size(), 2U);
+      []() {return false;}, std::chrono::steady_clock::time_point::max(),
+      config.post_place_named_target, config.prepare_named_target)) << error;
+  ASSERT_EQ(result.segments.size(), 3U);
   EXPECT_TRUE(result.segments.front().retreat);
   moveit::core::RobotState measured(start);
   for (const auto & segment : result.segments) {

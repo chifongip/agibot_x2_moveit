@@ -30,6 +30,8 @@ moveit::core::RobotModelPtr model()
     <joint name="slide"/><joint name="lift"/></group><group_state name="zero" group="arm">
     <joint name="slide" value="0.2"/><joint name="lift" value="0"/></group_state>
     <group_state name="ready" group="arm"><joint name="slide" value="-0.3"/>
+    <joint name="lift" value="0.2"/></group_state>
+    <group_state name="prepare" group="arm"><joint name="slide" value="0"/>
     <joint name="lift" value="0.2"/></group_state></robot>)");
   return std::make_shared<moveit::core::RobotModel>(urdf, srdf);
 }
@@ -282,6 +284,68 @@ TEST_F(ReturnSearchTest, FindsValidatedDetoursInTwentyIndependentTrials)
     EXPECT_TRUE(detoured);
   }
   EXPECT_TRUE(scene->getWorld()->hasObject("work_table"));
+}
+
+TEST_F(ReturnSearchTest, ReturnsThroughExactPreparePoseInBothModes)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  obstacle(scene, 0.0);
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", -0.2);
+  start.update();
+  for (const auto mode : {MotionPlanningMode::POSE_TO_POSE, MotionPlanningMode::CLOSED_CHAIN}) {
+    auto settings = config();
+    settings.motion_planning_mode = mode;
+    auto node = std::make_shared<rclcpp::Node>("return_prepare_test");
+    PostPlacePlanner planner(node, settings, robot);
+    PostPlacePlan output;
+    std::string error;
+    ASSERT_TRUE(planner.plan(start, {}, scene, false, output, error,
+        []() {return false;}, std::chrono::steady_clock::time_point::max(), "zero", "prepare"))
+      << error;
+    ASSERT_EQ(output.segments.size(), 2U);
+    EXPECT_EQ(output.segments[0].name, "to_prepare");
+    EXPECT_EQ(output.segments[1].name, "from_prepare_to_zero");
+    auto measured = start;
+    for (const auto & segment : output.segments) {
+      ASSERT_TRUE(planner.validateSegment(segment, measured, scene, error,
+          []() {return false;})) << error;
+      const auto & trajectory = segment.trajectory.joint_trajectory;
+      measured.setVariablePositions(trajectory.joint_names, trajectory.points.back().positions);
+      measured.update();
+      if (segment.name == "to_prepare") {
+        EXPECT_NEAR(measured.getVariablePosition("slide"), 0.0, 1e-3);
+        EXPECT_NEAR(measured.getVariablePosition("lift"), 0.2, 1e-3);
+      }
+    }
+    EXPECT_NEAR(measured.getVariablePosition("slide"), 0.2, 1e-3);
+    EXPECT_NEAR(measured.getVariablePosition("lift"), 0.0, 1e-3);
+  }
+}
+
+TEST_F(ReturnSearchTest, RejectsMissingOrCollidingPreparePose)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", -0.2);
+  start.update();
+  auto settings = config();
+  auto node = std::make_shared<rclcpp::Node>("return_invalid_prepare_test");
+  PostPlacePlanner planner(node, settings, robot);
+  PostPlacePlan output;
+  std::string error;
+  EXPECT_FALSE(planner.plan(start, {}, scene, false, output, error,
+      []() {return false;}, std::chrono::steady_clock::time_point::max(), "zero", "missing"));
+  EXPECT_NE(error.find("intermediate target unavailable"), std::string::npos);
+  obstacle(scene, 0.0, 0.5);
+  EXPECT_FALSE(planner.plan(start, {}, scene, false, output, error,
+      []() {return false;}, std::chrono::steady_clock::time_point::max(), "zero", "prepare"));
+  EXPECT_NE(error.find("intermediate target invalid"), std::string::npos);
+  EXPECT_TRUE(output.segments.empty());
 }
 
 TEST_F(ReturnSearchTest, AcceptsMeasuredStartBeyondModelPositionBounds)

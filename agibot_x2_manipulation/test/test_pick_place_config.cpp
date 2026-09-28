@@ -41,6 +41,7 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_EQ(config.planning_frame, "base_link");
   EXPECT_EQ(config.planning_group, "dual_arm");
   EXPECT_EQ(config.motion_planning_mode, MotionPlanningMode::CLOSED_CHAIN);
+  EXPECT_EQ(config.prepare_named_target, "prepare");
   EXPECT_FALSE(config.allow_execution);
   EXPECT_TRUE(config.visible_boxes_as_obstacles);
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, config.reset_state_timeout);

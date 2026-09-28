@@ -467,7 +467,8 @@ bool PostPlacePlanner::plan(
   const moveit::core::RobotState & supplied_start, const HandPosePair & retreat_target,
   const planning_scene::PlanningScenePtr & scene, bool include_retreat,
   PostPlacePlan & output, std::string & error, const CancelFunction & canceled,
-  std::chrono::steady_clock::time_point outer_deadline, const std::string & named_target)
+  std::chrono::steady_clock::time_point outer_deadline, const std::string & named_target,
+  const std::string & intermediate_target)
 {
   output.segments.clear();
   error.clear();
@@ -511,6 +512,41 @@ bool PostPlacePlanner::plan(
     error = "return named target invalid: " + error;
     return false;
   }
+  moveit::core::RobotState intermediate(zero);
+  if (!intermediate_target.empty()) {
+    if (!intermediate.setToDefaultValues(group, intermediate_target)) {
+      error = "return intermediate target unavailable: " + intermediate_target;
+      return false;
+    }
+    intermediate.update();
+    if (!intermediate.satisfiesBounds(group) || !validState(intermediate, strict, group, error)) {
+      error = "return intermediate target invalid: " + intermediate_target + ": " + error;
+      return false;
+    }
+  }
+  const auto append_named = [&](const moveit::core::RobotState & from,
+      const std::string & label, PostPlacePlan & candidate) {
+      PostPlaceSegment first;
+      if (!segment(from, intermediate, strict,
+          intermediate_target.empty() ? label : "to_" + intermediate_target,
+          deadline, first, error, canceled))
+      {
+        return false;
+      }
+      if (!intermediate_target.empty()) {
+        PostPlaceSegment last;
+        if (!segment(intermediate, zero, strict, "from_" + intermediate_target + "_to_" +
+            target_name, deadline, last, error, canceled))
+        {
+          return false;
+        }
+        candidate.segments.push_back(std::move(first));
+        candidate.segments.push_back(std::move(last));
+      } else {
+        candidate.segments.push_back(std::move(first));
+      }
+      return true;
+    };
   const bool direct_pose_to_pose =
     config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE;
   Eigen::Vector3d up = Eigen::Vector3d::UnitZ();
@@ -546,9 +582,7 @@ bool PostPlacePlanner::plan(
       retreat.retreat = true;
       candidate.segments.push_back(std::move(retreat));
     }
-    PostPlaceSegment direct;
-    if (segment(retreat_end, zero, strict, "zero_direct", deadline, direct, error, canceled)) {
-      candidate.segments.push_back(std::move(direct));
+    if (append_named(retreat_end, "zero_direct", candidate)) {
       output = std::move(candidate);
       trace("selected", true, "direct return; elapsed=" +
         std::to_string(std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count()));
@@ -605,14 +639,15 @@ bool PostPlacePlanner::plan(
       const auto label = "clearance_" + std::to_string(clearance.index) + "_seed_" +
         std::to_string(clearance.seed) + "_retreat_" + std::to_string(attempt);
       PostPlaceSegment first;
-      PostPlaceSegment last;
+      PostPlacePlan continuation;
       if (!segment(retreat_end, clearance.state, strict, label, deadline, first, error, canceled) ||
-        !segment(clearance.state, zero, strict, "zero_from_" + label, deadline, last, error, canceled))
+        !append_named(clearance.state, "zero_from_" + label, continuation))
       {
         continue;
       }
       candidate.segments.push_back(std::move(first));
-      candidate.segments.push_back(std::move(last));
+      candidate.segments.insert(candidate.segments.end(),
+        continuation.segments.begin(), continuation.segments.end());
       output = std::move(candidate);
       trace("selected", true, label + "; poses=" + poseText(clearance.poses) + "; elapsed=" +
         std::to_string(std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count()));

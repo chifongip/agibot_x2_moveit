@@ -56,7 +56,8 @@ public:
     const planning_scene::PlanningScenePtr & scene, bool include_retreat,
     PostPlacePlan & output, std::string & error, const CancelFunction & canceled,
     std::chrono::steady_clock::time_point outer_deadline =
-    std::chrono::steady_clock::time_point::max(), const std::string & named_target = "");
+    std::chrono::steady_clock::time_point::max(), const std::string & named_target = "",
+    const std::string & intermediate_target = "");
   bool planToNamedTarget(
     const moveit::core::RobotState & start, const planning_scene::PlanningScenePtr & scene,
     const std::string & named_target, PostPlacePlan & output, std::string & error,

@@ -128,6 +128,8 @@ pick_place_server:
     post_place_named_target: zero
     # Independent post-release OMPL search; calibration and held-box mode are unchanged.
     return_planning_timeout: 30.0
+    # Empty-arm intermediate before Pick and between Place retreat and return.
+    prepare_named_target: prepare
     return_planning_time_per_attempt: 2.0
     # Total attempts per retreat/return segment, including the initial plan.
     return_planning_attempts: 3

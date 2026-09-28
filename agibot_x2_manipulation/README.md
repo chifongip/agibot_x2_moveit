@@ -663,6 +663,17 @@ ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   motion_planning_mode:=pose_to_pose allow_execution:=false
 ```
 
+Pick and Place use the dual-arm SRDF state `prepare` as an empty-arm intermediate
+(`prepare_named_target: prepare`). Pick plans current state → prepare → pregrasp
+→ contact → Carry A before starting motion. Grasp IK and pregrasp planning are
+seeded from the planned prepare endpoint. Place returns through retreat →
+prepare → `post_place_named_target` (normally zero). These routes apply to both
+planning modes and to plan-only PickPlace checks. The prepare segments use
+MoveIt joint-space planning with timed/controller-spline collision validation,
+the existing return retries, and measured-start checks before execution.
+Missing, out-of-bounds, or colliding prepare states fail planning; the named
+state is never silently skipped. Reset continues to use its explicit reset target.
+
 In `pose_to_pose` mode, the server retains the same pregrasp, contact, lift,
 carry, place, retreat, and zero endpoints. It solves dual-arm IK at each
 carry/place endpoint, then asks MoveIt for a collision-checked joint-space plan
@@ -676,7 +687,8 @@ enabling robot motion.
 ### Post-place return planning
 
 Place and PickPlace feasibility checks include release, retreat, and return to
-the exact `post_place_named_target` joint configuration. Before placement motion,
+the exact `post_place_named_target` joint configuration via `prepare_named_target`.
+Before placement motion,
 the server checks this continuation on an independent scene snapshot with the
 box released at the selected placement pose. The live collision scene is not
 changed by this check. If the continuation fails, adaptive placement may try
