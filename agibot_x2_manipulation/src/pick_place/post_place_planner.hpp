@@ -7,7 +7,6 @@
 #include <moveit/robot_trajectory/robot_trajectory.h>
 
 #include <chrono>
-#include <functional>
 #include <vector>
 
 namespace agibot_x2_manipulation
@@ -31,12 +30,6 @@ bool validateReturnTrajectory(
 bool validateTimedReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
-  std::string & error, const CancelFunction & interrupted);
-using TrajectoryStateValidator =
-  std::function<bool(moveit::core::RobotState &, std::string &)>;
-bool validateTimedTrajectory(
-  const robot_trajectory::RobotTrajectory & trajectory, double joint_step,
-  const TrajectoryStateValidator & valid_state,
   std::string & error, const CancelFunction & interrupted);
 
 struct PostPlaceSegment

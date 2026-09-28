@@ -1857,8 +1857,9 @@ private:
     moveit_msgs::msg::RobotTrajectory transport;
     moveit::core::RobotState place_end(*current);
     Eigen::Isometry3d selected_place_pose = place_pose;
-    const PlaceContinuation return_preflight =
-      postPlaceContinuation(held_box_to_left_contact_, held_box_to_right_contact_, canceled);
+    const PlaceContinuation return_preflight = plan_only ?
+      postPlaceContinuation(held_box_to_left_contact_, held_box_to_right_contact_, canceled) :
+      PlaceContinuation{};
     if (!motion_planner_.planAdaptivePlace(
         *current, from_pose, place_pose, false, false, held_box_to_left_contact_,
         held_box_to_right_contact_, transport, place_end, selected_place_pose, error, canceled,

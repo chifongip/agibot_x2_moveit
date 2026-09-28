@@ -32,30 +32,6 @@ moveit::core::RobotModelPtr model()
   return std::make_shared<moveit::core::RobotModel>(urdf, srdf);
 }
 
-moveit::core::RobotModelPtr wristModel()
-{
-  const auto urdf = urdf::parseURDF(R"(
-    <robot name="wrist_test">
-      <link name="base_link"/>
-      <link name="carriage"/>
-      <link name="left_wrist_roll_link">
-        <collision><geometry><sphere radius="0.025"/></geometry></collision>
-      </link>
-      <link name="hand"/>
-      <joint name="slide" type="prismatic"><parent link="base_link"/><child link="carriage"/>
-        <axis xyz="1 0 0"/><limit lower="-1" upper="1" effort="10" velocity="1"/></joint>
-      <joint name="lift" type="prismatic"><parent link="carriage"/>
-        <child link="left_wrist_roll_link"/><axis xyz="0 1 0"/>
-        <limit lower="-1" upper="1" effort="10" velocity="1"/></joint>
-      <joint name="tool" type="fixed"><parent link="left_wrist_roll_link"/>
-        <child link="hand"/></joint>
-    </robot>)");
-  auto srdf = std::make_shared<srdf::Model>();
-  srdf->initString(*urdf, R"(<robot name="wrist_test"><group name="arm">
-    <joint name="slide"/><joint name="lift"/></group></robot>)");
-  return std::make_shared<moveit::core::RobotModel>(urdf, srdf);
-}
-
 TEST(PostPlacePlanner, ClearanceUsesTableAxesAndPreservesOrientation)
 {
   PickPlaceConfig config;
@@ -195,62 +171,6 @@ protected:
   }
 };
 
-TEST_F(ReturnSearchTest, AllowsWristContactDuringRetreatButRequiresClearEndpoint)
-{
-  const auto robot = wristModel();
-  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
-  moveit_msgs::msg::CollisionObject box;
-  box.id = "placed_box";
-  box.header.frame_id = "base_link";
-  shape_msgs::msg::SolidPrimitive shape;
-  shape.type = shape.BOX;
-  shape.dimensions = {0.08, 0.08, 0.08};
-  box.primitives.push_back(shape);
-  geometry_msgs::msg::Pose pose;
-  pose.orientation.w = 1.0;
-  box.primitive_poses.push_back(pose);
-  box.operation = box.ADD;
-  ASSERT_TRUE(scene->processCollisionObjectMsg(box));
-
-  moveit::core::RobotState start(robot);
-  start.setToDefaultValues();
-  start.update();
-  moveit::core::RobotState clear(start);
-  clear.setVariablePosition("slide", 0.2);
-  clear.update();
-  ASSERT_TRUE(scene->isStateColliding(start, "arm"));
-  ASSERT_FALSE(scene->isStateColliding(clear, "arm"));
-
-  robot_trajectory::RobotTrajectory trajectory(robot, "arm");
-  trajectory.addSuffixWayPoint(start, 0.0);
-  trajectory.addSuffixWayPoint(clear, 1.0);
-  PostPlaceSegment segment;
-  segment.retreat = true;
-  trajectory.getRobotTrajectoryMsg(segment.trajectory);
-  auto settings = config();
-  auto node = std::make_shared<rclcpp::Node>("return_wrist_retreat_test");
-  PostPlacePlanner planner(node, settings, robot);
-  std::string error;
-  EXPECT_TRUE(planner.validateSegment(segment, start, scene, error,
-      []() {return false;})) << error;
-  segment.retreat = false;
-  EXPECT_FALSE(planner.validateSegment(segment, start, scene, error,
-      []() {return false;}));
-  EXPECT_NE(error.find("left_wrist_roll_link"), std::string::npos);
-
-  moveit::core::RobotState still_touching(start);
-  still_touching.setVariablePosition("slide", 0.03);
-  still_touching.update();
-  robot_trajectory::RobotTrajectory short_retreat(robot, "arm");
-  short_retreat.addSuffixWayPoint(start, 0.0);
-  short_retreat.addSuffixWayPoint(still_touching, 1.0);
-  segment.retreat = true;
-  short_retreat.getRobotTrajectoryMsg(segment.trajectory);
-  EXPECT_FALSE(planner.validateSegment(segment, start, scene, error,
-      []() {return false;}));
-  EXPECT_NE(error.find("retreat endpoint has not cleared"), std::string::npos);
-}
-
 TEST_F(ReturnSearchTest, FindsValidatedDetoursInTwentyIndependentTrials)
 {
   const auto robot = model();
@@ -355,34 +275,6 @@ TEST_F(ReturnSearchTest, RejectsControllerSplineOvershootWithClearEndpoints)
   EXPECT_FALSE(validateTimedReturnTrajectory(trajectory, scene, 0.01, error,
       []() {return false;}));
   EXPECT_NE(error.find("controller spline invalid"), std::string::npos);
-}
-
-TEST_F(ReturnSearchTest, TimedValidatorChecksControllerSamplesAgainstCustomConstraints)
-{
-  const auto robot = model();
-  moveit::core::RobotState start(robot);
-  start.setToDefaultValues();
-  start.setVariablePosition("slide", 0.2);
-  start.setVariableVelocity("slide", -1.0);
-  start.setVariableVelocity("lift", 0.0);
-  start.setVariableAcceleration("slide", 0.0);
-  start.setVariableAcceleration("lift", 0.0);
-  start.update();
-  moveit::core::RobotState end(start);
-  end.setVariableVelocity("slide", 1.0);
-  robot_trajectory::RobotTrajectory trajectory(robot, "arm");
-  trajectory.addSuffixWayPoint(start, 0.0);
-  trajectory.addSuffixWayPoint(end, 1.0);
-  std::string error;
-  EXPECT_FALSE(validateTimedTrajectory(trajectory, 0.01,
-      [](moveit::core::RobotState & sample, std::string & detail) {
-        if (sample.getVariablePosition("slide") < 0.1) {
-          detail = "held-box clearance violated";
-          return false;
-        }
-        return true;
-      }, error, []() {return false;}));
-  EXPECT_NE(error.find("held-box clearance violated"), std::string::npos);
 }
 
 TEST_F(ReturnSearchTest, HypotheticalReleaseClearsOnlyItsAttachedBox)

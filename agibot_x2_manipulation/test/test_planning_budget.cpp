@@ -34,14 +34,5 @@ TEST(PlanningBudget, EndpointRouteIncludesEveryPlanAndSceneRoundTrips)
   EXPECT_DOUBLE_EQ(endpointRouteTimeout(30.0, 2.0, 0U), 0.0);
 }
 
-TEST(PlanningBudget, ReservesTimeForUntriedCarryRoutes)
-{
-  EXPECT_DOUBLE_EQ(routeShareTimeout(70.0, 7U), 10.0);
-  EXPECT_DOUBLE_EQ(routeShareTimeout(60.0, 6U), 10.0);
-  EXPECT_DOUBLE_EQ(routeShareTimeout(10.0, 1U), 10.0);
-  EXPECT_DOUBLE_EQ(routeShareTimeout(0.0, 7U), 0.0);
-  EXPECT_DOUBLE_EQ(routeShareTimeout(70.0, 0U), 0.0);
-}
-
 }  // namespace
 }  // namespace agibot_x2_manipulation

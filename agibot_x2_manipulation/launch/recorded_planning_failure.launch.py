@@ -20,7 +20,6 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration("use_rviz")
     allow_execution = LaunchConfiguration("allow_execution")
     motion_planning_mode = LaunchConfiguration("motion_planning_mode")
-    box_profiles_file = LaunchConfiguration("box_profiles_file")
     manipulation_state_file = LaunchConfiguration("manipulation_state_file")
     joint_snapshot = os.path.join(
         manipulation_share, "config", "recorded_planning_failure_joint_state.yaml"
@@ -58,12 +57,6 @@ def generate_launch_description():
                 "motion_planning_mode",
                 default_value="closed_chain",
                 choices=["closed_chain", "pose_to_pose"],
-            ),
-            DeclareLaunchArgument(
-                "box_profiles_file",
-                default_value=os.path.join(
-                    manipulation_share, "config", "box_profiles.yaml"
-                ),
             ),
             DeclareLaunchArgument(
                 "manipulation_state_file",
@@ -107,7 +100,6 @@ def generate_launch_description():
                     "head_state_topic": "/x2_replay/aima/hal/joint/head/state",
                     "allow_execution": allow_execution,
                     "motion_planning_mode": motion_planning_mode,
-                    "box_profiles_file": box_profiles_file,
                     "manipulation_state_file": manipulation_state_file,
                 }.items(),
             ),
