@@ -725,6 +725,14 @@ box profile so hardware calibration does not determine their feasibility.
 
 ### Waiting for tag detections
 
+When a visible box moves beyond the planned-snapshot tolerance, the server
+reacquires the same instances, updates the collision scene, and automatically
+retries planning against the refreshed snapshot. Pick updates its target and
+invalidates cached grasp trajectories; movement during approach requires a new
+pregrasp before approaching. Carry and Place retain the attached object's geometry
+and refresh other obstacles. Missing tags wait for reacquisition, then pause for
+Continue if the retry budget is exhausted. Profile changes remain invalidations.
+
 `tag_reacquisition_timeout: 10.0` seconds is the shared wait limit for fresh box
 selection, planned visible-box checks, and stable table-tag acquisition in Pick,
 Place, PickPlace, and MoveCarryPose. Actions publish `waiting_for_detection`

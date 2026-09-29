@@ -48,7 +48,7 @@ public:
   bool waitForUnchangedPoses(
     const std::vector<TrackedBoxPose> & references, double timeout,
     const std::function<bool()> & canceled, std::string & error,
-    const std::function<void()> & waiting = {}) const;
+    const std::function<void()> & waiting = {}, bool * moved = nullptr) const;
   std::map<std::string, TrackedBoxPose> freshPoses() const;
   bool stillWithinTolerance(
     const TrackedBoxPose & reference, TrackedBoxPose & latest,
@@ -60,7 +60,8 @@ public:
 
 private:
   bool withinTolerance(
-    const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error) const;
+    const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error,
+    bool * moved = nullptr) const;
   bool waitForFresh(
     const std::function<bool(std::string &)> & ready, double timeout,
     const std::function<bool()> & canceled, const std::function<void()> & waiting,

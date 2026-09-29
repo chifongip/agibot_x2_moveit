@@ -221,8 +221,9 @@ bool BoxPoseTracker::waitForStablePose(
 bool BoxPoseTracker::waitForUnchangedPoses(
   const std::vector<TrackedBoxPose> & references, double timeout,
   const std::function<bool()> & canceled, std::string & error,
-  const std::function<void()> & waiting) const
+  const std::function<void()> & waiting, bool * moved) const
 {
+  if (moved) {*moved = false;}
   // One deadline for the whole snapshot, rather than a timeout per missing tag.
   return waitForFresh([&](std::string & check_error) {
       const auto fresh = freshPoses();
@@ -231,7 +232,7 @@ bool BoxPoseTracker::waitForUnchangedPoses(
         const auto found = fresh.find(reference.instance_id);
         if (found == fresh.end()) {
           missing = true;
-        } else if (!withinTolerance(reference, found->second, check_error)) {
+        } else if (!withinTolerance(reference, found->second, check_error, moved)) {
           check_error = "visible box instance '" + reference.instance_id +
             "' changed before motion: " + check_error;
           return false;
@@ -268,7 +269,8 @@ bool BoxPoseTracker::stillWithinTolerance(
 }
 
 bool BoxPoseTracker::withinTolerance(
-  const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error) const
+  const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error,
+  bool * moved) const
 {
   if (latest.profile_id != reference.profile_id) {
     error = "box profile changed before approach";
@@ -288,6 +290,7 @@ bool BoxPoseTracker::withinTolerance(
   const double angular_error = 2.0 * std::acos(
     std::clamp(std::abs(reference_q.dot(current_q)), 0.0, 1.0));
   if (position_error > position_tolerance_ || angular_error > orientation_tolerance_) {
+    if (moved) {*moved = true;}
     error = "box moved after planning (position=" + std::to_string(position_error) +
       " m, angle=" + std::to_string(angular_error) + " rad)";
     return false;

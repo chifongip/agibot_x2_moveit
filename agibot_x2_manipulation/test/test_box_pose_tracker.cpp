@@ -125,16 +125,24 @@ TEST_F(BoxPoseTrackerTest, RejectsMovementOrProfileChangesAfterReacquisition)
 {
   const auto reference = pose("target");
   std::string error;
+  bool moved = false;
   EXPECT_FALSE(tracker_->waitForUnchangedPoses({reference}, 1.0, []() {return false;}, error,
-      [&]() {publish({pose("target", 0.1)}); }));
+      [&]() {publish({pose("target", 0.1)}); }, &moved));
+  EXPECT_TRUE(moved);
   EXPECT_NE(error.find("box moved after planning"), std::string::npos);
+  TrackedBoxPose refreshed;
+  ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, refreshed, error));
+  EXPECT_TRUE(tracker_->waitForUnchangedPoses({refreshed}, 1.0, []() {return false;}, error,
+      {}, &moved));
+  EXPECT_FALSE(moved);
   tracker_->clear();
   EXPECT_FALSE(tracker_->waitForUnchangedPoses({reference}, 1.0, []() {return false;}, error,
       [&]() {
         auto changed = pose("target");
         changed.profile_id = "different_box";
         publish({changed});
-      }));
+      }, &moved));
+  EXPECT_FALSE(moved);
   EXPECT_NE(error.find("profile changed"), std::string::npos);
 }
 

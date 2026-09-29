@@ -221,6 +221,7 @@ if(BUILD_TESTING)
   add_launch_test(test/test_reload_box_profiles_service.launch.py TIMEOUT 90)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
   add_launch_test(test/test_dummy_workflow.launch.py TIMEOUT 240)
+  add_launch_test(test/test_moved_box_retry.launch.py TIMEOUT 240)
   add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_pose_to_pose
     ARGS "mode:=pose_to_pose" TIMEOUT 180)
   add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_closed_chain

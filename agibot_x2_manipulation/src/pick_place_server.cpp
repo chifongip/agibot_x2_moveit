@@ -831,10 +831,11 @@ private:
   }
 
   bool validateVisibleBoxScene(
-    const std::vector<TrackedBoxPose> & expected_boxes,
+    std::vector<TrackedBoxPose> & expected_boxes,
     const std::string & ignored_instance_id, std::string & error,
-    const CancelFunction & canceled) const
+    const CancelFunction & canceled, bool * scene_changed = nullptr)
   {
+    if (scene_changed) {*scene_changed = false;}
     std::vector<TrackedBoxPose> expected;
     for (const auto & box : expected_boxes) {
       if (box.instance_id != ignored_instance_id) {
@@ -844,10 +845,48 @@ private:
     // Keep checking the planned snapshot, including previously visible obstacles.
     // Freshness loss pauses the next motion; moved/profile-changed observations
     // still invalidate the existing plan. The held box is excluded by instance ID.
-    return waitForDetections([&](const auto & waiting) {
+    bool moved = false;
+    const bool unchanged = waitForDetections([&](const auto & waiting) {
         return box_pose_tracker_.waitForUnchangedPoses(expected, config_.tag_reacquisition_timeout,
-          canceled, error, waiting);
+          canceled, error, waiting, &moved);
       });
+    if (unchanged || !moved) {return unchanged;}
+    const std::string movement_error = error;
+    const auto reacquisition_deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(config_.tag_reacquisition_timeout);
+    // Reacquire the same instances, retaining profile identity and requiring
+    // every previously planned obstacle to remain visible before updating.
+    for (const auto & reference : expected) {
+      TrackedBoxPose fresh;
+      if (!waitForDetections([&](const auto & waiting) {
+          return box_pose_tracker_.waitForStablePose(reference.instance_id,
+            std::max(0.0, std::chrono::duration<double>(reacquisition_deadline -
+              std::chrono::steady_clock::now()).count()), canceled, fresh, error, waiting);
+        })) {return false;}
+      if (fresh.profile_id != reference.profile_id) {
+        error = "visible box profile changed during scene refresh: " + reference.instance_id;
+        return false;
+      }
+    }
+    std::vector<TrackedBoxPose> refreshed;
+    if (!updateVisibleBoxScene(ignored_instance_id, false, false, refreshed, error, canceled)) {
+      return false;
+    }
+    for (const auto & reference : expected) {
+      const auto found = std::find_if(refreshed.begin(), refreshed.end(), [&](const auto & box) {
+          return box.instance_id == reference.instance_id && box.profile_id == reference.profile_id;
+        });
+      if (found == refreshed.end()) {
+        error = "visible box expired during scene refresh: " + reference.instance_id;
+        return false;
+      }
+    }
+    expected_boxes = std::move(refreshed);
+    if (scene_changed) {*scene_changed = true;}
+    error = movement_error + "; refreshed detections and scene; retrying with a new plan";
+    // Fail this attempt so the existing retry controller replans rather than
+    // executing a trajectory built against the old snapshot.
+    return false;
   }
 
   bool resolvePlacePose(
@@ -1684,7 +1723,7 @@ private:
     {
       return outcome(false, kNoStableBoxPose, error);
     }
-    const geometry_msgs::msg::PoseStamped box_message = stampedBoxPose(tracked_box);
+    geometry_msgs::msg::PoseStamped box_message = stampedBoxPose(tracked_box);
     Eigen::Isometry3d pick_pose;
     try {
       pick_pose = toEigen(box_message.pose);
@@ -1765,11 +1804,27 @@ private:
     moveit::core::RobotState cached_approach_start(preflight_pregrasp.getLastWayPoint());
     bool pregrasp_cache_available = true;
     bool approach_cache_available = true;
+    bool pick_replan_required = false;
+    const auto validate_pick_scene = [&](const CancelFunction & planning_canceled,
+        std::string & failure) {
+        bool changed = false;
+        const bool valid = validateVisibleBoxScene(visible_boxes, "", failure,
+          planning_canceled, &changed);
+        if (changed) {
+          pregrasp_cache_available = false;
+          approach_cache_available = false;
+          pick_replan_required = true;
+          if (!refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, failure)) {return false;}
+          box_message = stampedBoxPose(tracked_box);
+          pick_pose = toEigen(box_message.pose);
+        }
+        return valid;
+      };
 
     if (!runPhase("prepare", false, feedback, 0.25F, box_message, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
           if (!refreshMotionState(failure, planning_canceled, false) ||
-            !validateVisibleBoxScene(visible_boxes, "", failure, planning_canceled) ||
+            !validate_pick_scene(planning_canceled, failure) ||
             !planPickPreparation(prepare_plan, prepare_end, failure, planning_canceled))
           {
             return false;
@@ -1794,7 +1849,7 @@ private:
     if (!runPhase("pregrasp", false, feedback, 0.30F, box_message, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
           if (!refreshMotionState(failure, planning_canceled, false) ||
-            !validateVisibleBoxScene(visible_boxes, "", failure, planning_canceled)) {return false;}
+            !validate_pick_scene(planning_canceled, failure)) {return false;}
           auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!measured) {failure = "pregrasp state unavailable"; return false;}
           std::string cache_error;
@@ -1814,6 +1869,7 @@ private:
             planned.setRobotTrajectoryMsg(*measured, pregrasp_plan.trajectory_);
             cached_approach_start = planned.getLastWayPoint();
             approach_cache_available = true;
+            pick_replan_required = false;
           }
           if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
             failure = trajectory_executor_.error("pregrasp execution failed");
@@ -1831,9 +1887,26 @@ private:
     if (!runPhase("approach", false, feedback, 0.45F, box_message, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
           if (!refreshMotionState(failure, planning_canceled, false) ||
-            !validateVisibleBoxScene(visible_boxes, "", failure, planning_canceled)) {return false;}
+            !validate_pick_scene(planning_canceled, failure)) {return false;}
           current = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!current) {failure = "approach state unavailable"; return false;}
+          if (pick_replan_required) {
+            if (!motion_planner_.planPickPath(box_message, pick_pose, pregrasp_plan, approach,
+                contact_end, selected_grasp, carry_validator, failure, planning_canceled,
+                current.get())) {return false;}
+            // A moved target requires a new pregrasp before approaching it.
+            // Recheck visibility before executing the newly planned motion.
+            if (!validate_pick_scene(planning_canceled, failure)) {return false;}
+            if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
+              failure = trajectory_executor_.error("updated pregrasp execution failed");
+              return false;
+            }
+            current = move_group_.getCurrentState(config_.reset_state_timeout);
+            if (!current) {failure = "updated approach state unavailable"; return false;}
+            pick_replan_required = false;
+            approach_cache_available = false;
+            if (!validate_pick_scene(planning_canceled, failure)) {return false;}
+          }
           auto grasp = selected_grasp.candidate.grasp;
           grasp.left_pregrasp = current->getGlobalLinkTransform(config_.left_tcp);
           grasp.right_pregrasp = current->getGlobalLinkTransform(config_.right_tcp);
@@ -2244,9 +2317,13 @@ private:
         (target_segment->retreat ? "retreat" : target_segment->name) : "return";
       if (!runPhase(phase, false, feedback, 0.90F, place_message, canceled, error,
           [&](const CancelFunction & planning_canceled, std::string & failure) {
-            if (!refreshMotionState(failure, planning_canceled, false) ||
-              !validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_,
-                failure, planning_canceled)) {return false;}
+            if (!refreshMotionState(failure, planning_canceled, false)) {return false;}
+            bool scene_changed = false;
+            if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_,
+                failure, planning_canceled, &scene_changed)) {
+              if (scene_changed) {target_segment.reset();}
+              return false;
+            }
             current = move_group_.getCurrentState(config_.reset_state_timeout);
             if (!current) {failure = "measured return state unavailable"; return false;}
             if (!target_segment || !validatePostPlaceSegment(*target_segment, *current,
