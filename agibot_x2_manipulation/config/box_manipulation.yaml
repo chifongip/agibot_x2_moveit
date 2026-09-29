@@ -9,7 +9,7 @@ box_localizer:
     tag_to_box_yaw: 0.0
     # Additional [x, y, z] correction from the centered top-tag model, in tag coordinates [m].
     tag_to_box_offset: [0.04, 0.0, 0.1]
-    stable_sample_count: 3
+    stable_sample_count: 2
     maximum_pose_age: 2.5
     maximum_position_spread: 0.005
     maximum_angular_spread: 0.0523598776  # 3 degrees
@@ -68,8 +68,8 @@ pick_place_server:
     closed_chain_validation_orientation_step: 0.0174533
     closed_chain_contact_position_error: 0.1
     closed_chain_contact_orientation_error: 0.1745329252  # 10 degrees
-    carry_search_timeout: 80.0
-    maximum_carry_candidates: 270
+    carry_search_timeout: 8.0
+    maximum_carry_candidates: 96
     carry_search_x_range: 0.05
     carry_search_y_range: 0.05
     carry_search_z_lower: 0.02
@@ -104,7 +104,7 @@ pick_place_server:
     table_tag_detections_topic: /front_center_rectify/detections
     table_tag_id: 9
     table_tag_minimum_decision_margin: 20.0
-    table_tag_stable_sample_count: 3
+    table_tag_stable_sample_count: 2
     table_tag_maximum_position_spread: 0.005
     table_tag_maximum_angular_spread: 0.0523598776  # 3 degrees
     table_tag_maximum_sample_gap: 2.5  # s; reset after a detector outage
