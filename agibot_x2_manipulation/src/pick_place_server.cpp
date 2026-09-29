@@ -1760,14 +1760,15 @@ private:
       [this, &pick_pose, &carry_plan, &canceled,
       nominal_carry_pose](
       const moveit::core::RobotState & candidate_contact,
-      const PlannedGrasp & candidate, std::string & continuation_error) {
+      const PlannedGrasp & candidate, std::string & continuation_error, PlanningDeadline deadline) {
+        const CancelFunction attempt_canceled = [canceled, deadline]() {
+            return canceled() || std::chrono::steady_clock::now() >= deadline;
+          };
         if (!motion_planner_.planAdaptiveCarry(
             candidate_contact, pick_pose, nominal_carry_pose, true,
             candidate.candidate.box_to_left_contact,
             candidate.candidate.box_to_right_contact,
-            carry_plan, continuation_error, [this, &canceled]() {
-              return canceled() || std::chrono::steady_clock::now() >= phase_deadline_;
-            }))
+            carry_plan, continuation_error, attempt_canceled))
         {
           if (!active_profile_id_.empty()) {
             continuation_error = "profile '" + active_profile_id_ + "' Carry A: " +
@@ -1804,6 +1805,8 @@ private:
     moveit::core::RobotState cached_approach_start(preflight_pregrasp.getLastWayPoint());
     bool pregrasp_cache_available = true;
     bool approach_cache_available = true;
+    bool carry_cache_available = true;
+    moveit::core::RobotState cached_carry_start(contact_end);
     bool pick_replan_required = false;
     const auto validate_pick_scene = [&](const CancelFunction & planning_canceled,
         std::string & failure) {
@@ -1813,6 +1816,7 @@ private:
         if (changed) {
           pregrasp_cache_available = false;
           approach_cache_available = false;
+          carry_cache_available = false;
           pick_replan_required = true;
           if (!refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, failure)) {return false;}
           box_message = stampedBoxPose(tracked_box);
@@ -1834,7 +1838,7 @@ private:
             if (!measured) {failure = "prepare state unavailable"; return false;}
             if (!post_place_planner_->validateSegment(segment, *measured,
                 planning_scene_.snapshot(), failure, planning_canceled, true)) {return false;}
-            if (!trajectory_executor_.execute(segment.trajectory, canceled)) {
+            if (!segment.no_motion && !trajectory_executor_.execute(segment.trajectory, canceled)) {
               failure = trajectory_executor_.error("prepare execution failed");
               return false;
             }
@@ -1868,6 +1872,8 @@ private:
             robot_trajectory::RobotTrajectory planned(move_group_.getRobotModel(), config_.planning_group);
             planned.setRobotTrajectoryMsg(*measured, pregrasp_plan.trajectory_);
             cached_approach_start = planned.getLastWayPoint();
+            cached_carry_start = contact_end;
+            carry_cache_available = true;
             approach_cache_available = true;
             pick_replan_required = false;
           }
@@ -1905,6 +1911,8 @@ private:
             if (!current) {failure = "updated approach state unavailable"; return false;}
             pick_replan_required = false;
             approach_cache_available = false;
+            cached_carry_start = contact_end;
+            carry_cache_available = true;
             if (!validate_pick_scene(planning_canceled, failure)) {return false;}
           }
           auto grasp = selected_grasp.candidate.grasp;
@@ -2001,7 +2009,27 @@ private:
           current = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!current) {failure = "carry state unavailable"; return false;}
           const auto preferred = carry_plan.pose;
-          if (!motion_planner_.planAdaptiveCarryTransition(*current, toEigen(held_pose_.pose),
+          std::string cache_error;
+          const auto validation_started = std::chrono::steady_clock::now();
+          const bool reuse = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+            carry_cache_available && validateReusableCarryTrajectory(carry_plan.trajectory,
+            cached_carry_start, *current, planning_scene_.snapshot(), config_,
+            held_box_to_left_contact_, held_box_to_right_contact_, preferred,
+            cache_error, planning_canceled);
+          carry_cache_available = false;
+          motion_planner_.traceReuse("carry", reuse, cache_error,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - validation_started).count());
+          if (reuse) {
+            auto reference = *current;
+            if (!copySceneAttachments(reference, planning_scene_.snapshot()->getCurrentState())) {
+              failure = "validated carry attachment model became unavailable";
+              return false;
+            }
+            robot_trajectory::RobotTrajectory validated(current->getRobotModel(), config_.planning_group);
+            validated.setRobotTrajectoryMsg(reference, carry_plan.trajectory);
+            carry_plan.end_state = std::make_shared<moveit::core::RobotState>(validated.getLastWayPoint());
+          }
+          if (!reuse && !motion_planner_.planAdaptiveCarryTransition(*current, toEigen(held_pose_.pose),
               carryPose(MoveCarryPose::Goal::CARRY_A), &preferred,
               held_box_to_left_contact_, held_box_to_right_contact_, carry_plan,
               failure, planning_canceled)) {return false;}
@@ -2108,7 +2136,7 @@ private:
     const planning_scene::PlanningScenePtr & scene, std::string & error,
     const CancelFunction & canceled)
   {
-    if (!segment.retreat) {
+    if (!segment.retreat || segment.no_motion) {
       return post_place_planner_->validateSegment(segment, current, scene, error, canceled, true);
     }
     std::vector<const moveit::core::AttachedBody *> attached;
@@ -2166,11 +2194,14 @@ private:
       std::chrono::duration<double>(config_.return_planning_timeout));
     return [this, left, right, canceled, deadline](
       const moveit::core::RobotState & release_state, const Eigen::Isometry3d & pose,
-      std::string & error) {
+      std::string & error, PlanningDeadline attempt_deadline) {
         PostPlacePlan plan;
+        const CancelFunction attempt_canceled = [canceled, attempt_deadline]() {
+            return canceled() || std::chrono::steady_clock::now() >= attempt_deadline;
+          };
         const bool feasible = planPostPlaceSequence(release_state, pose, left, right,
-          planning_scene_.releasedBoxSnapshot(pose), true, plan, error, canceled,
-          std::min(deadline, phase_deadline_));
+          planning_scene_.releasedBoxSnapshot(pose), true, plan, error, attempt_canceled,
+          std::min({deadline, phase_deadline_, attempt_deadline}));
         if (!feasible) {
           RCLCPP_WARN(node_->get_logger(), "Post-place preflight rejected placement: %s", error.c_str());
         }
@@ -2339,7 +2370,7 @@ private:
               if (return_plan.segments.empty()) {failure = "empty return sequence"; return false;}
               target_segment = return_plan.segments.front();
             }
-            if (!trajectory_executor_.execute(target_segment->trajectory, canceled)) {
+            if (!target_segment->no_motion && !trajectory_executor_.execute(target_segment->trajectory, canceled)) {
               failure = trajectory_executor_.error("return execution failed");
               // Invalidate the old start. Replan from measured feedback on the next attempt.
               target_segment.reset();
@@ -2443,12 +2474,15 @@ private:
       [this, &pick_pose, &place_pose, &transport, &place_end, &selected_place_pose,
         &carry_plan, &canceled, nominal_carry_pose](
       const moveit::core::RobotState & candidate_contact,
-      const PlannedGrasp & candidate, std::string & continuation_error) {
+      const PlannedGrasp & candidate, std::string & continuation_error, PlanningDeadline deadline) {
+        const CancelFunction attempt_canceled = [canceled, deadline]() {
+            return canceled() || std::chrono::steady_clock::now() >= deadline;
+          };
         if (!motion_planner_.planAdaptiveCarry(
             candidate_contact, pick_pose, nominal_carry_pose, true,
             candidate.candidate.box_to_left_contact,
             candidate.candidate.box_to_right_contact,
-            carry_plan, continuation_error, canceled))
+            carry_plan, continuation_error, attempt_canceled))
         {
           if (!active_profile_id_.empty()) {
             continuation_error = "profile '" + active_profile_id_ + "' Carry A: " +
@@ -2461,9 +2495,9 @@ private:
           *carry_plan.end_state, carry_plan.pose, place_pose, false, true,
           candidate.candidate.box_to_left_contact,
           candidate.candidate.box_to_right_contact,
-          transport, place_end, selected_place_pose, continuation_error, canceled,
+          transport, place_end, selected_place_pose, continuation_error, attempt_canceled,
           postPlaceContinuation(candidate.candidate.box_to_left_contact,
-            candidate.candidate.box_to_right_contact, canceled));
+            candidate.candidate.box_to_right_contact, attempt_canceled));
       };
     if (!motion_planner_.planPickPath(
         box_message, pick_pose, pregrasp_plan, approach, contact_end,
@@ -2631,7 +2665,12 @@ private:
               if (!current) {failure = "reset state unavailable before execution"; return false;}
               if (!post_place_planner_->validateSegment(segment, *current, planning_scene_.snapshot(),
                   failure, planning_canceled, true)) {return false;}
-              if (!trajectory_executor_.execute(segment.trajectory, canceled, &settled_reset_positions)) {
+              if (segment.no_motion) {
+                for (const auto & name : reset_target_values_) {
+                  settled_reset_positions[name.first] = current->getVariablePosition(name.first);
+                }
+              }
+              if (!segment.no_motion && !trajectory_executor_.execute(segment.trajectory, canceled, &settled_reset_positions)) {
                 failure = trajectory_executor_.error("reset execution failed");
                 return false;
               }

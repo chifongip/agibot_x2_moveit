@@ -1,5 +1,7 @@
 #include "pick_place/post_place_planner.hpp"
 #include "pick_place/planning_scene_manager.hpp"
+#include "pick_place/endpoint_reached.hpp"
+#include <geometric_shapes/shapes.h>
 
 #include <moveit/kinematic_constraints/utils.h>
 #include <moveit/robot_state/conversions.h>
@@ -45,13 +47,17 @@ bool validState(
   }
   collision_detection::CollisionRequest request;
   request.group_name = group->getName();
-  request.contacts = true;
-  request.max_contacts = 16;
   collision_detection::CollisionResult result;
   scene->checkCollision(request, result, state);
   if (!result.collision) {
     return true;
   }
+  // Detailed contacts are needed only for rejected states. Keep successful
+  // spline samples on the collision checker's cheaper boolean path.
+  request.contacts = true;
+  request.max_contacts = 16;
+  result.clear();
+  scene->checkCollision(request, result, state);
   std::ostringstream stream;
   stream << "collision";
   for (const auto & contact : result.contacts) {
@@ -154,7 +160,8 @@ bool validateReturnTrajectory(
 bool validateTimedReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
-  std::string & error, const CancelFunction & interrupted, bool enforce_bounds)
+  std::string & error, const CancelFunction & interrupted, bool enforce_bounds,
+  double minimum_joint_margin)
 {
   if (!std::isfinite(joint_step) || joint_step <= 0.0 || trajectory.empty() ||
     !trajectory.getGroup())
@@ -165,6 +172,12 @@ bool validateTimedReturnTrajectory(
   moveit::core::RobotState first(trajectory.getFirstWayPoint());
   if (enforce_bounds && !first.satisfiesBounds(trajectory.getGroup(), 1e-6)) {
     error = "cached trajectory start violates joint position bounds";
+    return false;
+  }
+  if (minimum_joint_margin > 0.0 &&
+    first.getMinDistanceToPositionBounds(trajectory.getGroup()).first + 1e-12 < minimum_joint_margin)
+  {
+    error = "cached trajectory start violates minimum joint margin";
     return false;
   }
   if (!validState(first, scene, trajectory.getGroup(), error)) {
@@ -180,6 +193,7 @@ bool validateTimedReturnTrajectory(
   }
   joint_trajectory_controller::Trajectory controller;
   const auto * group = trajectory.getGroup();
+  moveit::core::RobotState state(trajectory.getFirstWayPoint());
   for (std::size_t index = 1; index < joints.points.size(); ++index) {
     const auto & a = joints.points[index - 1];
     const auto & b = joints.points[index];
@@ -230,7 +244,6 @@ bool validateTimedReturnTrajectory(
       return false;
     }
     const auto steps = static_cast<std::size_t>(step_count);
-    moveit::core::RobotState state(trajectory.getFirstWayPoint());
     for (std::size_t sample = 1; sample <= steps; ++sample) {
       if (interrupted()) {
         error = "controller spline validation interrupted";
@@ -252,6 +265,12 @@ bool validateTimedReturnTrajectory(
         error = "cached controller spline violates joint position bounds";
         return false;
       }
+      if (minimum_joint_margin > 0.0 &&
+        state.getMinDistanceToPositionBounds(group).first + 1e-12 < minimum_joint_margin)
+      {
+        error = "cached controller spline violates minimum joint margin";
+        return false;
+      }
       if (!validState(state, scene, group, error)) {
         error = "controller spline invalid: segment " + std::to_string(index) +
           " sample " + std::to_string(sample) + "/" + std::to_string(steps) + ": " + error;
@@ -262,11 +281,13 @@ bool validateTimedReturnTrajectory(
   return true;
 }
 
-bool validateReusablePickTrajectory(
+static bool validateReusableTrajectory(
   moveit_msgs::msg::RobotTrajectory & message,
   const moveit::core::RobotState & planned_start, const moveit::core::RobotState & current,
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
-  std::string & error, const CancelFunction & interrupted)
+  std::string & error, const CancelFunction & interrupted,
+  const Eigen::Isometry3d * box_to_left = nullptr,
+  const Eigen::Isometry3d * box_to_right = nullptr, const Eigen::Isometry3d * target_pose = nullptr)
 {
   if (interrupted()) {error = "cached trajectory validation canceled"; return false;}
   if (!scene || planned_start.getRobotModel() != current.getRobotModel()) {
@@ -289,9 +310,36 @@ bool validateReusablePickTrajectory(
     error = "cached trajectory does not command the complete planning group";
     return false;
   }
+  const bool carry = box_to_left != nullptr;
   std::vector<const moveit::core::AttachedBody *> attached;
-  for (const auto * state : {&current, &planned_start, &scene->getCurrentState()}) {
+  for (const auto * state : {&current, &scene->getCurrentState()}) {
     state->getAttachedBodies(attached);
+    if (!carry && !attached.empty()) {error = "cached Pick trajectory requires empty arms"; return false;}
+    if (carry) {
+      if (attached.size() != 1U || attached.front()->getName() != config.box_id ||
+        attached.front()->getAttachedLinkName() != config.left_tcp ||
+        attached.front()->getShapes().size() != 1U ||
+        attached.front()->getShapePosesInLinkFrame().size() != 1U)
+      {
+        error = "cached carry attachment identity or geometry mismatch";
+        return false;
+      }
+      const auto * shape = dynamic_cast<const shapes::Box *>(attached.front()->getShapes().front().get());
+      const auto expected = box_to_left->inverse();
+      const auto & actual = attached.front()->getShapePosesInLinkFrame().front();
+      if (!shape || std::abs(shape->size[0] - config.dimensions.length) > 1e-9 ||
+        std::abs(shape->size[1] - config.dimensions.width) > 1e-9 ||
+        std::abs(shape->size[2] - config.dimensions.height) > 1e-9 ||
+        !endpointReached(actual, actual, expected, expected))
+      {
+        error = "cached carry attachment dimensions or grasp transform mismatch";
+        return false;
+      }
+    }
+    attached.clear();
+  }
+  if (!carry) {
+    planned_start.getAttachedBodies(attached);
     if (!attached.empty()) {error = "cached Pick trajectory requires empty arms"; return false;}
   }
   const double tolerance = config.execution_joint_tolerance;
@@ -344,16 +392,154 @@ bool validateReusablePickTrajectory(
       return false;
     }
   }
-  const auto contact = retreatContactScene(scene, config);
+  const auto contact = carry ? graspContactScene(scene, config) : retreatContactScene(scene, config);
   if (!validateTimedReturnTrajectory(trajectory, contact, config.return_validation_joint_step,
-      error, interrupted, true)) {return false;}
+      error, interrupted, true, carry ? config.minimum_carry_joint_margin : 0.0)) {return false;}
   robot_trajectory::RobotTrajectory edge(current.getRobotModel(), config.planning_group);
   edge.addSuffixWayPoint(current, 0.0);
   edge.addSuffixWayPoint(trajectory.getFirstWayPoint(), 0.0);
   if (!validateReturnTrajectory(edge, contact, config.return_validation_joint_step, error, interrupted)) {
     return false;
   }
+  if (carry) {
+    const auto & end = trajectory.getLastWayPoint();
+    const auto accuracy = [&](const Eigen::Isometry3d & actual, const Eigen::Isometry3d & target) {
+        return actual.matrix().allFinite() && target.matrix().allFinite() &&
+          (actual.translation() - target.translation()).norm() <= config.closed_chain_contact_position_error &&
+          std::abs(Eigen::AngleAxisd(actual.linear().transpose() * target.linear()).angle()) <=
+          config.closed_chain_contact_orientation_error;
+      };
+    if (!accuracy(end.getGlobalLinkTransform(config.left_tcp), *target_pose * *box_to_left) ||
+      !accuracy(end.getGlobalLinkTransform(config.right_tcp), *target_pose * *box_to_right))
+    {
+      error = "cached carry endpoint violates TCP accuracy";
+      return false;
+    }
+  }
   if (rebase) {trajectory.getRobotTrajectoryMsg(message);}
+  error.clear();
+  return true;
+}
+
+bool validateReusablePickTrajectory(
+  moveit_msgs::msg::RobotTrajectory & message,
+  const moveit::core::RobotState & planned_start, const moveit::core::RobotState & current,
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
+  std::string & error, const CancelFunction & interrupted)
+{
+  return validateReusableTrajectory(message, planned_start, current, scene, config, error, interrupted);
+}
+
+bool copySceneAttachments(
+  moveit::core::RobotState & target, const moveit::core::RobotState & scene_state)
+{
+  if (&target == &scene_state) {return true;}
+  std::vector<const moveit::core::AttachedBody *> bodies;
+  scene_state.getAttachedBodies(bodies);
+  for (const auto * body : bodies) {
+    if (!target.getRobotModel()->hasLinkModel(body->getAttachedLinkName())) {return false;}
+  }
+  target.clearAttachedBodies();
+  for (const auto * body : bodies) {
+    target.attachBody(body->getName(), body->getPose(), body->getShapes(), body->getShapePoses(),
+      body->getTouchLinks(), body->getAttachedLinkName(), body->getDetachPosture(), body->getSubframes());
+  }
+  target.update();
+  return true;
+}
+
+bool validateReusableCarryTrajectory(
+  moveit_msgs::msg::RobotTrajectory & message,
+  const moveit::core::RobotState & planned_start, const moveit::core::RobotState & current,
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
+  const Eigen::Isometry3d & box_to_left, const Eigen::Isometry3d & box_to_right,
+  const Eigen::Isometry3d & target_pose, std::string & error, const CancelFunction & interrupted)
+{
+  // MoveGroup feedback commonly contains joint positions without attached bodies.
+  // The synchronized scene owns attachment geometry; never validate carry without it.
+  std::vector<const moveit::core::AttachedBody *> measured_bodies;
+  current.getAttachedBodies(measured_bodies);
+  if (scene && measured_bodies.empty()) {
+    moveit::core::RobotState measured(current);
+    if (!copySceneAttachments(measured, scene->getCurrentState())) {
+      error = "cached carry attachment link is absent from the feedback robot model";
+      return false;
+    }
+    return validateReusableTrajectory(message, planned_start, measured, scene, config, error,
+      interrupted, &box_to_left, &box_to_right, &target_pose);
+  }
+  return validateReusableTrajectory(message, planned_start, current, scene, config, error,
+    interrupted, &box_to_left, &box_to_right, &target_pose);
+}
+
+bool tryDirectJointTrajectory(
+  const moveit::core::RobotState & start, const moveit::core::RobotState & target,
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
+  double minimum_joint_margin, moveit_msgs::msg::RobotTrajectory & output,
+  std::string & error, const CancelFunction & interrupted)
+{
+  if (!scene || interrupted()) {error = "direct joint route unavailable or interrupted"; return false;}
+  const auto * group = start.getJointModelGroup(config.planning_group);
+  if (!group || target.getRobotModel() != start.getRobotModel() ||
+    !start.satisfiesBounds(group) || !target.satisfiesBounds(group))
+  {
+    error = "direct joint route model or bounds mismatch";
+    return false;
+  }
+  for (const auto & name : group->getVariableNames()) {
+    if (!std::isfinite(start.getVariablePosition(name)) ||
+      !std::isfinite(target.getVariablePosition(name)))
+    {
+      error = "direct joint route contains non-finite positions";
+      return false;
+    }
+  }
+  moveit::core::RobotState reference(start), endpoint(target);
+  if (!copySceneAttachments(reference, scene->getCurrentState()) ||
+    !copySceneAttachments(endpoint, scene->getCurrentState()))
+  {
+    error = "direct joint route attachment mismatch";
+    return false;
+  }
+  robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), config.planning_group);
+  trajectory.addSuffixWayPoint(reference, 0.0);
+  trajectory.addSuffixWayPoint(endpoint, 0.0);
+  trajectory_processing::TimeOptimalTrajectoryGeneration timing(config.return_path_tolerance);
+  if (!timing.computeTimeStamps(trajectory, config.velocity_scaling, config.acceleration_scaling) ||
+    interrupted())
+  {
+    error = "direct joint route timing failed or interrupted";
+    return false;
+  }
+  // TOTG can sample its endpoint twice when duration is a multiple of its
+  // resampling period. Keep the final derivatives and validate the resulting
+  // controller spline; do not merge distinct states at the same timestamp.
+  moveit_msgs::msg::RobotTrajectory timed;
+  trajectory.getRobotTrajectoryMsg(timed);
+  auto & points = timed.joint_trajectory.points;
+  if (points.size() >= 3U) {
+    const auto & previous = points[points.size() - 2U];
+    const auto & last = points.back();
+    bool duplicate = previous.time_from_start == last.time_from_start &&
+      previous.positions.size() == last.positions.size();
+    for (std::size_t index = 0; duplicate && index < last.positions.size(); ++index) {
+      duplicate = std::abs(previous.positions[index] - last.positions[index]) <= 1e-9;
+    }
+    if (duplicate) {
+      points.erase(points.end() - 2);
+      trajectory.setRobotTrajectoryMsg(reference, timed);
+    }
+  }
+  if (!validateTimedReturnTrajectory(trajectory, scene, config.return_validation_joint_step,
+      error, interrupted, true, minimum_joint_margin)) {return false;}
+  if (interrupted() || !jointEndpointReached(trajectory.getFirstWayPoint(), start, group, 1e-6) ||
+    !jointEndpointReached(trajectory.getLastWayPoint(), target, group, 1e-6))
+  {
+    error = "direct joint route endpoint changed or interrupted";
+    return false;
+  }
+  trajectory.getRobotTrajectoryMsg(output);
+  error.clear();
   return true;
 }
 
@@ -454,7 +640,7 @@ bool PostPlacePlanner::segment(
   const moveit::core::RobotState & start, const moveit::core::RobotState & target,
   const planning_scene::PlanningScenePtr & scene, const std::string & name,
   Deadline deadline, PostPlaceSegment & output, std::string & error,
-  const CancelFunction & canceled)
+  const CancelFunction & canceled, bool allow_no_motion)
 {
   error.clear();
   for (int attempt = 0; attempt < config_.return_planning_attempts; ++attempt) {
@@ -470,7 +656,7 @@ bool PostPlacePlanner::segment(
     std::string attempt_error;
     // Retry the entire pipeline, including timing and controller spline checks.
     // Every attempt shares the original deadline and collision scene.
-    if (segmentOnce(start, target, scene, name, deadline, candidate, attempt_error, canceled)) {
+    if (segmentOnce(start, target, scene, name, deadline, candidate, attempt_error, canceled, allow_no_motion)) {
       output = std::move(candidate);
       error.clear();
       return true;
@@ -492,12 +678,38 @@ bool PostPlacePlanner::segmentOnce(
   const moveit::core::RobotState & start, const moveit::core::RobotState & target,
   const planning_scene::PlanningScenePtr & scene, const std::string & name,
   Deadline deadline, PostPlaceSegment & output, std::string & error,
-  const CancelFunction & canceled)
+  const CancelFunction & canceled, bool allow_no_motion)
 {
   const auto interrupted = [&]() {return canceled() || std::chrono::steady_clock::now() >= deadline;};
   if (interrupted()) {
     error = "return planning canceled or deadline exhausted";
     return false;
+  }
+  const auto * group = start.getJointModelGroup(config_.planning_group);
+  if (allow_no_motion && config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+    jointEndpointReached(start, target, group, 1e-6))
+  {
+    moveit::core::RobotState checked(start);
+    if (!checked.satisfiesBounds(group) || !validState(checked, scene, group, error)) {return false;}
+    robot_trajectory::RobotTrajectory stationary(start.getRobotModel(), config_.planning_group);
+    stationary.addSuffixWayPoint(start, 0.0);
+    stationary.addSuffixWayPoint(start, 0.02);
+    output.name = name;
+    output.no_motion = true;
+    stationary.getRobotTrajectoryMsg(output.trajectory);
+    trace(name, true, "validated no-motion segment; OMPL skipped");
+    return true;
+  }
+  if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+    moveit_msgs::msg::RobotTrajectory direct;
+    std::string direct_error;
+    if (tryDirectJointTrajectory(start, target, scene, config_, 0.0, direct, direct_error, interrupted)) {
+      output.name = name;
+      output.trajectory = std::move(direct);
+      trace(name + "/direct", true, "validated joint route; OMPL skipped");
+      return true;
+    }
+    trace(name + "/direct", false, direct_error);
   }
   planning_interface::MotionPlanRequest request;
   request.group_name = config_.planning_group;
@@ -599,6 +811,7 @@ bool PostPlacePlanner::plan(
   // Device feedback can lie outside the model limits.  Keep the reported
   // state for execution-start matching, but plan from its bounded model
   // representation so MoveIt does not reject the return request.
+  const bool allow_no_motion = start.satisfiesBounds(group);
   start.enforceBounds(group);
   start.update();
   moveit::core::RobotState target_state(start);
@@ -632,14 +845,14 @@ bool PostPlacePlanner::plan(
       PostPlaceSegment first;
       if (!segment(from, intermediate, strict,
           intermediate_target.empty() ? label : "to_" + intermediate_target,
-          deadline, first, error, canceled))
+          deadline, first, error, canceled, allow_no_motion))
       {
         return false;
       }
       if (!intermediate_target.empty()) {
         PostPlaceSegment last;
         if (!segment(intermediate, target_state, strict, "from_" + intermediate_target + "_to_" +
-            target_name, deadline, last, error, canceled))
+            target_name, deadline, last, error, canceled, allow_no_motion))
         {
           return false;
         }
@@ -679,7 +892,7 @@ bool PostPlacePlanner::plan(
         continue;
       }
       PostPlaceSegment retreat;
-      if (!segment(start, retreat_end, release, "retreat", deadline, retreat, error, canceled)) {
+      if (!segment(start, retreat_end, release, "retreat", deadline, retreat, error, canceled, allow_no_motion)) {
         continue;
       }
       retreat.retreat = true;
@@ -811,6 +1024,13 @@ bool PostPlacePlanner::validateSegment(
       trajectory.getGroup()) > config_.execution_joint_tolerance)
   {
     error = "measured return start differs from planned start";
+    return false;
+  }
+  if (segment.no_motion &&
+    (!current.satisfiesBounds(trajectory.getGroup()) ||
+    !jointEndpointReached(current, trajectory.getLastWayPoint(), trajectory.getGroup(), 1e-6)))
+  {
+    error = "measured state moved since no-motion return planning";
     return false;
   }
   // Include the measured-to-planned-start edge in validation.

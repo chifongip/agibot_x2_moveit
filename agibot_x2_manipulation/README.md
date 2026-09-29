@@ -678,8 +678,10 @@ state is never silently skipped. Reset continues to use its explicit reset targe
 
 In `pose_to_pose` mode, the server retains the same pregrasp, contact, lift,
 carry, place, retreat, and idle endpoints. It solves dual-arm IK at each
-carry/place endpoint, then asks MoveIt for a collision-checked joint-space plan
-to the next endpoint. Retreat always uses coordinated interpolation rather than
+carry/place endpoint, then first tests a straight joint-space route with TOTG
+timing and full controller-spline validation. A rejected direct route falls back
+to MoveIt with the remaining budget. This also applies to pregrasp and empty-arm
+prepare/return segments. Retreat always uses coordinated interpolation rather than
 endpoint-only free-space planning. Joint bounds, obstacle avoidance, attached-box collision geometry,
 execution feedback, and recovery handling remain active. This mode does not
 guarantee straight TCP motion or continuous rigid two-hand closure between
@@ -687,15 +689,33 @@ endpoints, so validate with `plan_only: true` and fake-ZMQ simulation before
 enabling robot motion.
 
 For `pose_to_pose`, Pick first tries the nominal grasp with one measured-seed IK
-attempt and validates its pregrasp, approach, and carry continuation. The full
-grasp-candidate ranking pass runs only when this fast path fails. Adaptive carry
+attempt and validates its pregrasp, approach, and carry continuation. When this
+fast path fails, Pick collects and ranks one correction-cost tier at a time,
+trying its feasible candidates before solving IK for later tiers. Candidate
+counts, seed attempts, joint-margin ranking within a tier, and adaptive retries
+retain their configured limits. IK collection and motion planning have separate
+elapsed-time budgets, both bounded by the phase deadline. Adaptive carry
 and placement first try a single measured-seed
 IK endpoint and the existing direct route at the requested pose (or the previously
 selected carry pose). Successful routes skip the full endpoint ranking pass.
 Failure falls back to the existing candidate/route search with the same phase
 deadline, collision policy, joint-margin limits, and continuation checks.
+The fast attempt's entire IK, route, and continuation check shares a deadline
+capped at 20% of the effective remaining search/phase budget and the normal
+direct-route allowance, whichever is smaller. It can finish earlier. The 20%
+cap is a scheduling heuristic that reserves fallback time, not a change to
+collision validation or a measured optimal percentage. Nested fast attempts
+restore their caller's deadline before fallback.
 Planning traces record `adaptive_carry_fast_path` and `adaptive_place_fast_path`
 and `pregrasp_fast_path` with elapsed seconds.
+
+Carry and Place searches keep at most eight successful endpoint segments in a
+local FIFO cache. Reuse requires the same complete robot state and TCP targets,
+then rechecks attached geometry, joint bounds/margins, and the timed controller
+spline against the current scene. The cache lasts for one search. Multi-segment
+routes are retimed and fully checked together; a single segment retains its
+already validated timing and derivatives. Searches remain serial and create no
+additional planner workers or sampling threads.
 
 The shared pose-to-pose object-route planner skips intermediate waypoints already
 reached by both TCPs (within 0.0001 m and 0.001 rad), or matching validated joint
@@ -719,7 +739,14 @@ rebases the first waypoint to measured positions and regenerates trajectory timi
 before validation; validation failure falls back to replanning. Reuse preserves the box/wrist/hand contact
 policy without allowing environment contact. Execution failure consumes the cache;
 retries replan from measured positions. A mismatch or changed obstacle also triggers
-replanning. The closed-chain search, measured-start recovery rules for return, and
+replanning. In pose-to-pose mode, Pick can also reuse its preflight carry after
+attachment acknowledgement and fresh stationary feedback. It verifies attachment
+identity, dimensions, grasp transform, complete measured start, final TCP
+accuracy, bounds/margins, and current-scene controller-spline collisions. Changed
+starts within the execution tolerance are rebased and retimed before validation;
+rejection falls back to the existing adaptive carry search. Moved-box updates,
+execution attempts, and failure consume or invalidate the task-local cache.
+The closed-chain search, measured-start recovery rules for return, and
 configured search limits are preserved. Simulation workflow tests use a separate
 box profile so hardware calibration does not determine their feasibility.
 
@@ -807,6 +834,14 @@ continues. Each segment is timed separately and is not retimed after validation.
 Before execution, measured start agreement and the latest collision scene are
 checked again. At most two replans are permitted for changed feedback or scenes,
 each with a fresh bounded search budget.
+
+Pose-to-pose return and prepare segments whose measured joints already match the
+exact target within 0.000001 rad/m keep a no-motion checkpoint. Bounds, collision,
+and measured-start checks still run, but OMPL and ExecuteTrajectory are skipped.
+Feedback outside joint limits still follows the existing recovery path. Execution
+plans the return after release and reuses its remaining segments with the existing
+measured-feedback validation; candidate feasibility does not trigger extra return
+searches during execution.
 
 Planning traces include `post_place_return` events for geometric and processed
 validation, rejected candidates, selected clearance poses, seeds, and budget
@@ -1075,6 +1110,33 @@ To use one explicit destination instead, set `planning_log_file` to an
 absolute path; it takes precedence over `planning_log_directory`. The trace
 may contain measured poses and joint-planning diagnostics; treat it as robot
 operational data and do not commit it.
+
+`pose_search_summary` records elapsed time, dual-arm IK calls/time, and MoveGroup
+OMPL calls/time. `direct_joint_route`, `pregrasp_direct_joint_route`,
+`pose_prefix_reuse`, and `execution_plan_reuse` record accepted/rejected shortcuts
+and their validation time. Return planning has its own `post_place_return` events.
+These counters cover calls made by the dual-arm planner; they exclude the dedicated
+post-place OMPL pipeline.
+
+For a serial simulation benchmark on an idle host, run:
+
+```bash
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ROS_DOMAIN_ID=103 ROS_LOG_DIR=/tmp/x2-pose-benchmark \
+  /usr/bin/python3 -m launch_testing.launch_test \
+  src/agibot_x2_moveit/agibot_x2_manipulation/test/benchmark_pose_to_pose.launch.py \
+  --junit-xml=/tmp/x2-pose-benchmark.xml
+```
+
+The manual fixture uses fake feedback, two warmups and ten measured plan-only
+samples each for Pick, PickPlace, carry B, carry A, and Place. It also executes one
+fake-feedback workflow. `POSE_BENCHMARK` JSON rows include wall time, summed CPU
+seconds for the planner server and MoveGroup, and the sum of their process peak
+RSS values. Run baseline and changed binaries separately under the same fixture;
+this benchmark does not replace the launch tests' shutdown assertions.
+See [the measured comparison](test/pose_to_pose_benchmark.md) for results and limitations.
 
 Each non-plan-only motion also requires a settled physical endpoint before the
 server begins its next phase. It waits for direct HAL arm feedback received

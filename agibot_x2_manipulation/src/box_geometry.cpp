@@ -303,6 +303,15 @@ std::vector<GraspCandidate> generateGraspCandidates(
   return candidates;
 }
 
+std::size_t graspCostTierEnd(const std::vector<GraspCandidate> & candidates, std::size_t start)
+{
+  if (start >= candidates.size()) {return candidates.size();}
+  const double cost = candidates[start].correction_cost;
+  std::size_t end = start + 1U;
+  while (end < candidates.size() && std::abs(candidates[end].correction_cost - cost) <= 1e-12) {++end;}
+  return end;
+}
+
 Eigen::Isometry3d interpolatePose(
   const Eigen::Isometry3d & from, const Eigen::Isometry3d & to, double t)
 {

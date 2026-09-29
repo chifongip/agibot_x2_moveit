@@ -72,15 +72,22 @@ std::vector<std::string> boxTouchLinks(const PickPlaceConfig & config)
 
 }  // namespace
 
-planning_scene::PlanningScenePtr retreatContactScene(
+planning_scene::PlanningScenePtr graspContactScene(
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config)
 {
   auto copy = planning_scene::PlanningScene::clone(scene);
-  copy->getCurrentStateNonConst().clearAttachedBody(config.box_id);
   auto & acm = copy->getAllowedCollisionMatrixNonConst();
   acm.setEntry(config.box_id, false);
   acm.setDefaultEntry(config.box_id, false);
   acm.setEntry(config.box_id, boxTouchLinks(config), true);
+  return copy;
+}
+
+planning_scene::PlanningScenePtr retreatContactScene(
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config)
+{
+  auto copy = graspContactScene(scene, config);
+  copy->getCurrentStateNonConst().clearAttachedBody(config.box_id);
   return copy;
 }
 
@@ -783,7 +790,16 @@ bool PlanningSceneManager::beginVirtualAttachment(
       std::string(exception.what());
     return false;
   }
-  return attachBox(error);
+  // Local spline checks must observe the attachment acknowledged by MoveIt.
+  const bool attached = attachBox(error);
+  if (!attached) {return false;}
+  if (synchronize(error)) {return true;}
+  const auto synchronization_error = error;
+  std::string restore_error;
+  if (!endVirtualAttachment(saved_object, restore_error)) {
+    error = synchronization_error + "; virtual attachment cleanup failed: " + restore_error;
+  } else {error = synchronization_error;}
+  return false;
 }
 
 bool PlanningSceneManager::endVirtualAttachment(

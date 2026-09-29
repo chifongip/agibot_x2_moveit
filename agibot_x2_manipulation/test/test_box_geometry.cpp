@@ -18,6 +18,21 @@ Eigen::Isometry3d boxAtYaw(double yaw)
   return pose;
 }
 
+TEST(BoxGeometry, IncrementalSearchFinishesCostTiersBeforeHigherCorrections)
+{
+  std::vector<GraspCandidate> candidates(5);
+  candidates[0].correction_cost = 0.0;
+  candidates[1].correction_cost = 1.0;
+  candidates[2].correction_cost = 1.0 + 1e-13;
+  candidates[3].correction_cost = 2.0;
+  candidates[4].correction_cost = 2.0;
+  EXPECT_EQ(graspCostTierEnd(candidates, 0), 1U);
+  EXPECT_EQ(graspCostTierEnd(candidates, 1), 3U);
+  EXPECT_EQ(graspCostTierEnd(candidates, 3), 5U);
+  EXPECT_EQ(graspCostTierEnd(candidates, 5), 5U);
+  EXPECT_EQ(graspCostTierEnd({}, 0), 0U);
+}
+
 TEST(BoxGeometry, TopTagIsShiftedToBoxCenter)
 {
   Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();

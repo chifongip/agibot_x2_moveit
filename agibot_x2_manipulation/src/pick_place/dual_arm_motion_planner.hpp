@@ -38,10 +38,11 @@ struct AdaptiveCarryPlan
 };
 
 using CancelFunction = std::function<bool ()>;
+using PlanningDeadline = std::chrono::steady_clock::time_point;
 using ContinuationFunction = std::function<bool (
-      const moveit::core::RobotState &, const PlannedGrasp &, std::string &)>;
+      const moveit::core::RobotState &, const PlannedGrasp &, std::string &, PlanningDeadline)>;
 using PlaceContinuation = std::function<bool (
-      const moveit::core::RobotState &, const Eigen::Isometry3d &, std::string &)>;
+      const moveit::core::RobotState &, const Eigen::Isometry3d &, std::string &, PlanningDeadline)>;
 
 class DualArmMotionPlanner
 {
@@ -126,6 +127,7 @@ public:
   void updateHeldPoseFromRobot();
   bool validateHeldClosure(std::string & error);
   void clearGraspMarkers();
+  void traceReuse(const std::string & stage, bool reused, const std::string & reason, double seconds);
 
 private:
   class Impl;

@@ -30,7 +30,7 @@ bool validateReturnTrajectory(
 bool validateTimedReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
-  std::string & error, const CancelFunction & interrupted, bool enforce_bounds = false);
+  std::string & error, const CancelFunction & interrupted, bool enforce_bounds = false, double minimum_joint_margin = 0.0);
 
 // Reuse a pre-attachment plan only after checking its complete measured start
 // and the controller spline against the current scene and grasp touch policy.
@@ -41,11 +41,31 @@ bool validateReusablePickTrajectory(
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
   std::string & error, const CancelFunction & interrupted);
 
+// Scene and MoveGroup may own distinct instances of the same robot model.
+bool copySceneAttachments(
+  moveit::core::RobotState & target, const moveit::core::RobotState & scene_state);
+
+bool validateReusableCarryTrajectory(
+  moveit_msgs::msg::RobotTrajectory & message,
+  const moveit::core::RobotState & planned_start, const moveit::core::RobotState & current,
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
+  const Eigen::Isometry3d & box_to_left, const Eigen::Isometry3d & box_to_right,
+  const Eigen::Isometry3d & target_pose, std::string & error, const CancelFunction & interrupted);
+
+// Try a straight joint-space route before invoking OMPL. Validation uses the
+// same controller spline sampling as cached plans; failure leaves output intact.
+bool tryDirectJointTrajectory(
+  const moveit::core::RobotState & start, const moveit::core::RobotState & target,
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
+  double minimum_joint_margin, moveit_msgs::msg::RobotTrajectory & output,
+  std::string & error, const CancelFunction & interrupted);
+
 struct PostPlaceSegment
 {
   std::string name;
   moveit_msgs::msg::RobotTrajectory trajectory;
   bool retreat{false};
+  bool no_motion{false};
 };
 
 struct PostPlacePlan
@@ -89,12 +109,12 @@ private:
     const moveit::core::RobotState & start, const moveit::core::RobotState & target,
     const planning_scene::PlanningScenePtr & scene, const std::string & name,
     Deadline deadline, PostPlaceSegment & output, std::string & error,
-    const CancelFunction & canceled);
+    const CancelFunction & canceled, bool allow_no_motion = true);
   bool segmentOnce(
     const moveit::core::RobotState & start, const moveit::core::RobotState & target,
     const planning_scene::PlanningScenePtr & scene, const std::string & name,
     Deadline deadline, PostPlaceSegment & output, std::string & error,
-    const CancelFunction & canceled);
+    const CancelFunction & canceled, bool allow_no_motion);
   void trace(const std::string & stage, bool success, const std::string & detail);
 
   rclcpp::Node::SharedPtr node_;

@@ -23,7 +23,11 @@
 namespace agibot_x2_manipulation
 {
 
-// Use the existing grasp touch policy only for coordinated disengagement.
+// Apply the grasp touch policy while preserving attached geometry.
+planning_scene::PlanningScenePtr graspContactScene(
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config);
+
+// Disengagement checks the released box as a world obstacle.
 planning_scene::PlanningScenePtr retreatContactScene(
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config);
 

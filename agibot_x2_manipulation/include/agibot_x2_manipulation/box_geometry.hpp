@@ -100,6 +100,9 @@ std::vector<GraspCandidate> generateGraspCandidates(
   const GraspCandidateOptions & options);
 
 /// Interpolate a rigid object pose using linear translation and quaternion slerp.
+// End of the current correction-cost tier in the sorted candidate list.
+std::size_t graspCostTierEnd(const std::vector<GraspCandidate> & candidates, std::size_t start);
+
 Eigen::Isometry3d interpolatePose(
   const Eigen::Isometry3d & from, const Eigen::Isometry3d & to, double t);
 
