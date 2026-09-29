@@ -686,6 +686,43 @@ guarantee straight TCP motion or continuous rigid two-hand closure between
 endpoints, so validate with `plan_only: true` and fake-ZMQ simulation before
 enabling robot motion.
 
+For `pose_to_pose`, Pick first tries the nominal grasp with one measured-seed IK
+attempt and validates its pregrasp, approach, and carry continuation. The full
+grasp-candidate ranking pass runs only when this fast path fails. Adaptive carry
+and placement first try a single measured-seed
+IK endpoint and the existing direct route at the requested pose (or the previously
+selected carry pose). Successful routes skip the full endpoint ranking pass.
+Failure falls back to the existing candidate/route search with the same phase
+deadline, collision policy, joint-margin limits, and continuation checks.
+Planning traces record `adaptive_carry_fast_path` and `adaptive_place_fast_path`
+and `pregrasp_fast_path` with elapsed seconds.
+
+The shared pose-to-pose object-route planner skips intermediate waypoints already
+reached by both TCPs (within 0.0001 m and 0.001 rad), or matching validated joint
+targets within 0.000001 rad/m. The actual state must still
+pass joint bounds, minimum joint margin, and the usual collision checks. This
+avoids treating a no-motion MoveIt response as a failed route, particularly when
+the carry pose is already the placement approach pose. Other short planner
+responses outside the planner's goal tolerance remain failures; requested motions
+beyond the skip limits still go through planning.
+After a successful MoveIt response, a short result is also accepted when the
+current joints satisfy MoveIt's configured joint goal tolerance and pass the
+same state safety checks. The current state is retained rather than replaced
+by an unexecuted returned waypoint.
+
+Pick also reuses its preflight pregrasp/approach trajectories when fresh stationary
+feedback matches commanded joints within `execution_joint_tolerance` and
+uncommanded robot variables within 0.001 rad/m, and complete
+trajectory validation passes against the current scene, including controller
+spline interpolation and joint bounds. When the commanded start changes, reuse
+rebases the first waypoint to measured positions and regenerates trajectory timing
+before validation; validation failure falls back to replanning. Reuse preserves the box/wrist/hand contact
+policy without allowing environment contact. Execution failure consumes the cache;
+retries replan from measured positions. A mismatch or changed obstacle also triggers
+replanning. The closed-chain search, measured-start recovery rules for return, and
+configured search limits are preserved. Simulation workflow tests use a separate
+box profile so hardware calibration does not determine their feasibility.
+
 ### Waiting for tag detections
 
 `tag_reacquisition_timeout: 10.0` seconds is the shared wait limit for fresh box

@@ -1756,6 +1756,16 @@ private:
         stampedPose(carry_plan.pose));
     }
 
+    // Preserve the exact reference state used by the preflight plans. Cache
+    // eligibility checks all model variables, not only commanded arm joints.
+    moveit::core::RobotState cached_pregrasp_start(prepare_end);
+    robot_trajectory::RobotTrajectory preflight_pregrasp(
+      move_group_.getRobotModel(), config_.planning_group);
+    preflight_pregrasp.setRobotTrajectoryMsg(cached_pregrasp_start, pregrasp_plan.trajectory_);
+    moveit::core::RobotState cached_approach_start(preflight_pregrasp.getLastWayPoint());
+    bool pregrasp_cache_available = true;
+    bool approach_cache_available = true;
+
     if (!runPhase("prepare", false, feedback, 0.25F, box_message, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
           if (!refreshMotionState(failure, planning_canceled, false) ||
@@ -1779,17 +1789,32 @@ private:
     {
       return outcome(false, kExecutionFailed, error);
     }
-    // The prepare phase can finish at a different IK state than the preflight prediction.
-    // Every pregrasp attempt plans from actual feedback, including after partial execution.
+    // Reuse only after fresh stationary feedback and current-scene validation.
+    // A consumed or mismatched cache falls back to planning from actual feedback.
     if (!runPhase("pregrasp", false, feedback, 0.30F, box_message, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
           if (!refreshMotionState(failure, planning_canceled, false) ||
             !validateVisibleBoxScene(visible_boxes, "", failure, planning_canceled)) {return false;}
           auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!measured) {failure = "pregrasp state unavailable"; return false;}
-          if (!motion_planner_.planPickPath(box_message, pick_pose, pregrasp_plan, approach,
-              contact_end, selected_grasp, carry_validator, failure, planning_canceled,
-              measured.get())) {return false;}
+          std::string cache_error;
+          const bool reuse = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+            pregrasp_cache_available && validateReusablePickTrajectory(
+            pregrasp_plan.trajectory_, cached_pregrasp_start, *measured,
+            planning_scene_.snapshot(), config_, cache_error, planning_canceled);
+          pregrasp_cache_available = false;
+          RCLCPP_INFO(node_->get_logger(), "Pregrasp preflight plan %s: %s",
+            reuse ? "reused" : "replanned", cache_error.c_str());
+          if (!reuse) {
+            approach_cache_available = false;
+            if (!motion_planner_.planPickPath(box_message, pick_pose, pregrasp_plan, approach,
+                contact_end, selected_grasp, carry_validator, failure, planning_canceled,
+                measured.get())) {return false;}
+            robot_trajectory::RobotTrajectory planned(move_group_.getRobotModel(), config_.planning_group);
+            planned.setRobotTrajectoryMsg(*measured, pregrasp_plan.trajectory_);
+            cached_approach_start = planned.getLastWayPoint();
+            approach_cache_available = true;
+          }
           if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
             failure = trajectory_executor_.error("pregrasp execution failed");
             return false;
@@ -1812,7 +1837,15 @@ private:
           auto grasp = selected_grasp.candidate.grasp;
           grasp.left_pregrasp = current->getGlobalLinkTransform(config_.left_tcp);
           grasp.right_pregrasp = current->getGlobalLinkTransform(config_.right_tcp);
-          if (!motion_planner_.buildApproach(*current, grasp, approach, contact_end,
+          std::string cache_error;
+          const bool reuse = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+            approach_cache_available && validateReusablePickTrajectory(
+            approach, cached_approach_start, *current, planning_scene_.snapshot(),
+            config_, cache_error, planning_canceled);
+          approach_cache_available = false;
+          RCLCPP_INFO(node_->get_logger(), "Approach preflight plan %s: %s",
+            reuse ? "reused" : "replanned", cache_error.c_str());
+          if (!reuse && !motion_planner_.buildApproach(*current, grasp, approach, contact_end,
               failure, planning_canceled)) {return false;}
           if (!trajectory_executor_.execute(approach, canceled)) {
             failure = trajectory_executor_.error("approach execution failed");

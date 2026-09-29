@@ -30,6 +30,15 @@ bool validateReturnTrajectory(
 bool validateTimedReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
+  std::string & error, const CancelFunction & interrupted, bool enforce_bounds = false);
+
+// Reuse a pre-attachment plan only after checking its complete measured start
+// and the controller spline against the current scene and grasp touch policy.
+// A changed commanded start is rebased to feedback and retimed before reuse.
+bool validateReusablePickTrajectory(
+  moveit_msgs::msg::RobotTrajectory & message,
+  const moveit::core::RobotState & planned_start, const moveit::core::RobotState & current,
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
   std::string & error, const CancelFunction & interrupted);
 
 struct PostPlaceSegment

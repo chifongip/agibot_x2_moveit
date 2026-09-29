@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+import time
 import unittest
 
 from action_msgs.msg import GoalStatus
@@ -39,6 +41,7 @@ def generate_test_description():
             "perception_3d_source": "none",
             "allow_execution": "true",
             "motion_planning_mode": "pose_to_pose",
+            "box_profiles_file": str(Path(__file__).parent / "config" / "box_profiles_simulation.yaml"),
             "manipulation_state_file": f"/tmp/x2_dummy_workflow_{os.getpid()}",
         }.items(),
     )
@@ -71,6 +74,7 @@ class TestDummyWorkflow(unittest.TestCase):
         self.assertTrue(send_future.done())
         handle = send_future.result()
         self.assertTrue(handle.accepted)
+        started = time.monotonic()
         result_future = handle.get_result_async()
         rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=timeout)
         self.assertTrue(result_future.done())
@@ -81,6 +85,7 @@ class TestDummyWorkflow(unittest.TestCase):
             wrapped.result.message if wrapped.result else "action returned no result",
         )
         self.assertTrue(wrapped.result.success, wrapped.result.message)
+        print(f"WORKFLOW_TIMING action={name} plan_only={goal.plan_only} seconds={time.monotonic() - started:.3f}", flush=True)
         client.destroy()
         return wrapped.result
 

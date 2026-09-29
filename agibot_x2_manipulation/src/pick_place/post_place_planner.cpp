@@ -154,7 +154,7 @@ bool validateReturnTrajectory(
 bool validateTimedReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
-  std::string & error, const CancelFunction & interrupted)
+  std::string & error, const CancelFunction & interrupted, bool enforce_bounds)
 {
   if (!std::isfinite(joint_step) || joint_step <= 0.0 || trajectory.empty() ||
     !trajectory.getGroup())
@@ -163,6 +163,10 @@ bool validateTimedReturnTrajectory(
     return false;
   }
   moveit::core::RobotState first(trajectory.getFirstWayPoint());
+  if (enforce_bounds && !first.satisfiesBounds(trajectory.getGroup(), 1e-6)) {
+    error = "cached trajectory start violates joint position bounds";
+    return false;
+  }
   if (!validState(first, scene, trajectory.getGroup(), error)) {
     error = "return trajectory start invalid: " + error;
     return false;
@@ -244,6 +248,10 @@ bool validateTimedReturnTrajectory(
         return false;
       }
       state.setVariablePositions(joints.joint_names, point.positions);
+      if (enforce_bounds && !state.satisfiesBounds(group, 1e-6)) {
+        error = "cached controller spline violates joint position bounds";
+        return false;
+      }
       if (!validState(state, scene, group, error)) {
         error = "controller spline invalid: segment " + std::to_string(index) +
           " sample " + std::to_string(sample) + "/" + std::to_string(steps) + ": " + error;
@@ -251,6 +259,101 @@ bool validateTimedReturnTrajectory(
       }
     }
   }
+  return true;
+}
+
+bool validateReusablePickTrajectory(
+  moveit_msgs::msg::RobotTrajectory & message,
+  const moveit::core::RobotState & planned_start, const moveit::core::RobotState & current,
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
+  std::string & error, const CancelFunction & interrupted)
+{
+  if (interrupted()) {error = "cached trajectory validation canceled"; return false;}
+  if (!scene || planned_start.getRobotModel() != current.getRobotModel()) {
+    error = "cached trajectory scene or robot model unavailable";
+    return false;
+  }
+  const auto * group = current.getJointModelGroup(config.planning_group);
+  if (!group || message.joint_trajectory.points.empty() ||
+    !message.multi_dof_joint_trajectory.joint_names.empty())
+  {
+    error = "cached trajectory is empty or unsupported";
+    return false;
+  }
+  const auto & names = message.joint_trajectory.joint_names;
+  const std::set<std::string> commanded(names.begin(), names.end());
+  const auto & variables = group->getVariableNames();
+  if (commanded.size() != names.size() ||
+    commanded != std::set<std::string>(variables.begin(), variables.end()))
+  {
+    error = "cached trajectory does not command the complete planning group";
+    return false;
+  }
+  std::vector<const moveit::core::AttachedBody *> attached;
+  for (const auto * state : {&current, &planned_start, &scene->getCurrentState()}) {
+    state->getAttachedBodies(attached);
+    if (!attached.empty()) {error = "cached Pick trajectory requires empty arms"; return false;}
+  }
+  const double tolerance = config.execution_joint_tolerance;
+  if (!std::isfinite(tolerance) || tolerance < 0.0) {
+    error = "invalid cached trajectory start tolerance";
+    return false;
+  }
+  for (const auto & name : current.getRobotModel()->getVariableNames()) {
+    const double measured = current.getVariablePosition(name);
+    const double planned = planned_start.getVariablePosition(name);
+    if (!std::isfinite(measured) || !std::isfinite(planned) ||
+      std::abs(measured - planned) > (commanded.count(name) ? tolerance : 0.001))
+    {
+      error = "measured state differs from cached Pick start: " + name;
+      return false;
+    }
+  }
+  const auto & first = message.joint_trajectory.points.front().positions;
+  if (first.size() != names.size()) {error = "cached trajectory start is incomplete"; return false;}
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    if (!std::isfinite(first[i]) || std::abs(first[i] - current.getVariablePosition(names[i])) > tolerance) {
+      error = "measured joints differ from cached trajectory start";
+      return false;
+    }
+  }
+  for (const auto & point : message.joint_trajectory.points) {
+    if (point.positions.size() != names.size() ||
+      !std::all_of(point.positions.begin(), point.positions.end(), [](double value) {return std::isfinite(value);}) ||
+      (!point.velocities.empty() && point.velocities.size() != names.size()) ||
+      (!point.accelerations.empty() && point.accelerations.size() != names.size()))
+    {
+      error = "cached trajectory contains incomplete or non-finite joint data";
+      return false;
+    }
+  }
+  robot_trajectory::RobotTrajectory trajectory(current.getRobotModel(), config.planning_group);
+  trajectory.setRobotTrajectoryMsg(current, message);
+  const bool rebase = std::any_of(names.begin(), names.end(), [&](const std::string & name) {
+      return std::abs(current.getVariablePosition(name) -
+             trajectory.getFirstWayPoint().getVariablePosition(name)) > 1e-6;
+    });
+  if (rebase) {
+    // Do not execute a spline starting at the old planned positions. Replace
+    // its start with measured feedback and regenerate timing before validating
+    // the full controller interpolation, bounds, and collisions.
+    *trajectory.getFirstWayPointPtr() = current;
+    trajectory_processing::TimeOptimalTrajectoryGeneration timing(config.return_path_tolerance);
+    if (!timing.computeTimeStamps(trajectory, config.velocity_scaling, config.acceleration_scaling)) {
+      error = "cached Pick trajectory retiming failed";
+      return false;
+    }
+  }
+  const auto contact = retreatContactScene(scene, config);
+  if (!validateTimedReturnTrajectory(trajectory, contact, config.return_validation_joint_step,
+      error, interrupted, true)) {return false;}
+  robot_trajectory::RobotTrajectory edge(current.getRobotModel(), config.planning_group);
+  edge.addSuffixWayPoint(current, 0.0);
+  edge.addSuffixWayPoint(trajectory.getFirstWayPoint(), 0.0);
+  if (!validateReturnTrajectory(edge, contact, config.return_validation_joint_step, error, interrupted)) {
+    return false;
+  }
+  if (rebase) {trajectory.getRobotTrajectoryMsg(message);}
   return true;
 }
 
