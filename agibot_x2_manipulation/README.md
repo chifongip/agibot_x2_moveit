@@ -1091,6 +1091,43 @@ results are published on `/pick_place/planned_box_path`,
 with per-route failure classification and budget data on
 `/pick_place/planning_diagnostics`.
 
+### Measuring execution time in the terminal
+
+Start the passive timing monitor before sending a manipulation goal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run agibot_x2_manipulation measure_execution_time
+```
+
+Use the same `ROS_DOMAIN_ID` as the running robot or simulation. The monitor
+prints one `CONTROLLER` line per dual-arm trajectory, one `MOVEIT` line per
+ExecuteTrajectory goal, and one `TASK` line per manipulation task. Every line
+includes elapsed seconds and terminal status. Controller/MoveIt goal IDs are
+distinct; the task and phase labels use the serialized server's latest status.
+
+`CONTROLLER` measures observed executing-to-terminal controller status transitions,
+including the controller's goal-tolerance handling. `MOVEIT` includes its execution
+coordination. These intervals overlap, so do not add them together. `TASK` includes
+planning, attachment operations, retries/operator pauses, and fresh-feedback
+settling. Its non-controller time is not a pure planning measurement. Status
+delivery latency affects precision; these measurements do not detect the exact
+first/last encoder motion.
+
+The script writes no files and disables its own ROS file logging. Ctrl-C prints
+any unfinished intervals as `status=incomplete`. A missed start is marked
+`partial=true`, and historical terminal goals are ignored. Existing server trace
+settings are unchanged. To use namespaced endpoints, set `--controller-action`,
+`--moveit-action`, and `--task-topic`, for example:
+
+```bash
+ros2 run agibot_x2_manipulation measure_execution_time \
+  --controller-action /robot/dual_arm_controller/follow_joint_trajectory \
+  --moveit-action /robot/execute_trajectory \
+  --task-topic /robot/manipulation_task_status
+```
+
 ### Persisting planning traces
 
 Planning tracing is enabled by default. Each planner-server start creates a

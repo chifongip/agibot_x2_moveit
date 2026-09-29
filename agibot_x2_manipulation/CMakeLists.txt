@@ -147,6 +147,10 @@ install(PROGRAMS
   scripts/verify_carry_pose.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME verify_carry_pose)
+install(PROGRAMS
+  scripts/measure_execution_time.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME measure_execution_time)
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
@@ -216,6 +220,7 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_table_tag_pose_tracker apriltag_msgs geometry_msgs rclcpp tf2_ros)
   ament_add_pytest_test(test_capture_failure_snapshot test/test_capture_failure_snapshot.py)
   ament_add_pytest_test(test_verify_carry_pose test/test_verify_carry_pose.py)
+  ament_add_pytest_test(test_measure_execution_time test/test_measure_execution_time.py)
   ament_add_pytest_test(test_manipulation_config test/test_manipulation_config.py)
   add_launch_test(test/test_box_profile_reload.launch.py TIMEOUT 30)
   add_launch_test(test/test_reload_box_profiles_service.launch.py TIMEOUT 90)
