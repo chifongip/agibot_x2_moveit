@@ -823,7 +823,15 @@ the timed controller spline. They are independent of hardware execution and
 attachment tolerances. Joint continuity uses `maximum_joint_step`; Cartesian
 timing uses MoveIt's iterative parabolic time parameterization with velocity and
 acceleration scaling, preserving IK waypoints instead of TOTG path fitting.
-Timing that still causes controller-spline position overshoot is retried with
+Controller interpolation may exceed model position bounds by
+`controller_spline_bounds_tolerance` (default 0.001 rad for revolute joints;
+meters for prismatic joints). Set it to 0 for strict checking with the existing
+numerical epsilon. This allowance applies to timed spline validation, including
+cache reuse, for Cartesian and free-space routes that enforce bounds. Planned
+waypoints must still satisfy model bounds; collision checks, Cartesian geometry,
+minimum joint margins, and execution tolerances are unchanged. Changing the
+parameter requires restarting the manipulation server.
+Timing that exceeds this allowance is retried for Cartesian segments with
 zero velocity/acceleration at each Cartesian waypoint. Quintic intervals are
 lengthened to respect scaled velocity/acceleration limits, then rechecked for
 bounds, collisions, and Cartesian deviation. This fallback stops at waypoints

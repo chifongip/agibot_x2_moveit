@@ -33,13 +33,15 @@ struct TrajectoryValidationStats
   std::size_t collision_checks{0};
 };
 
+// The allowance applies only to controller interpolation; waypoints retain
+// model bounds. Zero retains the numerical bounds epsilon used previously.
 bool validateTimedReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
   std::string & error, const CancelFunction & interrupted, bool enforce_bounds = false,
   double minimum_joint_margin = 0.0,
   const std::function<bool (const moveit::core::RobotState &, std::string &)> & path_valid = {},
-  TrajectoryValidationStats * stats = nullptr);
+  TrajectoryValidationStats * stats = nullptr, double spline_bounds_tolerance = 0.0);
 
 // Reuse a pre-attachment plan only after checking its complete measured start
 // and the controller spline against the current scene and grasp touch policy.

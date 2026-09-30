@@ -137,7 +137,39 @@ TEST(CartesianMotion, ChecksControllerSplineEvenWhenEndpointsLieOnLine)
       []() {return false;}));
   EXPECT_NE(error.find("joint position bounds"), std::string::npos);
   EXPECT_NE(error.find("joint=lx"), std::string::npos);
+  // A configurable allowance accepts only interpolation excursions, without
+  // changing the waypoint positions, derivatives, or normal segment duration.
+  const auto large_overshoot = message;
+  first.positions = {1.9995, 0.0, 1.9995, 0.0};
+  last.positions = {1.9995, 0.3, 1.9995, 0.3};
+  first.velocities = {0.004, 0.3, 0.004, 0.3};
+  last.velocities = {-0.004, 0.3, -0.004, 0.3};
+  message.joint_trajectory.points = {first, last};
+  path.setRobotTrajectoryMsg(start, message);
+  from.left.translation().x() = from.right.translation().x() = 1.9995;
+  to.left.translation().x() = to.right.translation().x() = 1.9995;
   config.cartesian_path_position_tolerance = 0.02;
+  EXPECT_TRUE(validateCartesianTrajectory(path, scene, config, from, to, error,
+      []() {return false;})) << error;
+  EXPECT_DOUBLE_EQ(path.getDuration(), 1.0);
+  EXPECT_DOUBLE_EQ(path.getFirstWayPoint().getVariableVelocity("lx"), 0.004);
+  config.controller_spline_bounds_tolerance = 0.0;
+  EXPECT_FALSE(validateCartesianTrajectory(path, scene, config, from, to, error,
+      []() {return false;}));
+  EXPECT_NE(error.find("joint position bounds"), std::string::npos);
+  config.controller_spline_bounds_tolerance = 0.001;
+  // The same allowance must not permit a planned endpoint outside model bounds.
+  message.joint_trajectory.points.back().positions[0] = 2.0005;
+  path.setRobotTrajectoryMsg(start, message);
+  EXPECT_FALSE(validateCartesianTrajectory(path, scene, config, from, to, error,
+      []() {return false;}));
+  EXPECT_NE(error.find("trajectory waypoint violates"), std::string::npos);
+  message = large_overshoot;
+  first = message.joint_trajectory.points.front();
+  last = message.joint_trajectory.points.back();
+  from.left.translation().x() = from.right.translation().x() = 1.95;
+  to.left.translation().x() = to.right.translation().x() = 1.95;
+  path.setRobotTrajectoryMsg(start, message);
   config.velocity_scaling = config.acceleration_scaling = 0.25;
   ASSERT_TRUE(retimeCartesianWithoutOvershoot(path, config, error)) << error;
   EXPECT_TRUE(validateCartesianTrajectory(path, scene, config, from, to, error,

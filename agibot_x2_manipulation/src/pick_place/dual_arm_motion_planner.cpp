@@ -605,7 +605,8 @@ public:
         return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
       };
     if (!validateTimedReturnTrajectory(planned, graspContactScene(planning_scene_.snapshot(), config_),
-        config_.return_validation_joint_step, error, interrupted, true, minimum_joint_margin)) {return false;}
+        config_.return_validation_joint_step, error, interrupted, true, minimum_joint_margin, {}, nullptr,
+        config_.controller_spline_bounds_tolerance)) {return false;}
     if (combined.getWayPointCount() == 1U) {*combined.getFirstWayPointPtr() = planned.getFirstWayPoint();}
     if (validated_timing) {*validated_timing = true;}
     combined.append(
@@ -703,7 +704,8 @@ public:
             jointEndpointReached(cached.getLastWayPoint(), *preferred, cached.getGroup(), 1e-6);
           const bool valid = attachments_valid && branch_matches && cached.getWayPointCount() >= 2U &&
             validateTimedReturnTrajectory(cached, scene, config_.return_validation_joint_step,
-              cache_error, interrupted, true, minimum_joint_margin);
+              cache_error, interrupted, true, minimum_joint_margin, {}, nullptr,
+              config_.controller_spline_bounds_tolerance);
           writeTrace("pose_prefix_reuse", valid, cache_error,
             {{"segment", controls[index].segment}, {"validation_seconds", std::to_string(
               std::chrono::duration<double>(std::chrono::steady_clock::now() - validation_started).count())}});
@@ -1674,7 +1676,8 @@ public:
           return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
         };
       if (!validateTimedReturnTrajectory(checked, scene, config_.return_validation_joint_step,
-          error, interrupted, true, config_.minimum_carry_joint_margin)) {return false;}
+          error, interrupted, true, config_.minimum_carry_joint_margin, {}, nullptr,
+          config_.controller_spline_bounds_tolerance)) {return false;}
     }
     trajectory.getRobotTrajectoryMsg(output);
     end_state = state;
@@ -1753,7 +1756,8 @@ public:
           return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
         };
       if (!validateTimedReturnTrajectory(checked, scene, config_.return_validation_joint_step,
-          error, interrupted, true, config_.minimum_carry_joint_margin)) {return false;}
+          error, interrupted, true, config_.minimum_carry_joint_margin, {}, nullptr,
+          config_.controller_spline_bounds_tolerance)) {return false;}
     }
     trajectory.getRobotTrajectoryMsg(output);
     end_state = state;
@@ -2183,7 +2187,7 @@ public:
           return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
         };
       if (!validateTimedReturnTrajectory(checked, scene, config_.return_validation_joint_step,
-          error, interrupted, true, 0.0)) {return false;}
+          error, interrupted, true, 0.0, {}, nullptr, config_.controller_spline_bounds_tolerance)) {return false;}
     }
     trajectory.getRobotTrajectoryMsg(output);
     end_state = state;

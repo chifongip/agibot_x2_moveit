@@ -155,6 +155,23 @@ TEST_F(PickPlaceConfigTest, CarriesUseTheGraspMarginWhenNoCarryOverrideIsSet)
   EXPECT_DOUBLE_EQ(config.minimum_carry_joint_margin, 0.03);
 }
 
+TEST_F(PickPlaceConfigTest, LoadsConfigurableControllerSplineBoundsTolerance)
+{
+  EXPECT_DOUBLE_EQ(loadPickPlaceConfig(node("spline_default")).controller_spline_bounds_tolerance, 0.001);
+  for (const double tolerance : {0.0, 0.002, 0.2}) {
+    const auto test_node = node("spline_override");
+    test_node->declare_parameter<double>("controller_spline_bounds_tolerance", tolerance);
+    EXPECT_DOUBLE_EQ(loadPickPlaceConfig(test_node).controller_spline_bounds_tolerance, tolerance);
+  }
+  for (const double tolerance : {-0.001, std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::quiet_NaN()})
+  {
+    const auto test_node = node("spline_invalid");
+    test_node->declare_parameter<double>("controller_spline_bounds_tolerance", tolerance);
+    EXPECT_THROW(loadPickPlaceConfig(test_node), std::runtime_error);
+  }
+}
+
 TEST_F(PickPlaceConfigTest, RejectsUnsafeReturnSearchSettings)
 {
   const auto bad_resolution = node("bad_return_resolution");

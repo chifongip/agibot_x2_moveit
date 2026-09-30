@@ -85,7 +85,8 @@ bool validateCartesianTrajectory(
         config.cartesian_path_position_tolerance, config.cartesian_path_orientation_tolerance, failure);
     };
   return validateTimedReturnTrajectory(trajectory, scene, config.return_validation_joint_step,
-    error, interrupted, true, minimum_joint_margin, valid);
+    error, interrupted, true, minimum_joint_margin, valid, nullptr,
+    config.controller_spline_bounds_tolerance);
 }
 
 bool retimeCartesianWithoutOvershoot(

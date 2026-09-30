@@ -163,22 +163,28 @@ bool validateTimedReturnTrajectory(
   std::string & error, const CancelFunction & interrupted, bool enforce_bounds,
   double minimum_joint_margin,
   const std::function<bool (const moveit::core::RobotState &, std::string &)> & path_valid,
-  TrajectoryValidationStats * stats)
+  TrajectoryValidationStats * stats, double spline_bounds_tolerance)
 {
   TrajectoryValidationStats counts;
   auto & metrics = stats ? *stats : counts;
   metrics = {};
-  if (!std::isfinite(joint_step) || joint_step <= 0.0 || trajectory.empty() ||
+  if (!std::isfinite(spline_bounds_tolerance) || spline_bounds_tolerance < 0.0 ||
+    !std::isfinite(joint_step) || joint_step <= 0.0 || trajectory.empty() ||
     !trajectory.getGroup())
   {
     error = "empty return trajectory or invalid validation group";
     return false;
   }
   moveit::core::RobotState first(trajectory.getFirstWayPoint());
-  if (enforce_bounds && !first.satisfiesBounds(trajectory.getGroup(), 1e-6)) {
-    error = "cached trajectory start violates joint position bounds";
-    return false;
+  if (enforce_bounds) {
+    for (std::size_t index = 0; index < trajectory.getWayPointCount(); ++index) {
+      if (!trajectory.getWayPoint(index).satisfiesBounds(trajectory.getGroup(), 1e-6)) {
+        error = "trajectory waypoint violates joint position bounds; waypoint=" + std::to_string(index);
+        return false;
+      }
+    }
   }
+  const double bounds_allowance = std::max(1e-6, spline_bounds_tolerance);
   if (minimum_joint_margin > 0.0 &&
     first.getMinDistanceToPositionBounds(trajectory.getGroup()).first + 1e-12 < minimum_joint_margin)
   {
@@ -276,7 +282,7 @@ bool validateTimedReturnTrajectory(
       }
       collision_travel += sample_travel;
       previous_positions = point.positions;
-      if (enforce_bounds && !state.satisfiesBounds(group, 1e-6)) {
+      if (enforce_bounds && !state.satisfiesBounds(group, bounds_allowance)) {
         std::ostringstream detail;
         detail << std::setprecision(9) << "controller spline violates joint position bounds";
         for (const auto & name : group->getVariableNames()) {
@@ -290,7 +296,8 @@ bool validateTimedReturnTrajectory(
               "] excess=" << std::max(bounds.min_position_ - position, position - bounds.max_position_);
           }
         }
-        detail << "; segment=" << index << " sample=" << sample << "/" << steps;
+        detail << "; allowance=" << spline_bounds_tolerance << "; segment=" << index <<
+          " sample=" << sample << "/" << steps;
         error = detail.str();
         return false;
       }
@@ -437,7 +444,8 @@ static bool validateReusableTrajectory(
   }
   const auto contact = carry ? graspContactScene(scene, config) : retreatContactScene(scene, config);
   if (!validateTimedReturnTrajectory(trajectory, contact, config.return_validation_joint_step,
-      error, interrupted, true, carry ? config.minimum_carry_joint_margin : 0.0)) {return false;}
+      error, interrupted, true, carry ? config.minimum_carry_joint_margin : 0.0,
+      {}, nullptr, config.controller_spline_bounds_tolerance)) {return false;}
   robot_trajectory::RobotTrajectory edge(current.getRobotModel(), config.planning_group);
   edge.addSuffixWayPoint(current, 0.0);
   edge.addSuffixWayPoint(trajectory.getFirstWayPoint(), 0.0);
@@ -575,7 +583,8 @@ bool tryDirectJointTrajectory(
     }
   }
   if (!validateTimedReturnTrajectory(trajectory, scene, config.return_validation_joint_step,
-      error, interrupted, true, minimum_joint_margin)) {return false;}
+      error, interrupted, true, minimum_joint_margin, {}, nullptr,
+      config.controller_spline_bounds_tolerance)) {return false;}
   if (interrupted() || !jointEndpointReached(trajectory.getFirstWayPoint(), reference, group, 1e-6) ||
     !jointEndpointReached(trajectory.getLastWayPoint(), target, group, 1e-6))
   {

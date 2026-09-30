@@ -309,6 +309,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   }
   config.return_ik_attempts = parameter<int>(node, "return_ik_attempts", 8);
   config.return_validation_joint_step = parameter<double>(node, "return_validation_joint_step", 0.01);
+  config.controller_spline_bounds_tolerance = parameter<double>(
+    node, "controller_spline_bounds_tolerance", 0.001);
   config.return_longest_valid_segment_fraction = parameter<double>(
     node, "return_longest_valid_segment_fraction", 0.005);
   config.return_path_tolerance = parameter<double>(node, "return_path_tolerance", 0.01);
@@ -330,6 +332,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     config.return_planning_attempts < 1 || config.return_planning_attempts > 64 ||
     !positive(config.return_planning_time_per_attempt) || config.return_ik_attempts < 1 ||
     config.return_ik_attempts > 64 || !positive(config.return_validation_joint_step) ||
+    !std::isfinite(config.controller_spline_bounds_tolerance) ||
+    config.controller_spline_bounds_tolerance < 0.0 ||
     !positive(config.return_longest_valid_segment_fraction) ||
     config.return_longest_valid_segment_fraction > 1.0 ||
     !positive(config.return_path_tolerance) || !offsets_valid(config.return_up_offsets) ||

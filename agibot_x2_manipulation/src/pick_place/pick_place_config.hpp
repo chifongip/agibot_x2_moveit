@@ -122,6 +122,7 @@ struct PickPlaceConfig
   double phase_retry_delay{0.5};
   int return_ik_attempts{8};
   double return_validation_joint_step{0.01};
+  double controller_spline_bounds_tolerance{0.001};
   double return_longest_valid_segment_fraction{0.005};
   double return_path_tolerance{0.01};
   std::vector<double> return_up_offsets{0.05, 0.10, 0.15, 0.20};
