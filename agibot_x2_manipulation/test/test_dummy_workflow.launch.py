@@ -20,6 +20,10 @@ from rclpy.action import ActionClient
 
 @pytest.mark.launch_test
 def generate_test_description():
+    return make_test_description()
+
+
+def make_test_description(extra_arguments=None):
     share = get_package_share_directory("agibot_x2_manipulation")
     port = 20000 + os.getpid() % 10000
     endpoint = f"tcp://127.0.0.1:{port}"
@@ -43,6 +47,7 @@ def generate_test_description():
             "motion_planning_mode": "pose_to_pose",
             "box_profiles_file": str(Path(__file__).parent / "config" / "box_profiles_simulation.yaml"),
             "manipulation_state_file": f"/tmp/x2_dummy_workflow_{os.getpid()}",
+            **(extra_arguments or {}),
         }.items(),
     )
     feedback = Node(

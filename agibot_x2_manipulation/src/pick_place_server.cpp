@@ -7,6 +7,7 @@
 #include "pick_place/box_pose_tracker.hpp"
 #include "pick_place/dual_arm_motion_planner.hpp"
 #include "pick_place/endpoint_reached.hpp"
+#include "pick_place/cartesian_motion.hpp"
 #include "pick_place/locomanipulation_posture_controller.hpp"
 #include "pick_place/manipulation_state_store.hpp"
 #include "pick_place/pick_place_config.hpp"
@@ -485,11 +486,13 @@ private:
     bool held)
   {
     if (!trajectory_executor_.waitUntilStopped(canceled, error)) {return false;}
+    // Continue must validate against obstacle updates made while paused.
+    if (!planning_scene_.synchronize(error)) {return false;}
     if (held) {
       motion_planner_.updateHeldPoseFromRobot();
       if (!motion_planner_.validateHeldClosure(error)) {return false;}
     }
-    return planning_scene_.synchronize(error);
+    return true;
   }
 
   bool reserveGoal()
@@ -1735,7 +1738,6 @@ private:
 
     bool pregrasp_cache_available = false;
     bool approach_cache_available = false;
-    bool carry_cache_available = false;
     bool pick_replan_required = false;
     const auto validate_pick_scene = [&](const CancelFunction & planning_canceled,
         std::string & failure) {
@@ -1745,7 +1747,6 @@ private:
         if (changed) {
           pregrasp_cache_available = false;
           approach_cache_available = false;
-          carry_cache_available = false;
           pick_replan_required = true;
           if (!refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, failure)) {return false;}
           box_message = stampedBoxPose(tracked_box);
@@ -1834,9 +1835,7 @@ private:
     moveit::core::RobotState cached_approach_start(preflight_pregrasp.getLastWayPoint());
     pregrasp_cache_available = true;
     approach_cache_available = true;
-    carry_cache_available = true;
     pick_replan_required = false;
-    moveit::core::RobotState cached_carry_start(contact_end);
 
     if (!runPhase("prepare", false, feedback, 0.25F, box_message, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
@@ -1885,8 +1884,6 @@ private:
             robot_trajectory::RobotTrajectory planned(move_group_.getRobotModel(), config_.planning_group);
             planned.setRobotTrajectoryMsg(*measured, pregrasp_plan.trajectory_);
             cached_approach_start = planned.getLastWayPoint();
-            cached_carry_start = contact_end;
-            carry_cache_available = true;
             approach_cache_available = true;
             pick_replan_required = false;
           }
@@ -1924,8 +1921,6 @@ private:
             if (!current) {failure = "updated approach state unavailable"; return false;}
             pick_replan_required = false;
             approach_cache_available = false;
-            cached_carry_start = contact_end;
-            carry_cache_available = true;
             if (!validate_pick_scene(planning_canceled, failure)) {return false;}
           }
           auto grasp = selected_grasp.candidate.grasp;
@@ -1935,7 +1930,13 @@ private:
           const bool reuse = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
             approach_cache_available && validateReusablePickTrajectory(
             approach, cached_approach_start, *current, planning_scene_.snapshot(),
-            config_, cache_error, planning_canceled);
+            config_, cache_error, planning_canceled) && [&]() {
+              robot_trajectory::RobotTrajectory path(current->getRobotModel(), config_.planning_group);
+              path.setRobotTrajectoryMsg(*current, approach);
+              return validateCartesianTrajectory(path, graspContactScene(planning_scene_.snapshot(), config_), config_,
+                {current->getGlobalLinkTransform(config_.left_tcp), current->getGlobalLinkTransform(config_.right_tcp)},
+                {grasp.left_contact, grasp.right_contact}, cache_error, planning_canceled);
+            }();
           approach_cache_available = false;
           RCLCPP_INFO(node_->get_logger(), "Approach preflight plan %s: %s",
             reuse ? "reused" : "replanned", cache_error.c_str());
@@ -2040,6 +2041,7 @@ private:
       return outcome(false, kRecoveryRequired, "pick canceled; object remains held", held_pose_);
     }
 
+    const double pick_lift_top = held_pose_.pose.position.z + config_.lift_height;
     if (!runPhase("carry", false, feedback, 0.80F, box_message, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
           if (!refreshMotionState(failure, planning_canceled, true) ||
@@ -2048,30 +2050,18 @@ private:
           current = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!current) {failure = "carry state unavailable"; return false;}
           const auto preferred = carry_plan.pose;
-          std::string cache_error;
-          const auto validation_started = std::chrono::steady_clock::now();
-          const bool reuse = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
-            carry_cache_available && validateReusableCarryTrajectory(carry_plan.trajectory,
-            cached_carry_start, *current, planning_scene_.snapshot(), config_,
-            held_box_to_left_contact_, held_box_to_right_contact_, preferred,
-            cache_error, planning_canceled);
-          carry_cache_available = false;
-          motion_planner_.traceReuse("carry", reuse, cache_error,
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - validation_started).count());
-          if (reuse) {
-            auto reference = *current;
-            if (!copySceneAttachments(reference, planning_scene_.snapshot()->getCurrentState())) {
-              failure = "validated carry attachment model became unavailable";
-              return false;
-            }
-            robot_trajectory::RobotTrajectory validated(current->getRobotModel(), config_.planning_group);
-            validated.setRobotTrajectoryMsg(reference, carry_plan.trajectory);
-            carry_plan.end_state = std::make_shared<moveit::core::RobotState>(validated.getLastWayPoint());
-          }
-          if (!reuse && !motion_planner_.planAdaptiveCarryTransition(*current, toEigen(held_pose_.pose),
+          // Replan the pick lift from measured feedback. Whole-route cache
+          // rebasing can alter its Cartesian prefix; free-space segment reuse
+          // remains available inside the planner.
+          const bool planned = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE ?
+            motion_planner_.planAdaptiveCarry(*current, toEigen(held_pose_.pose), preferred,
+              false, held_box_to_left_contact_, held_box_to_right_contact_, carry_plan,
+              failure, planning_canceled, pick_lift_top) :
+            motion_planner_.planAdaptiveCarryTransition(*current, toEigen(held_pose_.pose),
               carryPose(MoveCarryPose::Goal::CARRY_A), &preferred,
               held_box_to_left_contact_, held_box_to_right_contact_, carry_plan,
-              failure, planning_canceled)) {return false;}
+              failure, planning_canceled);
+          if (!planned) {return false;}
           if (!trajectory_executor_.execute(carry_plan.trajectory, canceled)) {
             motion_planner_.updateHeldPoseFromRobot();
             failure = trajectory_executor_.error("carry execution failed");

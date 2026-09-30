@@ -88,6 +88,7 @@ target_include_directories(reset_coordinator PUBLIC
 add_library(pick_place_core
   src/pick_place/attachment_controller.cpp
   src/pick_place/box_pose_tracker.cpp
+  src/pick_place/cartesian_motion.cpp
   src/pick_place/dual_arm_motion_planner.cpp
   src/pick_place/locomanipulation_posture_controller.cpp
   src/pick_place/manipulation_state_store.cpp
@@ -203,6 +204,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_post_place_planner pick_place_core)
   ament_target_dependencies(test_post_place_planner moveit_core moveit_ros_planning rclcpp)
   ament_add_gtest(test_post_place_progress test/test_post_place_progress.cpp)
+  ament_add_gtest(test_cartesian_motion test/test_cartesian_motion.cpp)
+  target_include_directories(test_cartesian_motion PRIVATE src include)
+  target_link_libraries(test_cartesian_motion pick_place_core)
+  ament_target_dependencies(test_cartesian_motion moveit_core moveit_ros_planning rclcpp)
   target_include_directories(test_post_place_progress PRIVATE src include)
   target_link_libraries(test_post_place_progress pick_place_core)
   ament_target_dependencies(test_post_place_progress moveit_core moveit_ros_planning rclcpp)
@@ -230,6 +235,7 @@ if(BUILD_TESTING)
   add_launch_test(test/test_reload_box_profiles_service.launch.py TIMEOUT 90)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
   add_launch_test(test/test_dummy_workflow.launch.py TIMEOUT 240)
+  add_launch_test(test/test_cartesian_workflow.launch.py TIMEOUT 300)
   add_launch_test(test/test_place_continue.launch.py TIMEOUT 240)
   add_launch_test(test/test_continue_actions.launch.py TIMEOUT 420)
   add_launch_test(test/test_moved_box_retry.launch.py TIMEOUT 240)

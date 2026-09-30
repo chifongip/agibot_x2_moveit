@@ -658,7 +658,7 @@ The server defaults to `motion_planning_mode:=closed_chain`, which samples and
 validates rigid box/TCP waypoints throughout approach, carry, and placement.
 After release, both modes use coordinated TCP retreat, followed by the dedicated
 clearance-search planner for the named joint target.
-For endpoint-only arm motion while carrying, select:
+For endpoint-based free-space transfers with Cartesian contact motions, select:
 
 ```bash
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
@@ -676,17 +676,35 @@ the existing return retries, and measured-start checks before execution.
 Missing, out-of-bounds, or colliding prepare states fail planning; the named
 state is never silently skipped. Reset continues to use its explicit reset target.
 
-In `pose_to_pose` mode, the server retains the same pregrasp, contact, lift,
-carry, place, retreat, and idle endpoints. It solves dual-arm IK at each
-carry/place endpoint, then first tests a straight joint-space route with TOTG
-timing and full controller-spline validation. A rejected direct route falls back
-to MoveIt with the remaining budget. This also applies to pregrasp and empty-arm
-prepare/return segments. Retreat always uses coordinated interpolation rather than
-endpoint-only free-space planning. Joint bounds, obstacle avoidance, attached-box collision geometry,
-execution feedback, and recovery handling remain active. This mode does not
-guarantee straight TCP motion or continuous rigid two-hand closure between
-endpoints, so validate with `plan_only: true` and fake-ZMQ simulation before
-enabling robot motion.
+In `pose_to_pose` mode, Prepare → Pregrasp, general carry/transfer, motion above
+the placement target, and named-pose returns remain joint-space moves. They first
+test a direct joint-space route, then fall back to MoveIt within the remaining
+budget. These free-space moves do not guarantee straight TCP motion or continuous
+rigid two-hand closure between endpoints.
+
+Pregrasp → Contact, pick lift, final placement descent, and post-release retreat
+use synchronized Cartesian samples with standard MoveIt IK. Approach and retreat
+allow the hand separation to change; lifts/descent preserve the target box
+orientation. A pick route that lifts after lateral translation separates its
+rotation from that lift. General carry transitions retain joint-space planning.
+Cartesian failures cannot fall back to an unrestricted joint-space segment.
+
+`cartesian_step` (0.01 m) controls the paired waypoint spacing.
+`cartesian_path_position_tolerance` (0.02 m) and
+`cartesian_path_orientation_tolerance` (0.0872664626 rad, 5 degrees) bound
+geometric deviation at synchronized progress along both tip paths, including
+the timed controller spline. They are independent of hardware execution and
+attachment tolerances. Joint continuity uses `maximum_joint_step`; timing uses
+`return_path_tolerance`, velocity scaling, and acceleration scaling. Segment
+timing is preserved across route concatenation to avoid smoothing away the
+Cartesian path. Pick lift is replanned from measured feedback instead of rebasing
+and retiming a cached whole carry route; free-space segment reuse remains active.
+Retries retain the original lift height and preserve measured XY/orientation,
+so a partially executed lift does not gain another full lift height on Continue.
+Approach cache reuse requires another Cartesian validation after rebasing.
+Retries and Continue use the same stage policy. Joint bounds, collision geometry,
+execution feedback, and recovery handling remain active. Validate with
+`plan_only: true` and fake-ZMQ simulation before enabling robot motion.
 
 For `pose_to_pose`, Pick first tries the nominal grasp with one measured-seed IK
 attempt and validates its pregrasp, approach, and carry continuation. When this
@@ -755,13 +773,11 @@ rebases the first waypoint to measured positions and regenerates trajectory timi
 before validation; validation failure falls back to replanning. Reuse preserves the box/wrist/hand contact
 policy without allowing environment contact. Execution failure consumes the cache;
 retries replan from measured positions. A mismatch or changed obstacle also triggers
-replanning. In pose-to-pose mode, Pick can also reuse its preflight carry after
-attachment acknowledgement and fresh stationary feedback. It verifies attachment
-identity, dimensions, grasp transform, complete measured start, final TCP
-accuracy, bounds/margins, and current-scene controller-spline collisions. Changed
-starts within the execution tolerance are rebased and retimed before validation;
-rejection falls back to the existing adaptive carry search. Moved-box updates,
-execution attempts, and failure consume or invalidate the task-local cache.
+replanning. In pose-to-pose mode, Pick replans its lift from fresh stationary
+feedback after attachment acknowledgement. The lift's Cartesian timing is retained
+when joining free-space carry segments. Free-space segment cache entries remain
+available after current-scene validation. Moved-box updates, execution attempts,
+and failure consume or invalidate the task-local grasp cache.
 The closed-chain search, measured-start recovery rules for return, and
 configured search limits are preserved. Simulation workflow tests use a separate
 box profile so hardware calibration does not determine their feasibility.
@@ -1168,6 +1184,8 @@ operational data and do not commit it.
 OMPL calls/time. `direct_joint_route`, `pregrasp_direct_joint_route`,
 `pose_prefix_reuse`, and `execution_plan_reuse` record accepted/rejected shortcuts
 and their validation time. Return planning has its own `post_place_return` events.
+`cartesian_segment` records the selected Cartesian stage, success, and failure
+reason, including IK, joint continuity, and timed path deviation failures.
 These counters cover calls made by the dual-arm planner; they exclude the dedicated
 post-place OMPL pipeline.
 

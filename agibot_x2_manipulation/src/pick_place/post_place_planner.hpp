@@ -30,7 +30,9 @@ bool validateReturnTrajectory(
 bool validateTimedReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
-  std::string & error, const CancelFunction & interrupted, bool enforce_bounds = false, double minimum_joint_margin = 0.0);
+  std::string & error, const CancelFunction & interrupted, bool enforce_bounds = false,
+  double minimum_joint_margin = 0.0,
+  const std::function<bool (const moveit::core::RobotState &, std::string &)> & path_valid = {});
 
 // Reuse a pre-attachment plan only after checking its complete measured start
 // and the controller spline against the current scene and grasp touch policy.

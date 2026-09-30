@@ -15,6 +15,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace agibot_x2_manipulation
@@ -101,7 +102,8 @@ public:
     const Eigen::Isometry3d & nominal_target_pose, bool plan_only,
     const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
-    std::string & error, const CancelFunction & canceled);
+    std::string & error, const CancelFunction & canceled,
+    std::optional<double> pick_lift_top = std::nullopt);
   bool planAdaptiveCarryTransition(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
     const Eigen::Isometry3d & nominal_target_pose,

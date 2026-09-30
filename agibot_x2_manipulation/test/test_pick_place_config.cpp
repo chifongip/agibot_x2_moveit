@@ -54,6 +54,8 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, config.reset_state_timeout);
   EXPECT_DOUBLE_EQ(config.execution_joint_tolerance, config.reset_joint_tolerance);
   EXPECT_DOUBLE_EQ(config.place_start_state_bounds_tolerance, 0.02);
+  EXPECT_DOUBLE_EQ(config.cartesian_path_position_tolerance, 0.02);
+  EXPECT_DOUBLE_EQ(config.cartesian_path_orientation_tolerance, 0.0872664626);
   EXPECT_EQ(config.perception_source, Perception3dSource::NONE);
   EXPECT_FALSE(config.use_tag_derived_place_pose);
   EXPECT_EQ(config.table_tag_frame, "tag9");
@@ -75,6 +77,22 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_DOUBLE_EQ(config.posture_zmq_publish_rate_hz, 50.0);
   EXPECT_EQ(config.leg_state_topic, "/aima/hal/joint/leg/state");
   EXPECT_EQ(config.waist_state_topic, "/aima/hal/joint/waist/state");
+}
+
+TEST_F(PickPlaceConfigTest, RejectsInvalidCartesianGeometryParameters)
+{
+  int index = 0;
+  for (const std::string name : {"cartesian_step", "cartesian_path_position_tolerance",
+      "cartesian_path_orientation_tolerance"})
+  {
+    for (const double value : {0.0, -0.01, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()})
+    {
+      const auto test_node = node("cartesian_invalid_" + std::to_string(index++));
+      test_node->declare_parameter<double>(name, value);
+      EXPECT_THROW(loadPickPlaceConfig(test_node), std::runtime_error) << name;
+    }
+  }
 }
 
 TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)

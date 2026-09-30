@@ -34,6 +34,10 @@ pick_place_server:
     contact_height_offset: 0.0
     lift_height: 0.08
     cartesian_step: 0.01
+    # Geometric path deviation for pose_to_pose approach, pick lift, descent,
+    # and retreat; independent of measured execution/attachment tolerances.
+    cartesian_path_position_tolerance: 0.02  # m
+    cartesian_path_orientation_tolerance: 0.0872664626  # 5 degrees
     maximum_box_pose_age: 2.5
     # Shared cancellable wait for fresh box/table detections before motion.
     tag_reacquisition_timeout: 10.0

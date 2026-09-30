@@ -40,6 +40,8 @@ struct PickPlaceConfig
   double contact_height_offset{0.0};
   double lift_height{0.0};
   double cartesian_step{0.0};
+  double cartesian_path_position_tolerance{0.02};
+  double cartesian_path_orientation_tolerance{0.0872664626};
   double max_pose_age{0.0};
   double ik_timeout{0.0};
   double grasp_position_tolerance{0.0};

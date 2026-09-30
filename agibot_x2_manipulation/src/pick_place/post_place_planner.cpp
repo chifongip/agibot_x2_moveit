@@ -1,4 +1,5 @@
 #include "pick_place/post_place_planner.hpp"
+#include "pick_place/cartesian_motion.hpp"
 #include "pick_place/planning_scene_manager.hpp"
 #include "pick_place/endpoint_reached.hpp"
 #include <geometric_shapes/shapes.h>
@@ -161,7 +162,8 @@ bool validateTimedReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
   std::string & error, const CancelFunction & interrupted, bool enforce_bounds,
-  double minimum_joint_margin)
+  double minimum_joint_margin,
+  const std::function<bool (const moveit::core::RobotState &, std::string &)> & path_valid)
 {
   if (!std::isfinite(joint_step) || joint_step <= 0.0 || trajectory.empty() ||
     !trajectory.getGroup())
@@ -184,6 +186,7 @@ bool validateTimedReturnTrajectory(
     error = "return trajectory start invalid: " + error;
     return false;
   }
+  if (path_valid && !path_valid(first, error)) {return false;}
   moveit_msgs::msg::RobotTrajectory message;
   trajectory.getRobotTrajectoryMsg(message);
   const auto & joints = message.joint_trajectory;
@@ -276,6 +279,7 @@ bool validateTimedReturnTrajectory(
           " sample " + std::to_string(sample) + "/" + std::to_string(steps) + ": " + error;
         return false;
       }
+      if (path_valid && !path_valid(state, error)) {return false;}
     }
   }
   return true;
@@ -889,12 +893,23 @@ bool PostPlacePlanner::plan(
     moveit::core::RobotState retreat_end(start);
     PostPlacePlan candidate;
     if (include_retreat) {
-      if (!endpoint(start, retreat_target, strict, attempt, retreat_end, interrupted)) {
-        continue;
-      }
       PostPlaceSegment retreat;
-      if (!segment(start, retreat_end, release, "retreat", deadline, retreat, error, canceled, allow_no_motion)) {
-        continue;
+      if (direct_pose_to_pose) {
+        retreat.name = "retreat";
+        const bool planned = planCartesianMotion(start, retreat_target, release, config_,
+          retreat.trajectory, retreat_end, error, canceled, deadline);
+        if (trace_.enabled()) {
+          trace_.write(node_->now().nanoseconds(), "cartesian_segment", planned, error,
+            {{"segment", "retreat"}});
+        }
+        if (!planned) {continue;}
+        if (!validState(retreat_end, strict, retreat_end.getJointModelGroup(config_.planning_group), error)) {
+          continue;
+        }
+      } else {
+        if (!endpoint(start, retreat_target, strict, attempt, retreat_end, interrupted) ||
+          !segment(start, retreat_end, release, "retreat", deadline, retreat, error, canceled, allow_no_motion))
+        {continue;}
       }
       retreat.retreat = true;
       candidate.segments.push_back(std::move(retreat));
@@ -1043,6 +1058,20 @@ bool PostPlacePlanner::validateSegment(
     return false;
   }
   if (segment.retreat) {
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+      const auto & first = trajectory.getFirstWayPoint();
+      const auto & last = trajectory.getLastWayPoint();
+      const HandPosePair from{first.getGlobalLinkTransform(config_.left_tcp),
+        first.getGlobalLinkTransform(config_.right_tcp)};
+      const HandPosePair to{last.getGlobalLinkTransform(config_.left_tcp),
+        last.getGlobalLinkTransform(config_.right_tcp)};
+      const HandPosePair measured{current.getGlobalLinkTransform(config_.left_tcp),
+        current.getGlobalLinkTransform(config_.right_tcp)};
+      if (!validateCartesianState(measured, from, to, config_.cartesian_path_position_tolerance,
+          config_.cartesian_path_orientation_tolerance, error) ||
+        !validateCartesianTrajectory(trajectory, validation_scene, config_, from, to,
+          error, canceled)) {return false;}
+    }
     moveit::core::RobotState retreat_end(trajectory.getLastWayPoint());
     if (!validState(retreat_end, contactScene(scene, false), trajectory.getGroup(), error)) {
       error = "retreat endpoint has not cleared the placed box: " + error;

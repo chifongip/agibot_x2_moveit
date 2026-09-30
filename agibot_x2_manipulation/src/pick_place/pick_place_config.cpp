@@ -93,6 +93,17 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.contact_height_offset = parameter<double>(node, "contact_height_offset", 0.0);
   config.lift_height = parameter<double>(node, "lift_height", 0.05);
   config.cartesian_step = parameter<double>(node, "cartesian_step", 0.01);
+  config.cartesian_path_position_tolerance = parameter<double>(
+    node, "cartesian_path_position_tolerance", 0.02);
+  config.cartesian_path_orientation_tolerance = parameter<double>(
+    node, "cartesian_path_orientation_tolerance", 0.0872664626);
+  for (const double value : {config.cartesian_step, config.cartesian_path_position_tolerance,
+      config.cartesian_path_orientation_tolerance})
+  {
+    if (!std::isfinite(value) || value <= 0.0) {
+      throw std::runtime_error("Cartesian step and path tolerances must be finite and positive");
+    }
+  }
   config.max_pose_age = parameter<double>(node, "maximum_box_pose_age", 0.50);
   config.ik_timeout = parameter<double>(node, "ik_timeout", 0.05);
   config.grasp_position_tolerance = parameter<double>(node, "grasp_position_tolerance", 0.015);
