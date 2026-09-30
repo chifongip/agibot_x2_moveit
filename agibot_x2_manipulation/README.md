@@ -288,12 +288,18 @@ true` pick/place after a successful reload before enabling execution.
 
 ## Recording the state before Pick/Place
 
-Keep the robot and objects stationary and run this **before sending the action**:
+Keep the robot and objects stationary until recording succeeds, then send the
+action. On the robot in ROS domain 20, record **before Pick** with:
 
 ```bash
-ros2 run agibot_x2_manipulation capture_task_snapshot \
-  --output /tmp/before_pick.yaml
+ROS_DOMAIN_ID=20 ros2 run agibot_x2_manipulation capture_task_snapshot \
+  --output /home/agi/workspace/x2_ws/capture_task_snapshot/small_carton_pick_v2.yaml \
+  --task-kind pick
 ```
+
+Use a new output filename for each capture; existing files are never overwritten.
+`pick` checks that the manipulation state is `EMPTY`. A `scene` capture can also
+start a complete simulated Pick-to-Place sequence, but skips this state check.
 
 The recorder exits successfully only after it receives all 31 finite X2 joint
 positions, a fresh localized `tag:0` object pose, and `base_link -> tag0` and
@@ -308,22 +314,51 @@ ignores action status, and refuses to overwrite existing files. Ctrl-C cancels
 without saving. Joint and object stamps must be within `--max-age` (default
 1 second) of the recorder's ROS clock; use matching `use_sim_time` settings.
 
-For a pickup-only scene without a table tag, pass `--tag-id 0`. Repeat `--tag-id`
-for every tag needed by the scene. Use `--object-id tag:180` and `--tag-id 180`
-for a different target; include `--tag-id 9` when using tag-based placement.
+The output filename does not select the object. The recorder defaults to
+`--object-id tag:0` (small carton) and requires tags 0 and 9. For another object,
+set `--object-id` to its `/box_states` instance ID and repeat `--tag-id` for its
+box tag and the table tag. Supplying `--tag-id` replaces the default tag list.
+The current profiles map `small_carton` to tag 0 and `grey_box` to tag 180;
+tag 9 is the table reference.
+
+For example, record **before picking the grey box** with:
+
+```bash
+ROS_DOMAIN_ID=20 ros2 run agibot_x2_manipulation capture_task_snapshot \
+  --output /home/agi/workspace/x2_ws/capture_task_snapshot/grey_box_pick.yaml \
+  --task-kind pick \
+  --object-id tag:180 \
+  --tag-id 180 --tag-id 9
+```
+
+Use the same `--object-id tag:180 --tag-id 180 --tag-id 9` options for grey-box
+`scene` or `place` captures. Place also requires `--manipulation-state-file`, as
+shown below. For a pickup-only scene without a table tag, require only the box
+tag: `--tag-id 0` for the small carton or `--tag-id 180` for the grey box.
 Topic names, planning frame, tag-frame prefix, timeout, and maximum age have CLI
 options. `--robot-pose-parent-frame odom` additionally records the robot base
 transform. The saved YAML includes joint positions, localized object poses and
 profile IDs, full tag quaternions, detection metadata, and timestamps.
 
-For a complete Place starting state, first inspect the server's recovery-file
-path with `ros2 param get /pick_place_server state_file`, then record:
+For a complete Place starting state, keep the robot holding the box and inspect
+the server's recovery-file path in the same ROS domain:
 
 ```bash
-ros2 run agibot_x2_manipulation capture_task_snapshot \
-  --output /tmp/before_place.yaml --task-kind place \
-  --manipulation-state-file /actual/path/reported/by/the/server
+ROS_DOMAIN_ID=20 ros2 param get /pick_place_server state_file
 ```
+
+The robot reports `/home/agi/.ros/agibot_x2_manipulation_state`. Record
+**before Place** with:
+
+```bash
+ROS_DOMAIN_ID=20 ros2 run agibot_x2_manipulation capture_task_snapshot \
+  --output /home/agi/workspace/x2_ws/capture_task_snapshot/small_carton_place_v2.yaml \
+  --task-kind place \
+  --manipulation-state-file /home/agi/.ros/agibot_x2_manipulation_state
+```
+
+If the parameter query reports a different path, use that returned path. Adjust
+the domain and workspace paths for other deployments.
 
 Place recording requires the latched manipulation state to be `HOLDING` and a
 complete VERSION 4 recovery record matching the box instance and profile. It
@@ -337,7 +372,9 @@ Replay in a separate ROS domain from the robot and other running stacks:
 
 ```bash
 ROS_DOMAIN_ID=96 ros2 launch agibot_x2_manipulation \
-  recorded_task_snapshot.launch.py snapshot:=/tmp/before_pick.yaml use_rviz:=false
+  recorded_task_snapshot.launch.py \
+  snapshot:=/home/agi/workspace/x2_ws/capture_task_snapshot/small_carton_pick_v2.yaml \
+  use_rviz:=false
 ```
 
 This starts fake HAL joint feedback from the capture, holds the measured arm
