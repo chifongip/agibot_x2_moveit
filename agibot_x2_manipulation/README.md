@@ -316,6 +316,23 @@ options. `--robot-pose-parent-frame odom` additionally records the robot base
 transform. The saved YAML includes joint positions, localized object poses and
 profile IDs, full tag quaternions, detection metadata, and timestamps.
 
+For a complete Place starting state, first inspect the server's recovery-file
+path with `ros2 param get /pick_place_server state_file`, then record:
+
+```bash
+ros2 run agibot_x2_manipulation capture_task_snapshot \
+  --output /tmp/before_place.yaml --task-kind place \
+  --manipulation-state-file /actual/path/reported/by/the/server
+```
+
+Place recording requires the latched manipulation state to be `HOLDING` and a
+complete VERSION 4 recovery record matching the box instance and profile. It
+saves the held pose, both box-to-TCP contact transforms, carry targets, and box
+identity verbatim. Missing/mismatched records prevent capture. `--task-kind pick`
+also checks that manipulation state is `EMPTY`. The default `scene` mode remains
+compatible with earlier commands and records the manipulation state when
+available, but does not promise a complete Place starting state.
+
 Replay in a separate ROS domain from the robot and other running stacks:
 
 ```bash
@@ -325,7 +342,9 @@ ROS_DOMAIN_ID=96 ros2 launch agibot_x2_manipulation \
 
 This starts fake HAL joint feedback from the capture, holds the measured arm
 configuration during controller startup, and republishes the saved
-tag transforms/detections with current timestamps. The localizer reconstructs
+tag transforms/detections with current timestamps. Detections are published on
+both `/detections` and the configured table detector topic so the table tracker
+can reconstruct its stable pose and collision geometry. The localizer reconstructs
 objects using the current box profiles. The replay disables posture control and
 defaults to `allow_execution:=false`; send actions with `plan_only: true`. For a
 capture containing only pickup tags, add `disable_table_collision:=true`.
@@ -333,9 +352,24 @@ Default ZMQ ports are the same as the existing recorded replay (8559); if that
 port is in use, set both `zmq_endpoint` and `fake_zmq_endpoint` to a free local
 port. Run the replay on an offline host.
 
+For a new Place capture, the launch copies its saved recovery record into a
+fresh replay-only file. Once the server is ready, restore the simulated attached
+box through the existing recovery service in the **same offline domain**:
+
+```bash
+ROS_DOMAIN_ID=96 ros2 service call /recover_manipulation_state \
+  agibot_x2_manipulation_msgs/srv/RecoverManipulationState "{requested_state: 1}"
+```
+
+Proceed with a plan-only Place only after this service reports success. Recovery
+checks measured TCP consistency before restoring the attached collision object
+and `HOLDING` state. Existing captures without grasp geometry can still replay
+joints and tag poses, but must be recaptured with `--task-kind place` to restore a
+Place session. A filename containing `place` is not sufficient to infer holding.
+
 The snapshot reproduces a stationary robot configuration and tag-based scene,
-not sensor streams, arbitrary collision objects, attached-object/recovery state,
-or the action goal. Reuse the same task goal, robot description, box profiles,
+plus the held-object recovery record when explicitly requested. It does not
+save sensor streams, arbitrary collision objects, or the action goal. Reuse the same task goal, robot description, box profiles,
 and manipulation/MoveIt configuration when comparing tests. The optional
 world-to-base transform is saved for inspection; this local planning replay
 uses `base_link` and does not restore navigation/world localization. Captures

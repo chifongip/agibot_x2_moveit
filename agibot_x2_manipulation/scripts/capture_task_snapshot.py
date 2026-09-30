@@ -6,13 +6,15 @@ from collections import deque
 import math
 from pathlib import Path
 import sys
+import shlex
 import time
 
 from apriltag_msgs.msg import AprilTagDetection, AprilTagDetectionArray
 from geometry_msgs.msg import TransformStamped
+from agibot_x2_manipulation_msgs.msg import ManipulationState
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy
 from rclpy.time import Time
 from rclpy.utilities import remove_ros_args
 from tf2_ros import TransformBroadcaster, TransformException
@@ -40,6 +42,11 @@ def parse_arguments(argv):
     mode.add_argument("--output", help="New snapshot YAML path; never overwritten.")
     mode.add_argument("--replay", help="Publish saved tag poses for offline simulation.")
     parser.add_argument("--tag-id", action="append", type=int)
+    parser.add_argument("--task-kind", choices=("scene", "pick", "place"), default="scene",
+                        help="Place requires HOLDING state and persisted grasp geometry.")
+    parser.add_argument("--manipulation-state-file", default="",
+                        help="Server state_file path; required for a Place capture.")
+    parser.add_argument("--manipulation-state-topic", default="/manipulation_state")
     parser.add_argument("--object-id", default="tag:0")
     parser.add_argument("--joint-state-topic", default="/joint_states")
     parser.add_argument("--box-states-topic", default="/box_states")
@@ -58,6 +65,8 @@ def parse_arguments(argv):
     for name in ("timeout", "max_age"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be finite and positive")
+    if args.task_kind == "place" and not args.manipulation_state_file and not args.replay:
+        parser.error("--task-kind place requires --manipulation-state-file")
     args.capture_once = False
     args.action_status_topic = []
     args.waiting_message = "Waiting for complete pre-task robot/object state"
@@ -114,9 +123,45 @@ def valid_pose(position, rotation):
     ) > 1e-12
 
 
+def validate_holding_record(text, object_id, profile_id):
+    """Validate the server's VERSION 4 grasp record without changing it."""
+    tokens = shlex.split(text)
+    if tokens[:4] != ["VERSION", "4", "STATE", "HOLDING"]:
+        raise ValueError("Place requires a VERSION 4 HOLDING state file")
+    cursor = 4
+    for label in ("POSE", "LEFT_CONTACT", "RIGHT_CONTACT", "CARRY_A", "CARRY_B"):
+        if cursor >= len(tokens) or tokens[cursor] != label:
+            raise ValueError(f"missing {label} in held-object geometry")
+        cursor += 1
+        if label.startswith("CARRY_"):
+            if cursor >= len(tokens) or tokens[cursor] not in ("0", "1"):
+                raise ValueError(f"invalid {label} validity flag")
+            enabled = tokens[cursor] == "1"
+            cursor += 1
+            if not enabled:
+                continue
+        values = [float(value) for value in tokens[cursor:cursor + 7]]
+        if len(values) != 7 or not all(math.isfinite(value) for value in values):
+            raise ValueError(f"invalid {label} transform")
+        if sum(value * value for value in values[3:]) < 1e-12:
+            raise ValueError(f"invalid {label} quaternion")
+        cursor += 7
+    if tokens[cursor:] != ["INSTANCE_ID", object_id, "PROFILE_ID", profile_id]:
+        raise ValueError("held-object instance/profile does not match the captured target")
+    return text
+
+
 class TaskSnapshotRecorder(FailureSnapshotRecorder):
     def __init__(self, args):
         super().__init__(args)
+        self.task_kind = args.task_kind
+        self.manipulation_state_path = args.manipulation_state_file
+        self.latest_manipulation_state = None
+        self.state_subscription = self.create_subscription(
+            ManipulationState, args.manipulation_state_topic,
+            self.on_manipulation_state,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         self.joint_samples = deque(maxlen=200)
         self.required_tags = set(args.tag_id)
         self.object_id = args.object_id
@@ -130,6 +175,9 @@ class TaskSnapshotRecorder(FailureSnapshotRecorder):
             "Keep the robot and objects stationary. Start Pick/Place only after "
             "this command exits successfully."
         )
+
+    def on_manipulation_state(self, message):
+        self.latest_manipulation_state = message
 
     def on_joint_state(self, message):
         self.joint_samples.append(message)
@@ -163,6 +211,13 @@ class TaskSnapshotRecorder(FailureSnapshotRecorder):
             tag for tag in capture["tags"] if tag["tag_id"] in self.required_tags
         ]
         capture["capture"]["object_id"] = self.object_id
+        capture["capture"]["task_kind"] = self.task_kind
+        capture["schema_version"] = 2
+        if self.latest_manipulation_state is not None:
+            capture["manipulation"] = {
+                "state": int(self.latest_manipulation_state.state),
+                "detail": self.latest_manipulation_state.detail,
+            }
         return capture
 
     def try_capture(self):
@@ -182,6 +237,22 @@ class TaskSnapshotRecorder(FailureSnapshotRecorder):
                 capture, self.required_tags, self.object_id,
                 now_ros, self.max_age,
             )
+            if self.waiting_for is None:
+                state = capture.get("manipulation", {}).get("state")
+                if self.task_kind == "pick" and state != ManipulationState.EMPTY:
+                    self.waiting_for = "waiting for manipulation state EMPTY before Pick"
+                elif self.task_kind == "place" and state != ManipulationState.HOLDING:
+                    self.waiting_for = "waiting for manipulation state HOLDING before Place"
+                elif self.task_kind == "place":
+                    try:
+                        box = next(box for box in capture["visible_box_states"]
+                                   if box["instance_id"] == self.object_id)
+                        text = Path(self.manipulation_state_path).expanduser().read_text()
+                        capture["manipulation"]["persisted_record"] = validate_holding_record(
+                            text, self.object_id, box["profile_id"]
+                        )
+                    except (OSError, ValueError) as error:
+                        self.waiting_for = f"waiting for complete held-object geometry: {error}"
             if self.waiting_for is None:
                 self.output_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
@@ -203,7 +274,7 @@ class TaskSnapshotRecorder(FailureSnapshotRecorder):
 class SnapshotTagReplay(Node):
     """Republish frozen transforms/detections using current simulation time."""
 
-    def __init__(self, path):
+    def __init__(self, path, detection_topics=None):
         super().__init__("snapshot_tag_replay")
         with Path(path).expanduser().open(encoding="utf-8") as stream:
             snapshot = yaml.safe_load(stream)
@@ -211,9 +282,9 @@ class SnapshotTagReplay(Node):
         if not self.tags or any("transform" not in tag["pose"] for tag in self.tags):
             raise ValueError("snapshot must contain valid tag transforms")
         self.planning_frame = snapshot["robot"]["planning_frame"]
-        self.publisher = self.create_publisher(
-            AprilTagDetectionArray, "/detections", qos_profile_sensor_data
-        )
+        self.detection_publishers = [self.create_publisher(
+            AprilTagDetectionArray, topic, qos_profile_sensor_data
+        ) for topic in dict.fromkeys(detection_topics or ["/detections"])]
         self.broadcaster = TransformBroadcaster(self)
         self.timer = self.create_timer(1.0 / 30.0, self.publish)
 
@@ -242,7 +313,8 @@ class SnapshotTagReplay(Node):
             detection.decision_margin = 100.0
             detections.detections.append(detection)
         self.broadcaster.sendTransform(transforms)
-        self.publisher.publish(detections)
+        for publisher in self.detection_publishers:
+            publisher.publish(detections)
 
 
 def main(argv=None):
@@ -253,7 +325,7 @@ def main(argv=None):
     result = 0
     try:
         if args.replay:
-            node = SnapshotTagReplay(args.replay)
+            node = SnapshotTagReplay(args.replay, args.detections_topic)
             rclpy.spin(node)
         else:
             node = TaskSnapshotRecorder(args)

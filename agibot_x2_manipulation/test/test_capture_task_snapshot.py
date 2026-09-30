@@ -93,7 +93,7 @@ def test_replay_preserves_all_quaternion_components():
     stamp.sec = 50
     replay.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: stamp))
     replay.broadcaster = SimpleNamespace(sendTransform=transforms.extend)
-    replay.publisher = SimpleNamespace(publish=detections.append)
+    replay.detection_publishers = [SimpleNamespace(publish=detections.append)]
     replay.publish()
     assert transforms[0].header.stamp.sec == 50
     rotation = transforms[0].transform.rotation
@@ -163,3 +163,59 @@ def test_delayed_camera_tf_falls_back_to_latest_pose():
     assert result["lookup_mode"] == "latest_available"
     assert result["transform"]["rotation"]["w"] == 1.0
     assert "extrapolation" in result["joint_time_lookup_error"]
+
+
+def holding_record():
+    return ("VERSION 4\nSTATE HOLDING\n"
+            "POSE 0.35 0 0.25 0 0 0 1\n"
+            "LEFT_CONTACT 0 0.175 0 0 0 0 1\n"
+            "RIGHT_CONTACT 0 -0.175 0 0 0 0 1\n"
+            "CARRY_A 1 0.35 0 0.25 0 0 0 1\n"
+            "CARRY_B 0\nINSTANCE_ID \"tag:0\"\nPROFILE_ID \"small_carton\"\n")
+
+
+def test_holding_record_preserves_grasp_geometry():
+    text = holding_record()
+    assert MODULE.validate_holding_record(text, "tag:0", "small_carton") == text
+
+
+@pytest.mark.parametrize("text", [
+    holding_record().replace("STATE HOLDING", "STATE EMPTY"),
+    holding_record().replace("LEFT_CONTACT", "MISSING_CONTACT"),
+    holding_record().replace("0 -0.175 0", "nan -0.175 0"),
+    holding_record().replace('"small_carton"', '"grey_box"'),
+    holding_record().replace("0 0 0 1", "0 0 0 0"),
+])
+def test_rejects_incomplete_or_mismatched_held_object(text):
+    with pytest.raises(ValueError):
+        MODULE.validate_holding_record(text, "tag:0", "small_carton")
+
+
+def test_place_recording_requires_a_state_file():
+    with pytest.raises(SystemExit):
+        MODULE.parse_arguments(["capture_task_snapshot", "--output", "/tmp/place.yaml",
+                                "--task-kind", "place"])
+
+
+def test_replay_seeds_only_new_state_files(tmp_path, monkeypatch):
+    from launch import LaunchContext
+
+    path = SCRIPTS.parent / "launch" / "recorded_task_snapshot.launch.py"
+    spec = importlib.util.spec_from_file_location("held_task_launch", path)
+    launch_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launch_module)
+    snapshot_path = tmp_path / "place.yaml"
+    state_path = tmp_path / "offline_state"
+    import yaml
+    snapshot_path.write_text(yaml.safe_dump({
+        "capture": {"task_kind": "place"},
+        "manipulation": {"state": 2, "persisted_record": holding_record()},
+    }))
+    monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path))
+    context = LaunchContext()
+    context.launch_configurations.update(snapshot=str(snapshot_path),
+                                         manipulation_state_file=str(state_path))
+    launch_module.prepare_manipulation_state(context)
+    assert state_path.read_text() == holding_record()
+    with pytest.raises(FileExistsError):
+        launch_module.prepare_manipulation_state(context)
