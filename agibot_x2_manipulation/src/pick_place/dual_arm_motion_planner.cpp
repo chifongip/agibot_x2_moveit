@@ -1545,8 +1545,15 @@ public:
     bool validated_single_segment = false;
     planning_scene::PlanningScenePtr route_scene;
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
-    trajectory.addSuffixWayPoint(start, 0.0);
     moveit::core::RobotState state(start);
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+      !normalizePlanningStart(state, state.getJointModelGroup(move_group_.getName()),
+        config_.place_start_state_bounds_tolerance))
+    {
+      error = "route start exceeds configured position bounds tolerance";
+      return false;
+    }
+    trajectory.addSuffixWayPoint(state, 0.0);
     Eigen::Isometry3d lift = pick_pose;
     lift.translation().z() += config_.lift_height;
     std::vector<ClosedChainWaypoint> controls{{pick_pose, false, "pick_lift"}};
@@ -1671,8 +1678,15 @@ public:
     bool validated_single_segment = false;
     planning_scene::PlanningScenePtr route_scene;
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
-    trajectory.addSuffixWayPoint(start, 0.0);
     moveit::core::RobotState state(start);
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+      !normalizePlanningStart(state, state.getJointModelGroup(move_group_.getName()),
+        config_.place_start_state_bounds_tolerance))
+    {
+      error = "route start exceeds configured position bounds tolerance";
+      return false;
+    }
+    trajectory.addSuffixWayPoint(state, 0.0);
     const auto controls = makeCarryTransitionWaypoints(
       from_pose, target_pose, config_.lift_height, config_.carry_search_y_range, route);
     const std::string route_name = std::string("carry_transition_") + carryRouteName(route);
@@ -2086,8 +2100,15 @@ public:
     bool validated_single_segment = false;
     planning_scene::PlanningScenePtr route_scene;
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
-    trajectory.addSuffixWayPoint(start, 0.0);
     moveit::core::RobotState state(start);
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+      !normalizePlanningStart(state, state.getJointModelGroup(move_group_.getName()),
+        config_.place_start_state_bounds_tolerance))
+    {
+      error = "route start exceeds configured position bounds tolerance";
+      return false;
+    }
+    trajectory.addSuffixWayPoint(state, 0.0);
     const auto controls = makePlaceRouteWaypoints(
       held_pose, place_pose, config_.lift_height, config_.carry_search_y_range, from_pick, route);
 

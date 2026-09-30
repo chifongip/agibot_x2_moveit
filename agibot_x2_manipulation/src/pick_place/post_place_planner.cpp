@@ -480,8 +480,10 @@ bool tryDirectJointTrajectory(
 {
   if (!scene || interrupted()) {error = "direct joint route unavailable or interrupted"; return false;}
   const auto * group = start.getJointModelGroup(config.planning_group);
+  moveit::core::RobotState reference(start), endpoint(target);
   if (!group || target.getRobotModel() != start.getRobotModel() ||
-    !start.satisfiesBounds(group) || !target.satisfiesBounds(group))
+    !normalizePlanningStart(reference, group, config.place_start_state_bounds_tolerance) ||
+    !target.satisfiesBounds(group))
   {
     error = "direct joint route model or bounds mismatch";
     return false;
@@ -494,7 +496,6 @@ bool tryDirectJointTrajectory(
       return false;
     }
   }
-  moveit::core::RobotState reference(start), endpoint(target);
   if (!copySceneAttachments(reference, scene->getCurrentState()) ||
     !copySceneAttachments(endpoint, scene->getCurrentState()))
   {
@@ -532,7 +533,7 @@ bool tryDirectJointTrajectory(
   }
   if (!validateTimedReturnTrajectory(trajectory, scene, config.return_validation_joint_step,
       error, interrupted, true, minimum_joint_margin)) {return false;}
-  if (interrupted() || !jointEndpointReached(trajectory.getFirstWayPoint(), start, group, 1e-6) ||
+  if (interrupted() || !jointEndpointReached(trajectory.getFirstWayPoint(), reference, group, 1e-6) ||
     !jointEndpointReached(trajectory.getLastWayPoint(), target, group, 1e-6))
   {
     error = "direct joint route endpoint changed or interrupted";
@@ -1027,8 +1028,9 @@ bool PostPlacePlanner::validateSegment(
     return false;
   }
   if (segment.no_motion &&
-    (!current.satisfiesBounds(trajectory.getGroup()) ||
-    !jointEndpointReached(current, trajectory.getLastWayPoint(), trajectory.getGroup(), 1e-6)))
+    (!current.satisfiesBounds(trajectory.getGroup(), config_.place_start_state_bounds_tolerance) ||
+    !jointEndpointReached(current, trajectory.getLastWayPoint(), trajectory.getGroup(),
+      config_.execution_joint_tolerance)))
   {
     error = "measured state moved since no-motion return planning";
     return false;

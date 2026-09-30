@@ -717,6 +717,22 @@ routes are retimed and fully checked together; a single segment retains its
 already validated timing and derivatives. Searches remain serial and create no
 additional planner workers or sampling threads.
 
+Pose-to-pose carry/place routes accept measured starts within
+`place_start_state_bounds_tolerance` (0.02 rad in the hardware configuration).
+They normalize a planning copy into the model limits before generating and
+validating trajectories, following MoveIt's start-state correction behavior.
+Original feedback remains unchanged and execution-start matching still uses
+`execution_joint_tolerance`. Starts beyond the configured allowance are rejected;
+planned endpoints and controller splines remain subject to model joint limits
+and collision checks. No-motion return checkpoints also use
+`execution_joint_tolerance` for fresh feedback, rather than requiring microradian
+agreement. No joint limits, calibration transforms, or YAML tolerances changed
+from `6955ed9`.
+
+The small numerical tolerances below compare calculated states to decide whether
+to skip planning or reuse a cache entry. They are not hardware tracking
+requirements; a mismatch causes planning or cache rejection followed by planning.
+
 The shared pose-to-pose object-route planner skips intermediate waypoints already
 reached by both TCPs (within 0.0001 m and 0.001 rad), or matching validated joint
 targets within 0.000001 rad/m. The actual state must still

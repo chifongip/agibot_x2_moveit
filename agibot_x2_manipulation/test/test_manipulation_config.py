@@ -436,7 +436,7 @@ def test_tag9_derives_the_default_table_place_pose():
     assert config["maximum_table_tag_pose_age"] > 0.0
     assert config["table_tag_detections_topic"] == "/front_center_rectify/detections"
     assert config["table_tag_id"] == 9
-    assert config["table_tag_stable_sample_count"] == 3
+    assert config["table_tag_stable_sample_count"] == 2
     assert config["table_tag_maximum_position_spread"] == 0.005
     assert config["table_tag_maximum_angular_spread"] == 0.0523598776
     assert config["table_tag_maximum_sample_gap"] == 2.5
@@ -601,8 +601,8 @@ def test_coordinated_grasp_search_has_conservative_limits():
     assert config["closed_chain_validation_orientation_step"] <= 0.017454
     assert config["closed_chain_contact_position_error"] <= 0.1
     assert config["closed_chain_contact_orientation_error"] <= 0.174534
-    assert config["carry_search_timeout"] == 80.0
-    assert config["maximum_carry_candidates"] == 270
+    assert config["carry_search_timeout"] == 8.0
+    assert config["maximum_carry_candidates"] == 96
     assert config["carry_search_z_lower"] >= 0.02
     assert config["carry_search_z_upper"] <= 0.05
     assert config["carry_search_x_range"] <= 0.05

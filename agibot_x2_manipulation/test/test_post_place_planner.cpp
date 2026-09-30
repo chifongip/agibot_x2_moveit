@@ -117,6 +117,40 @@ TEST(PostPlacePlanner, DirectJointRouteChecksSplineAndHeldGeometryWithoutChangin
   EXPECT_EQ(output.joint_trajectory.points, saved.joint_trajectory.points);
 }
 
+TEST(PostPlacePlanner, DirectRouteAcceptsMeasuredLimitDiscrepancyAndBoundsPlanningCopy)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  PickPlaceConfig config;
+  config.planning_group = "arm";
+  config.place_start_state_bounds_tolerance = 0.02;
+  config.return_path_tolerance = 0.01;
+  config.return_validation_joint_step = 0.01;
+  config.velocity_scaling = config.acceleration_scaling = 0.5;
+  moveit::core::RobotState measured(robot), target(robot);
+  measured.setToDefaultValues();
+  measured.setVariablePosition("slide", 1.01);
+  measured.update();
+  target = measured;
+  target.setVariablePosition("slide", 0.8);
+  target.update();
+  moveit_msgs::msg::RobotTrajectory output;
+  std::string error;
+  ASSERT_TRUE(tryDirectJointTrajectory(measured, target, scene, config, 0.0, output, error,
+      []() {return false;})) << error;
+  EXPECT_DOUBLE_EQ(measured.getVariablePosition("slide"), 1.01);
+  EXPECT_NEAR(output.joint_trajectory.points.front().positions[0], 1.0, 1e-9);
+  const auto saved = output;
+  measured.setVariablePosition("slide", 1.03);
+  measured.update();
+  EXPECT_FALSE(tryDirectJointTrajectory(measured, target, scene, config, 0.0, output, error,
+      []() {return false;}));
+  EXPECT_EQ(output.joint_trajectory.points, saved.joint_trajectory.points);
+  measured.setVariablePosition("slide", std::numeric_limits<double>::quiet_NaN());
+  EXPECT_FALSE(tryDirectJointTrajectory(measured, target, scene, config, 0.0, output, error,
+      []() {return false;}));
+}
+
 TEST(PostPlacePlanner, PrefixCacheChecksAllVariablesTargetsAndBoundedStorage)
 {
   const auto robot = model();
@@ -631,7 +665,7 @@ TEST_F(ReturnSearchTest, AllowsWristContactDuringRetreatButRequiresClearEndpoint
   EXPECT_NE(error.find("retreat endpoint has not cleared"), std::string::npos);
 }
 
-TEST_F(ReturnSearchTest, NoMotionReturnKeepsCheckpointAndRejectsChangedFeedback)
+TEST_F(ReturnSearchTest, NoMotionReturnUsesExecutionToleranceAndChecksCollision)
 {
   const auto robot = model();
   auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
@@ -654,6 +688,14 @@ TEST_F(ReturnSearchTest, NoMotionReturnKeepsCheckpointAndRejectsChangedFeedback)
       []() {return false;}, true)) << error;
   auto moved = start;
   moved.setVariablePosition("slide", 0.2001);
+  moved.update();
+  EXPECT_TRUE(planner.validateSegment(output.segments.front(), moved, scene, error,
+      []() {return false;}, true)) << error;
+  moved.setVariablePosition("slide", 0.21);
+  moved.update();
+  EXPECT_TRUE(planner.validateSegment(output.segments.front(), moved, scene, error,
+      []() {return false;}, true)) << error;
+  moved.setVariablePosition("slide", 0.23);
   moved.update();
   EXPECT_FALSE(planner.validateSegment(output.segments.front(), moved, scene, error,
       []() {return false;}, true));

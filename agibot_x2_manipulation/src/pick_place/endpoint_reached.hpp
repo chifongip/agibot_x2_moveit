@@ -8,6 +8,23 @@
 namespace agibot_x2_manipulation
 {
 
+// Encoder feedback may be slightly outside model limits. Bound only the
+// planning copy, using the same allowance as held-state admission. Execution
+// still compares the trajectory start with the original measured feedback.
+inline bool normalizePlanningStart(
+  moveit::core::RobotState & state, const moveit::core::JointModelGroup * group,
+  double tolerance)
+{
+  if (!group || !std::isfinite(tolerance) || tolerance < 0.0) {return false;}
+  for (const auto & name : group->getVariableNames()) {
+    if (!std::isfinite(state.getVariablePosition(name))) {return false;}
+  }
+  if (!state.satisfiesBounds(group, tolerance)) {return false;}
+  state.enforceBounds(group);
+  state.update();
+  return true;
+}
+
 inline bool jointEndpointReached(
   const moveit::core::RobotState & actual, const moveit::core::RobotState & target,
   const moveit::core::JointModelGroup * group, double tolerance)
