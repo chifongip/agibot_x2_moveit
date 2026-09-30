@@ -156,9 +156,11 @@ install(PROGRAMS
   scripts/measure_execution_time.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME measure_execution_time)
+install(PROGRAMS scripts/time_saved_simulation.py
+  DESTINATION lib/${PROJECT_NAME} RENAME time_saved_simulation)
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
-install(FILES README.md DESTINATION share/${PROJECT_NAME})
+install(FILES README.md SIMULATION_TIMING.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -234,6 +236,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_capture_task_snapshot test/test_capture_task_snapshot.py)
   ament_add_pytest_test(test_capture_failure_snapshot test/test_capture_failure_snapshot.py)
   ament_add_pytest_test(test_verify_carry_pose test/test_verify_carry_pose.py)
+  ament_add_pytest_test(test_time_saved_simulation test/test_time_saved_simulation.py)
   ament_add_pytest_test(test_measure_execution_time test/test_measure_execution_time.py)
   ament_add_pytest_test(test_manipulation_config test/test_manipulation_config.py)
   add_launch_test(test/test_box_profile_reload.launch.py TIMEOUT 30)
