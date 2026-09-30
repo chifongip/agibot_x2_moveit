@@ -247,6 +247,7 @@ if(BUILD_TESTING)
   add_launch_test(test/test_place_continue.launch.py TIMEOUT 240)
   add_launch_test(test/test_continue_actions.launch.py TIMEOUT 420)
   add_launch_test(test/test_moved_box_retry.launch.py TIMEOUT 240)
+  add_launch_test(test/test_detection_snapshot.launch.py TIMEOUT 300)
   add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_pose_to_pose
     ARGS "mode:=pose_to_pose" TIMEOUT 180)
   add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_closed_chain

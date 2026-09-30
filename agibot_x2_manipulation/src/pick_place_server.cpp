@@ -495,6 +495,20 @@ private:
     return true;
   }
 
+  ScopeExit freezeDetectionScene()
+  {
+    detection_snapshot_active_ = true;
+    detection_scene_captured_ = false;
+    detection_table_pose_.reset();
+    detection_boxes_.clear();
+    return ScopeExit([this]() {
+      detection_snapshot_active_ = false;
+      detection_scene_captured_ = false;
+      detection_table_pose_.reset();
+      detection_boxes_.clear();
+    });
+  }
+
   bool reserveGoal()
   {
     return reset_coordinator_.reserveOperation();
@@ -768,22 +782,44 @@ private:
     std::vector<TrackedBoxPose> & visible_boxes, std::string & error,
     const CancelFunction & canceled)
   {
+    if (canceled()) {error = "detection scene refresh canceled"; return false;}
+    if (detection_snapshot_active_ && detection_scene_captured_) {
+      visible_boxes = detection_boxes_;
+      return true;
+    }
     DetectionSceneSnapshot observations;
     if (!collectFreshBoxes(target_instance_id, require_target, observations, visible_boxes,
         error, canceled) ||
-      !collectFreshTable(observations, error))
+      !collectFreshTable(observations, error, canceled))
     {
       return false;
     }
     const std::set<std::string> protected_ids =
       !clear_owned_boxes && !target_instance_id.empty() ?
       std::set<std::string>{config_.box_id} : std::set<std::string>{};
-    return planning_scene_.updateDetectionScene(observations, protected_ids, false, error);
+    if (!planning_scene_.updateDetectionScene(observations, protected_ids, false, error)) {
+      return false;
+    }
+    if (detection_snapshot_active_) {
+      detection_boxes_ = visible_boxes;
+      detection_scene_captured_ = true;
+      RCLCPP_INFO(node_->get_logger(), "Captured action detection scene; retaining box/table geometry");
+    }
+    return true;
   }
 
-  bool collectFreshTable(DetectionSceneSnapshot & observations, std::string & error)
+  bool collectFreshTable(DetectionSceneSnapshot & observations, std::string & error,
+    const CancelFunction & canceled = []() {return false;})
   {
     if (config_.table_collision_enabled && table_tag_pose_tracker_) {
+      if (detection_snapshot_active_) {
+        Eigen::Isometry3d tag_pose;
+        if (!waitForStableTableTagPose(tag_pose, error, canceled)) {return false;}
+        observations.table = SceneBox{config_.table_collision_id, config_.table_dimensions,
+          tablePoseFromVerticalTag(tag_pose, config_.table_dimensions,
+            config_.table_tag_to_tabletop_center)};
+        return true;
+      }
       geometry_msgs::msg::PoseStamped tag_pose;
       std::string observation_error;
       if (table_tag_pose_tracker_->waitForStablePose(
@@ -874,6 +910,9 @@ private:
       }
     }
     std::vector<TrackedBoxPose> refreshed;
+    // Confirmed movement starts a new box snapshot. Retain the action's table
+    // observation so routine detector jitter cannot move the collision table.
+    detection_scene_captured_ = false;
     if (!updateVisibleBoxScene(ignored_instance_id, false, false, refreshed, error, canceled)) {
       return false;
     }
@@ -896,7 +935,7 @@ private:
 
   bool resolvePlacePose(
     const geometry_msgs::msg::PoseStamped & requested, geometry_msgs::msg::PoseStamped & output,
-    std::string & error, const CancelFunction & canceled) const
+    std::string & error, const CancelFunction & canceled)
   {
     if (!requested.header.frame_id.empty()) {
       return box_pose_tracker_.transformGoalPose(requested, output, error);
@@ -938,8 +977,13 @@ private:
   }
 
   bool waitForStableTableTagPose(
-    Eigen::Isometry3d & output, std::string & error, const CancelFunction & canceled) const
+    Eigen::Isometry3d & output, std::string & error, const CancelFunction & canceled)
   {
+    if (canceled()) {error = "table observation canceled"; return false;}
+    if (detection_snapshot_active_ && detection_table_pose_) {
+      output = *detection_table_pose_;
+      return true;
+    }
     if (!table_tag_pose_tracker_) {
       error = "table-tag tracking is not configured";
       return false;
@@ -954,6 +998,7 @@ private:
     }
     try {
       output = toEigen(tag_pose.pose);
+      if (detection_snapshot_active_) {detection_table_pose_ = output;}
       return true;
     } catch (const std::exception & exception) {
       error = "stable table tag pose is invalid: " + std::string(exception.what());
@@ -1578,6 +1623,7 @@ private:
     uint8_t target, bool plan_only, const FeedbackFunction & feedback,
     const CancelFunction & canceled)
   {
+    auto detection_scope = freezeDetectionScene();
     if (canceled()) {
       return outcome(false, kSafetyAbort, "carry transition canceled before validation", held_pose_);
     }
@@ -1707,6 +1753,7 @@ private:
     bool plan_only, const std::string & instance_id, const FeedbackFunction & feedback,
     const CancelFunction & canceled)
   {
+    auto detection_scope = freezeDetectionScene();
     if (canceled()) {
       return outcome(false, kSafetyAbort, "pick canceled before validation");
     }
@@ -2173,37 +2220,6 @@ private:
     return false;
   }
 
-  bool refreshPostPlaceTable(
-    std::uint64_t & consumed_generation, const CancelFunction & canceled,
-    const FeedbackFunction & feedback, const std::string & phase,
-    const geometry_msgs::msg::PoseStamped & pose, std::string & error)
-  {
-    if (!config_.table_collision_enabled || !table_tag_pose_tracker_) {return true;}
-    geometry_msgs::msg::PoseStamped observation;
-    std::uint64_t generation = consumed_generation;
-    const double timeout = std::max(0.0, std::min(config_.tag_reacquisition_timeout,
-      std::chrono::duration<double>(phase_deadline_ - std::chrono::steady_clock::now()).count()));
-    if (!table_tag_pose_tracker_->waitForStablePoseAfter(consumed_generation, timeout,
-        canceled, observation, generation, error, [&]() {
-          RCLCPP_INFO(node_->get_logger(), "%s: waiting for updated table state", phase.c_str());
-          feedback("waiting_for_table/" + phase, 0.90F, pose);
-        }))
-    {
-      error = "waiting for updated table state: " + error;
-      return false;
-    }
-    // Consume even if scene application fails: a retry must acquire a new observation.
-    consumed_generation = generation;
-    try {
-      return planning_scene_.applyTable(tablePoseFromVerticalTag(toEigen(observation.pose),
-        config_.table_dimensions, config_.table_tag_to_tabletop_center), error) &&
-        planning_scene_.synchronize(error);
-    } catch (const std::exception & exception) {
-      error = "invalid fresh table observation: " + std::string(exception.what());
-      return false;
-    }
-  }
-
   bool validatePostPlaceSegment(
     const PostPlaceSegment & segment, const moveit::core::RobotState & current,
     const planning_scene::PlanningScenePtr & scene, std::string & error,
@@ -2286,6 +2302,7 @@ private:
     const geometry_msgs::msg::PoseStamped & requested_pose, bool plan_only,
     const FeedbackFunction & feedback, const CancelFunction & canceled)
   {
+    auto detection_scope = freezeDetectionScene();
     if (canceled()) {
       return outcome(false, kSafetyAbort, "place canceled before validation", held_pose_);
     }
@@ -2439,25 +2456,14 @@ private:
 
     held_pose_ = geometry_msgs::msg::PoseStamped();
     PostPlaceProgress progress(config_.prepare_named_target);
-    std::uint64_t table_generation = 0;
-    unsigned int last_pause_id = phase_controller_.snapshot().pause_id;
     while (!progress.complete()) {
       const std::string phase = postPlaceStageName(progress.stage());
       if (!runPhase(phase, false, feedback, 0.90F, place_message, canceled, error,
           [&](const CancelFunction & planning_canceled, std::string & failure) {
             progress.invalidate();
             if (!refreshMotionState(failure, planning_canceled, false)) {return false;}
-            const auto pause_id = phase_controller_.snapshot().pause_id;
-            if (pause_id != last_pause_id && table_tag_pose_tracker_) {
-              // This attempt starts after Continue acceptance, so requiring an
-              // observation newer than now also excludes pre-Continue detections.
-              table_generation = std::max(table_generation, table_tag_pose_tracker_->generation());
-              last_pause_id = pause_id;
-            }
             if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_,
-                failure, planning_canceled) ||
-              !refreshPostPlaceTable(table_generation, planning_canceled, feedback,
-                phase, place_message, failure)) {return false;}
+                failure, planning_canceled)) {return false;}
             current = move_group_.getCurrentState(config_.reset_state_timeout);
             if (!current) {failure = "measured post-place state unavailable"; return false;}
             const auto deadline = std::min(phase_deadline_, std::chrono::steady_clock::now() +
@@ -2517,6 +2523,7 @@ private:
     const std::string & instance_id, const geometry_msgs::msg::PoseStamped & requested_place,
     const CancelFunction & canceled)
   {
+    auto detection_scope = freezeDetectionScene();
     if (canceled()) {
       return outcome(false, kSafetyAbort, "PickPlace planning canceled before validation");
     }
@@ -2958,7 +2965,8 @@ private:
       } else if (goal->get_goal()->plan_only) {
         runPhase("planning_complete_path", true, feedback, 0.15F, place_pose, canceled, place_error,
           [&](const CancelFunction & planning_canceled, std::string & failure) {
-            task = planCompletePath(goal->get_goal()->instance_id, place_pose, planning_canceled);
+            task = planCompletePath(goal->get_goal()->instance_id,
+              goal->get_goal()->place_pose, planning_canceled);
             failure = task.message;
             return task.success;
           });
@@ -2982,7 +2990,7 @@ private:
               message->box_pose = pose;
               goal->publish_feedback(message);
             });
-          task = runPlace(place_pose, false, place_feedback, canceled);
+          task = runPlace(goal->get_goal()->place_pose, false, place_feedback, canceled);
         }
         if (!task.success && task.object_held) {
           task.message += "; object remains held";
@@ -3030,6 +3038,12 @@ private:
   std::optional<Eigen::Isometry3d> selected_carry_pose_a_;
   std::optional<Eigen::Isometry3d> selected_carry_pose_b_;
   std::vector<TrackedBoxPose> active_visible_boxes_;
+  // Accessed only by the reserved action worker. Trackers/markers remain live;
+  // accepted detections enter MoveIt once per action (or confirmed box movement).
+  bool detection_snapshot_active_{false};
+  bool detection_scene_captured_{false};
+  std::optional<Eigen::Isometry3d> detection_table_pose_;
+  std::vector<TrackedBoxPose> detection_boxes_;
   std::map<std::string, double> reset_target_values_;
   bool reset_physical_detach_done_{false};
   ResetCoordinator reset_coordinator_;

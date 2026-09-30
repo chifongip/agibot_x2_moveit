@@ -931,6 +931,19 @@ box profile so hardware calibration does not determine their feasibility.
 
 ### Waiting for tag detections
 
+Pick, Place, MoveCarryPose, and plan-only PickPlace accept an action-scoped
+box/table detection snapshot. Normal planning retries and Continue retain it:
+small detection fluctuations do not update collision geometry between motions.
+Place derives its tag-based target and collision table from the same accepted
+observation. Executed PickPlace captures a new snapshot for its Place portion;
+its initial target check does not freeze a tag-derived target before Pick.
+Detection tracking and table visualization remain live. A new action acquires
+fresh observations; cancellation and exceptions discard the local snapshot.
+The snapshot is expressed in `planning_frame`; keep the robot base/posture and
+physical table stationary during an action. After repositioning, cancel/restart
+the action to acquire a new snapshot. External planning-scene/OctoMap updates
+remain live and trajectory validation still checks the current MoveIt scene.
+
 When a visible box moves beyond the planned-snapshot tolerance, the server
 reacquires the same instances, updates the collision scene, and automatically
 retries planning against the refreshed snapshot. Pick updates its target and
@@ -947,8 +960,10 @@ state, and respond to cancellation/reset requests. All boxes in a planned
 snapshot share one deadline. The held box is excluded from visible-box checks;
 its state continues to come from robot feedback and attachment tracking.
 
-Freshness remains controlled by `maximum_box_pose_age` and
+Initial acquisition freshness remains controlled by `maximum_box_pose_age` and
 `maximum_table_tag_pose_age`; waiting does not make an old observation valid.
+Visible-box freshness is checked between motions; an accepted table snapshot
+does not expire mid-action.
 Fresh observations must retain the planned instance/profile and stay within the
 existing movement tolerances. A moved box invalidates the existing plan rather
 than resuming motion toward an old target. Exhausted waits report an error.
@@ -989,21 +1004,13 @@ stages preserve their existing direct and clearance-route searches and controlle
 spline validation. Each segment is checked against current feedback and scene
 before execution.
 
-When table tracking is enabled, every post-place planning attempt explicitly
-waits for a fresh stable table observation, applies `work_table`, and synchronizes
-the MoveIt scene before obtaining measured robot state and planning. Retries
-require a stable observation newer than the last one consumed, even if its pose
-is unchanged. Continue requires an observation newer than the resumed attempt's
-freshness barrier, so observations predating Continue cannot satisfy the wait.
-Feedback reports `waiting_for_table/<stage>` while waiting; stage names are
-`retreat`, `to_<prepare>`, and `from_<prepare>_to_<ready>` (or `to_<ready>` when
-Prepare is skipped). Waiting is bounded by `tag_reacquisition_timeout` and the
-remaining phase deadline, and supports cancellation and Reset interruption.
-Timeouts use the existing retry/pause flow; no planning uses the old table
-observation after such a timeout. Table tracking disabled requires no observation
-wait. Existing visible-obstacle freshness checks remain in force. The released
-task box is still represented at its selected placement pose; it is not reacquired
-from detections during post-place retries.
+Post-place retreat, Prepare, Ready, and their retries retain the table
+observation accepted at Place start. They do not require newer tag detections
+between stages or after Continue. Initial table acquisition still requires a
+fresh stable observation and supports cancellation, Reset, and the existing
+retry/pause flow. Visible-box freshness/movement checks remain active. The
+released task box is represented at its selected placement pose and is not
+reacquired from detections during post-place retries.
 
 The return-specific defaults are `return_planning_timeout: 30.0` seconds,
 `return_planning_time_per_attempt: 2.0` seconds, and `return_ik_attempts: 8`.
@@ -1433,9 +1440,9 @@ cancellation and reset preemption remain available.
 
 Place tracks completed stages separately from the active stage's planned route.
 A failed replan discards its temporary candidate; Continue obtains a new plan only
-for the unfinished stage, after acquiring a newer stable table observation when
-tracking is enabled. Reaching Prepare completes that checkpoint; Ready is planned
-and executed afterward before reporting success. Failed or empty planning results
+for the unfinished stage, retaining the accepted table observation. Reaching
+Prepare completes that checkpoint; Ready is planned and executed afterward
+before reporting success. Failed or empty planning results
 cannot advance a stage or count as completed motion.
 
 Attachment/release failures known to occur before dispatch may retry. An
@@ -1444,9 +1451,9 @@ operation is not automatically repeated. Collision and closure validation remain
 required before motion. Invalid goals, cancellation, and unexpected exceptions
 do not enter an automatic motion retry loop.
 
-Pick refreshes its selected box and table scene during preflight planning retries,
-including retries started by Continue. If a detected box moves while paused, the
-next plan uses its current pose. Before attachment or release, retries check fresh
+Pick refreshes its selected box scene when confirmed movement invalidates the
+snapshot, including during retries started by Continue. It retains the table
+pose. If a detected box moves while paused, the next plan uses its current pose. Before attachment or release, retries check fresh
 stationary feedback and both hand contacts using the configured
 `closed_chain_contact_position_error` and `closed_chain_contact_orientation_error`.
 When contact has moved outside those bounds, the unfinished approach or placement

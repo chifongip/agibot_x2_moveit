@@ -25,7 +25,7 @@ def generate_test_description():
     return make_test_description()
 
 
-def make_test_description(box_profiles_file=None):
+def make_test_description(box_profiles_file=None, publish_table=True):
     share = get_package_share_directory("agibot_x2_manipulation")
     port = 20000 + os.getpid() % 10000
     stack = IncludeLaunchDescription(
@@ -61,7 +61,9 @@ def make_test_description(box_profiles_file=None):
             "x": 10.0, "y": 0.0, "z": 0.0, "publish_rate": 30.0,
         }],
     )
-    return LaunchDescription([fake, stack, table, launch_testing.actions.ReadyToTest()])
+    return LaunchDescription([
+        fake, stack, *([table] if publish_table else []), launch_testing.actions.ReadyToTest()
+    ])
 
 
 class TestMovedBoxRetry(unittest.TestCase):
