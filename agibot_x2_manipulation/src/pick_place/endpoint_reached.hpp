@@ -42,17 +42,20 @@ inline bool jointEndpointReached(
   return true;
 }
 
-// Deliberately tighter than grasp accuracy tolerances: skipping a segment must
-// not erase a requested small translation or rotation.
+// Default to tight pose identity for skipping a planned segment. Physical
+// contact checks pass the configured hardware accuracy tolerances explicitly.
 inline bool endpointReached(
   const Eigen::Isometry3d & actual_left, const Eigen::Isometry3d & actual_right,
-  const Eigen::Isometry3d & target_left, const Eigen::Isometry3d & target_right)
+  const Eigen::Isometry3d & target_left, const Eigen::Isometry3d & target_right,
+  double position_tolerance = 1e-4, double orientation_tolerance = 1e-3)
 {
-  const auto reached = [](const Eigen::Isometry3d & actual, const Eigen::Isometry3d & target) {
+  if (!std::isfinite(position_tolerance) || position_tolerance < 0.0 ||
+    !std::isfinite(orientation_tolerance) || orientation_tolerance < 0.0) {return false;}
+  const auto reached = [=](const Eigen::Isometry3d & actual, const Eigen::Isometry3d & target) {
       return actual.matrix().allFinite() && target.matrix().allFinite() &&
-             (actual.translation() - target.translation()).norm() <= 1e-4 &&
+             (actual.translation() - target.translation()).norm() <= position_tolerance &&
              std::abs(Eigen::AngleAxisd(actual.linear().transpose() * target.linear()).angle()) <=
-             1e-3;
+             orientation_tolerance;
     };
   return reached(actual_left, target_left) && reached(actual_right, target_right);
 }

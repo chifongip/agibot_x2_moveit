@@ -22,6 +22,10 @@ from rclpy.action import ActionClient
 
 @pytest.mark.launch_test
 def generate_test_description():
+    return make_test_description()
+
+
+def make_test_description(box_profiles_file=None):
     share = get_package_share_directory("agibot_x2_manipulation")
     port = 20000 + os.getpid() % 10000
     stack = IncludeLaunchDescription(
@@ -37,7 +41,8 @@ def generate_test_description():
             "perception_3d_source": "none",
             "allow_execution": "true",
             "motion_planning_mode": "pose_to_pose",
-            "box_profiles_file": str(Path(__file__).parent / "config" / "box_profiles_simulation.yaml"),
+            "box_profiles_file": str(box_profiles_file or
+                                     Path(__file__).parent / "config" / "box_profiles_simulation.yaml"),
             "manipulation_state_file": f"/tmp/x2_moved_box_retry_{os.getpid()}",
         }.items(),
     )

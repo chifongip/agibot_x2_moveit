@@ -1251,11 +1251,26 @@ release, retreat, and return-to-prepare checkpoints are preserved. Other motion
 goals are rejected while the task is active or paused. Standard action
 cancellation and reset preemption remain available.
 
+Place keeps the remaining return segments and completed checkpoints together.
+A failed replan discards its temporary candidate and invalidates the pending
+segment, so Continue obtains a complete new sequence before executing again.
+Reaching Prepare completes only that intermediate checkpoint; the task continues
+through Ready before reporting success. Failed or empty planning results cannot
+shorten the saved sequence or count as completed motion.
+
 Attachment/release failures known to occur before dispatch may retry. An
 uncertain result after dispatch requires explicit recovery; the physical
 operation is not automatically repeated. Collision and closure validation remain
 required before motion. Invalid goals, cancellation, and unexpected exceptions
 do not enter an automatic motion retry loop.
+
+Pick refreshes its selected box and table scene during preflight planning retries,
+including retries started by Continue. If a detected box moves while paused, the
+next plan uses its current pose. Before attachment or release, retries check fresh
+stationary feedback and both hand contacts using the configured
+`closed_chain_contact_position_error` and `closed_chain_contact_orientation_error`.
+When contact has moved outside those bounds, the unfinished approach or placement
+is planned again before the physical operation is dispatched.
 
 Task checkpoint diagnostics are saved beside `state_file` in `state_file.task`.
 The live action worker retains the complete goal and planning context. After a
