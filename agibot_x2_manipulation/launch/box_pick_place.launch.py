@@ -323,6 +323,10 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
+                "disable_table_collision", default_value=use_dummy_apriltag,
+                description="Disable the tag-derived table collision model in simulation.",
+            ),
+            DeclareLaunchArgument(
                 "dummy_tag_params_file",
                 default_value=dummy_tag_params,
                 description=(
@@ -535,10 +539,9 @@ def generate_launch_description():
                         "allow_execution": ParameterValue(
                             allow_execution, value_type=bool
                         ),
-                        # Dummy/replay workflows publish only the pickup tag;
-                        # they intentionally have no Tag 9 table model.
+                        # Single-tag dummy workflows disable the table by default.
                         "disable_table_collision": ParameterValue(
-                            use_dummy_apriltag, value_type=bool
+                            LaunchConfiguration("disable_table_collision"), value_type=bool
                         ),
                         "motion_planning_mode": motion_planning_mode,
                         "phase_retry_attempts": ParameterValue(

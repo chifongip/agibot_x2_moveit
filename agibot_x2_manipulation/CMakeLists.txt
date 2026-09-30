@@ -140,6 +140,10 @@ install(PROGRAMS
   scripts/capture_failure_snapshot.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME capture_failure_snapshot)
+# Also install the reusable recorder module beside the task executable.
+install(FILES scripts/capture_failure_snapshot.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/capture_task_snapshot.py
+  DESTINATION lib/${PROJECT_NAME} RENAME capture_task_snapshot)
 install(PROGRAMS
   scripts/raw_image_throttler.py
   DESTINATION lib/${PROJECT_NAME}
@@ -227,6 +231,7 @@ if(BUILD_TESTING)
   target_include_directories(test_table_tag_pose_tracker PRIVATE src include)
   target_link_libraries(test_table_tag_pose_tracker pick_place_core)
   ament_target_dependencies(test_table_tag_pose_tracker apriltag_msgs geometry_msgs rclcpp tf2_ros)
+  ament_add_pytest_test(test_capture_task_snapshot test/test_capture_task_snapshot.py)
   ament_add_pytest_test(test_capture_failure_snapshot test/test_capture_failure_snapshot.py)
   ament_add_pytest_test(test_verify_carry_pose test/test_verify_carry_pose.py)
   ament_add_pytest_test(test_measure_execution_time test/test_measure_execution_time.py)

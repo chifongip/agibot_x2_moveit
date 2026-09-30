@@ -286,6 +286,57 @@ so planner and localizer catalogs stay aligned. A failed request keeps the
 active catalog unchanged. For a new physical calibration, run a `plan_only:
 true` pick/place after a successful reload before enabling execution.
 
+## Recording the state before Pick/Place
+
+Keep the robot and objects stationary and run this **before sending the action**:
+
+```bash
+ros2 run agibot_x2_manipulation capture_task_snapshot \
+  --output /tmp/before_pick.yaml
+```
+
+The recorder exits successfully only after it receives all 31 finite X2 joint
+positions, a fresh localized `tag:0` object pose, and `base_link -> tag0` and
+`base_link -> tag9` transforms evaluated at the joint-state timestamp. It waits
+up to 30 seconds; missing or stale data produces a nonzero exit without a
+snapshot. Start the task after this command succeeds. It sends no commands,
+ignores action status, and refuses to overwrite existing files. Ctrl-C cancels
+without saving. Joint and object stamps must be within `--max-age` (default
+1 second) of the recorder's ROS clock; use matching `use_sim_time` settings.
+
+For a pickup-only scene without a table tag, pass `--tag-id 0`. Repeat `--tag-id`
+for every tag needed by the scene. Use `--object-id tag:180` and `--tag-id 180`
+for a different target; include `--tag-id 9` when using tag-based placement.
+Topic names, planning frame, tag-frame prefix, timeout, and maximum age have CLI
+options. `--robot-pose-parent-frame odom` additionally records the robot base
+transform. The saved YAML includes joint positions, localized object poses and
+profile IDs, full tag quaternions, detection metadata, and timestamps.
+
+Replay in a separate ROS domain from the robot and other running stacks:
+
+```bash
+ROS_DOMAIN_ID=96 ros2 launch agibot_x2_manipulation \
+  recorded_task_snapshot.launch.py snapshot:=/tmp/before_pick.yaml use_rviz:=false
+```
+
+This starts fake HAL joint feedback from the capture, holds the measured arm
+configuration during controller startup, and republishes the saved
+tag transforms/detections with current timestamps. The localizer reconstructs
+objects using the current box profiles. The replay disables posture control and
+defaults to `allow_execution:=false`; send actions with `plan_only: true`. For a
+capture containing only pickup tags, add `disable_table_collision:=true`.
+Default ZMQ ports are the same as the existing recorded replay (8559); if that
+port is in use, set both `zmq_endpoint` and `fake_zmq_endpoint` to a free local
+port. Run the replay on an offline host.
+
+The snapshot reproduces a stationary robot configuration and tag-based scene,
+not sensor streams, arbitrary collision objects, attached-object/recovery state,
+or the action goal. Reuse the same task goal, robot description, box profiles,
+and manipulation/MoveIt configuration when comparing tests. The optional
+world-to-base transform is saved for inspection; this local planning replay
+uses `base_link` and does not restore navigation/world localization. Captures
+are runtime data and should be stored outside the source repository.
+
 ## Recording a failed manipulation state
 
 Start the passive recorder before reproducing a failure. It listens for aborted

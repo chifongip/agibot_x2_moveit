@@ -21,15 +21,25 @@ def generate_launch_description():
     allow_execution = LaunchConfiguration("allow_execution")
     motion_planning_mode = LaunchConfiguration("motion_planning_mode")
     manipulation_state_file = LaunchConfiguration("manipulation_state_file")
-    joint_snapshot = os.path.join(
+    default_joint_snapshot = os.path.join(
         manipulation_share, "config", "recorded_planning_failure_joint_state.yaml"
     )
-    tag_snapshot = os.path.join(
+    default_tag_snapshot = os.path.join(
         manipulation_share, "config", "recorded_planning_failure_dummy_apriltag.yaml"
     )
 
+    joint_snapshot = LaunchConfiguration("joint_snapshot")
+    tag_snapshot = LaunchConfiguration("tag_snapshot")
+
     return LaunchDescription(
         [
+            DeclareLaunchArgument("initial_arm_command_mode", default_value="ready"),
+            DeclareLaunchArgument("joint_snapshot", default_value=default_joint_snapshot),
+            DeclareLaunchArgument("tag_snapshot", default_value=default_tag_snapshot),
+            DeclareLaunchArgument("use_dummy_apriltag", default_value="true"),
+            DeclareLaunchArgument(
+                "disable_table_collision", default_value=LaunchConfiguration("use_dummy_apriltag")
+            ),
             DeclareLaunchArgument("zmq_endpoint", default_value="tcp://*:8559"),
             DeclareLaunchArgument(
                 "posture_zmq_enabled",
@@ -88,12 +98,14 @@ def generate_launch_description():
                 ),
                 launch_arguments={
                     "command_transport": "zmq",
+                    "initial_arm_command_mode": LaunchConfiguration("initial_arm_command_mode"),
                     "zmq_endpoint": zmq_endpoint,
                     "posture_zmq_enabled": posture_zmq_enabled,
                     "posture_zmq_endpoint": posture_zmq_endpoint,
                     "use_rviz": use_rviz,
                     "use_apriltag": "false",
-                    "use_dummy_apriltag": "true",
+                    "use_dummy_apriltag": LaunchConfiguration("use_dummy_apriltag"),
+                    "disable_table_collision": LaunchConfiguration("disable_table_collision"),
                     "start_table_tag_detector": "false",
                     "dummy_tag_params_file": tag_snapshot,
                     "perception_3d_source": "none",
