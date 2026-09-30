@@ -27,12 +27,19 @@ bool validateReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
   std::string & error, const CancelFunction & interrupted);
+struct TrajectoryValidationStats
+{
+  std::size_t spline_samples{0};
+  std::size_t collision_checks{0};
+};
+
 bool validateTimedReturnTrajectory(
   const robot_trajectory::RobotTrajectory & trajectory,
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
   std::string & error, const CancelFunction & interrupted, bool enforce_bounds = false,
   double minimum_joint_margin = 0.0,
-  const std::function<bool (const moveit::core::RobotState &, std::string &)> & path_valid = {});
+  const std::function<bool (const moveit::core::RobotState &, std::string &)> & path_valid = {},
+  TrajectoryValidationStats * stats = nullptr);
 
 // Reuse a pre-attachment plan only after checking its complete measured start
 // and the controller spline against the current scene and grasp touch policy.

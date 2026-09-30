@@ -694,8 +694,9 @@ Cartesian failures cannot fall back to an unrestricted joint-space segment.
 `cartesian_path_orientation_tolerance` (0.0872664626 rad, 5 degrees) bound
 geometric deviation at synchronized progress along both tip paths, including
 the timed controller spline. They are independent of hardware execution and
-attachment tolerances. Joint continuity uses `maximum_joint_step`; timing uses
-`return_path_tolerance`, velocity scaling, and acceleration scaling. Segment
+attachment tolerances. Joint continuity uses `maximum_joint_step`; Cartesian
+timing uses MoveIt's iterative parabolic time parameterization with velocity and
+acceleration scaling, preserving IK waypoints instead of TOTG path fitting. Segment
 timing is preserved across route concatenation to avoid smoothing away the
 Cartesian path. Pick lift is replanned from measured feedback instead of rebasing
 and retiming a cached whole carry route; free-space segment reuse remains active.
@@ -705,6 +706,14 @@ Approach cache reuse requires another Cartesian validation after rebasing.
 Retries and Continue use the same stage policy. Joint bounds, collision geometry,
 execution feedback, and recovery handling remain active. Validate with
 `plan_only: true` and fake-ZMQ simulation before enabling robot motion.
+
+Controller-spline validation samples by joint travel rather than a fixed 20 ms
+interval. Collision checks accumulate spatial travel across timing waypoints,
+using `return_validation_joint_step`; endpoints, spline excursions, bounds, and
+Cartesian deviation remain checked. Slow execution and stationary timing samples
+do not multiply full collision checks. Cartesian carry attempts can use the full
+configured search budget, without the former 20% fast-path or 3.25 s route cutoff.
+No existing configured search timeout or joint limit is increased by this change.
 
 For `pose_to_pose`, Pick first tries the nominal grasp with one measured-seed IK
 attempt and validates its pregrasp, approach, and carry continuation. When this
@@ -730,9 +739,9 @@ and `pregrasp_fast_path` with elapsed seconds.
 Carry and Place searches keep at most eight successful endpoint segments in a
 local FIFO cache. Reuse requires the same complete robot state and TCP targets,
 then rechecks attached geometry, joint bounds/margins, and the timed controller
-spline against the current scene. The cache lasts for one search. Multi-segment
-routes are retimed and fully checked together; a single segment retains its
-already validated timing and derivatives. Searches remain serial and create no
+spline against the current scene. The cache lasts for one search. Segments retain
+their validated timing and derivatives when joined, preserving Cartesian paths.
+Searches remain serial and create no
 additional planner workers or sampling threads.
 
 Pose-to-pose carry/place routes accept measured starts within
@@ -765,8 +774,7 @@ same state safety checks. The current state is retained rather than replaced
 by an unexecuted returned waypoint.
 
 Pick also reuses its preflight pregrasp/approach trajectories when fresh stationary
-feedback matches commanded joints within `execution_joint_tolerance` and
-uncommanded robot variables within 0.001 rad/m, and complete
+feedback matches robot variables within `execution_joint_tolerance`, and complete
 trajectory validation passes against the current scene, including controller
 spline interpolation and joint bounds. When the commanded start changes, reuse
 rebases the first waypoint to measured positions and regenerates trajectory timing
@@ -897,10 +905,11 @@ cannot guarantee a route through an obstructed scene. Validate in simulation
 before allowing hardware execution; these parameters do not replace accurate
 collision geometry or calibration.
 
-Final validation also samples the joint trajectory controller's cubic/quintic
-interpolation at 100 Hz or finer, with additional subdivision from the joint
-motion bound. This detects spline overshoot even when its endpoints and their
-straight joint-space connection are clear.
+Final validation samples the joint trajectory controller's cubic/quintic
+interpolation by joint travel and endpoint derivatives, with quarter-interval
+checks for excursions. Collision checks follow accumulated spatial travel;
+validation density does not increase merely because execution takes longer.
+Spline overshoot is checked even when endpoints are clear.
 
 Pregrasp planning first tests up to `maximum_planning_candidates` candidates
 for `planning_time_per_candidate` seconds each. If none succeeds, the best

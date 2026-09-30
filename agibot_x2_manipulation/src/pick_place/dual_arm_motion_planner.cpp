@@ -668,10 +668,13 @@ public:
         auto scene = graspContactScene(planning_scene_.snapshot(), config_);
         moveit_msgs::msg::RobotTrajectory message;
         moveit::core::RobotState end(state);
+        const auto cartesian_started = std::chrono::steady_clock::now();
         const bool planned = planCartesianMotion(state, {grasp.left_contact, grasp.right_contact},
           scene, config_, message, end, error, canceled, std::min(deadline, phase_deadline_),
           minimum_joint_margin);
-        writeTrace("cartesian_segment", planned, error, {{"segment", controls[index].segment}});
+        writeTrace("cartesian_segment", planned, error, {{"segment", controls[index].segment},
+          {"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - cartesian_started).count())}});
         if (!planned) {return false;}
         robot_trajectory::RobotTrajectory cartesian(state.getRobotModel(), config_.planning_group);
         cartesian.setRobotTrajectoryMsg(state, message);
@@ -1147,6 +1150,7 @@ public:
       moveit_msgs::msg::CollisionObject saved_box;
       if (!retreat_scene && !planning_scene_.removeWorldBoxTemporarily(saved_box, error)) {return false;}
       const auto scene = retreat_scene ? retreat_scene : graspContactScene(planning_scene_.snapshot(), config_);
+      const auto cartesian_started = std::chrono::steady_clock::now();
       const bool planned = planCartesianMotion(start, {target.left_contact, target.right_contact},
         scene, config_, output, end_state, error, canceled, std::min(outer_deadline, phase_deadline_));
       std::string restore_error;
@@ -1155,7 +1159,9 @@ public:
         return false;
       }
       writeTrace("cartesian_segment", planned, error,
-        {{"segment", retreat_scene ? "retreat" : "approach"}});
+        {{"segment", retreat_scene ? "retreat" : "approach"},
+          {"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - cartesian_started).count())}});
       return planned;
     }
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
@@ -1837,10 +1843,9 @@ public:
       std::string fast_error;
       bool planned = false;
       try {
-        const auto fast_deadline = std::min(deadline, search_started +
-          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(fastAttemptTimeout(
-              std::chrono::duration<double>(deadline - search_started).count(), 3.25))));
+        // Finish Cartesian prefix validation within the configured search
+        // budget instead of repeatedly interrupting it at a 20% fast-path slice.
+        const auto fast_deadline = deadline;
         ScopedPlanningDeadline fast_scope(phase_deadline_, fast_deadline);
         const CancelFunction fast_canceled = [&]() {
             return canceled() || std::chrono::steady_clock::now() >= fast_deadline;
@@ -2012,10 +2017,7 @@ public:
           return false;
         }
         try {
-          const std::chrono::steady_clock::time_point route_deadline = std::min(
-            deadline, std::chrono::steady_clock::now() +
-            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-              std::chrono::duration<double>(3.25)));
+          const auto route_deadline = deadline;
           moveit_msgs::msg::RobotTrajectory trajectory;
           moveit::core::RobotState end(start);
           std::string candidate_error;
@@ -2783,7 +2785,7 @@ public:
           ++approach_rejected;
           RCLCPP_WARN(
             node_->get_logger(),
-            "Candidate %zu reached pregrasp but its Cartesian approach was rejected", index + 1U);
+            "Candidate %zu Cartesian approach rejected: %s", index + 1U, target_error.c_str());
           return CandidateAttempt::APPROACH_REJECTED;
         }
         std::string continuation_error;
@@ -2794,7 +2796,7 @@ public:
           ++continuation_rejected;
           last_continuation_error = continuation_error;
           RCLCPP_WARN(
-            node_->get_logger(), "Candidate %zu rejected by closed-chain continuation: %s",
+            node_->get_logger(), "Candidate %zu rejected by carry/place continuation: %s",
             index + 1U, continuation_error.c_str());
           return CandidateAttempt::CONTINUATION_REJECTED;
         }
@@ -2833,8 +2835,7 @@ public:
       const double remaining = std::min(config_.pregrasp_planning_timeout,
         std::chrono::duration<double>(phase_deadline_ - started).count());
       const auto fast_deadline = started + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-        std::chrono::duration<double>(fastAttemptTimeout(remaining,
-          endpointRouteTimeout(remaining, config_.planning_time_per_candidate, 2U))));
+        std::chrono::duration<double>(std::max(0.0, remaining)));
       bool success = false;
       nominal_seed_attempted = !canceled() && started < fast_deadline;
       if (nominal_seed_attempted) {
@@ -2864,7 +2865,8 @@ public:
       }
       if (index == feasible.size()) {break;}
       if (canceled()) {
-        error = "pregrasp planning canceled";
+        error = std::chrono::steady_clock::now() >= phase_deadline_ ?
+          "pregrasp phase deadline reached" : "pregrasp planning canceled";
         return false;
       }
       const double remaining = config_.pregrasp_planning_timeout - planning_elapsed();
@@ -2876,7 +2878,8 @@ public:
         std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
           std::chrono::duration<double>(remaining)), error);
       if (canceled()) {
-        error = "pregrasp planning canceled";
+        error = std::chrono::steady_clock::now() >= phase_deadline_ ?
+          "pregrasp phase deadline reached" : "pregrasp planning canceled";
         return false;
       }
       if (result == CandidateAttempt::SUCCESS) {

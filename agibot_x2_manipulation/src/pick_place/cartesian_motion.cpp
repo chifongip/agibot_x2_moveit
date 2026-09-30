@@ -1,7 +1,7 @@
 #include "pick_place/cartesian_motion.hpp"
 #include "pick_place/endpoint_reached.hpp"
 
-#include <moveit/trajectory_processing/time_optimal_trajectory_generation.h>
+#include <moveit/trajectory_processing/iterative_time_parameterization.h>
 
 #include <algorithm>
 #include <cmath>
@@ -153,25 +153,19 @@ bool planCartesianMotion(
     path.addSuffixWayPoint(candidate, 0.0);
     state = candidate;
   }
-  trajectory_processing::TimeOptimalTrajectoryGeneration timing(config.return_path_tolerance, 0.05);
+  // Preserve IK waypoints instead of fitting/resampling a different path that
+  // can bend the TCP path or cross a nearby joint bound after valid IK.
+  trajectory_processing::IterativeParabolicTimeParameterization timing;
   if (!timing.computeTimeStamps(path, config.velocity_scaling, config.acceleration_scaling))
   {error = "Cartesian timing failed"; return false;}
-  // Humble TOTG can emit its last endpoint twice at the same timestamp.
-  // Remove only an identical duplicate; malformed timing still fails validation.
-  moveit_msgs::msg::RobotTrajectory timed;
-  path.getRobotTrajectoryMsg(timed);
-  auto & points = timed.joint_trajectory.points;
-  if (points.size() >= 3U) {
-    const auto & a = points[points.size() - 2U];
-    const auto & b = points.back();
-    if (a.time_from_start == b.time_from_start && a.positions == b.positions) {
-      points.erase(points.end() - 2);
-      const moveit::core::RobotState first(path.getFirstWayPoint());
-      path.setRobotTrajectoryMsg(first, timed);
-    }
-  }
   if (!validateCartesianTrajectory(path, scene, config, from, target, error, interrupted,
-      minimum_joint_margin)) {return false;}
+      minimum_joint_margin))
+  {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      error = "Cartesian validation deadline reached: " + error;
+    } else if (canceled()) {error = "Cartesian validation canceled: " + error;}
+    return false;
+  }
   const auto final = hands(path.getLastWayPoint(), config);
   if (!endpointReached(final.left, final.right, target.left, target.right,
       config.cartesian_path_position_tolerance, config.cartesian_path_orientation_tolerance))

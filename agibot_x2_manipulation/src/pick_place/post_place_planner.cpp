@@ -21,7 +21,6 @@ namespace agibot_x2_manipulation
 namespace
 {
 
-constexpr double kControllerSplineValidationPeriod = 0.02;
 constexpr double kControllerSplineSpatialOversampling = 2.0;
 
 double maximumJointDistance(
@@ -163,8 +162,12 @@ bool validateTimedReturnTrajectory(
   const planning_scene::PlanningSceneConstPtr & scene, double joint_step,
   std::string & error, const CancelFunction & interrupted, bool enforce_bounds,
   double minimum_joint_margin,
-  const std::function<bool (const moveit::core::RobotState &, std::string &)> & path_valid)
+  const std::function<bool (const moveit::core::RobotState &, std::string &)> & path_valid,
+  TrajectoryValidationStats * stats)
 {
+  TrajectoryValidationStats counts;
+  auto & metrics = stats ? *stats : counts;
+  metrics = {};
   if (!std::isfinite(joint_step) || joint_step <= 0.0 || trajectory.empty() ||
     !trajectory.getGroup())
   {
@@ -182,6 +185,7 @@ bool validateTimedReturnTrajectory(
     error = "cached trajectory start violates minimum joint margin";
     return false;
   }
+  ++metrics.collision_checks;
   if (!validState(first, scene, trajectory.getGroup(), error)) {
     error = "return trajectory start invalid: " + error;
     return false;
@@ -197,6 +201,8 @@ bool validateTimedReturnTrajectory(
   joint_trajectory_controller::Trajectory controller;
   const auto * group = trajectory.getGroup();
   moveit::core::RobotState state(trajectory.getFirstWayPoint());
+  auto previous_positions = joints.points.front().positions;
+  double collision_travel = 0.0;
   for (std::size_t index = 1; index < joints.points.size(); ++index) {
     const auto & a = joints.points[index - 1];
     const auto & b = joints.points[index];
@@ -232,16 +238,12 @@ bool validateTimedReturnTrajectory(
       }
       travel_bound = std::max(travel_bound, bound);
     }
-    // Sample the controller's cubic/quintic spline, including overshoot with
-    // identical endpoint positions. The derivative bound limits the joint
-    // increment to at most half the configured geometric validation step.
-    // This is deliberately less dense than the controller update rate: MoveIt
-    // has already validated the OMPL path, and this pass covers interpolation
-    // that the controller adds between those waypoints.
+    // Sampling depends on joint travel, including derivative-driven excursions
+    // with identical endpoint positions. Slow trajectories do not need extra
+    // samples simply because their timestamps are further apart. Quarter points
+    // expose excursions that return to the same midpoint and endpoint.
     const double step_count = std::max(
-      1.0, std::ceil(std::max(
-        duration / kControllerSplineValidationPeriod,
-        kControllerSplineSpatialOversampling * travel_bound / joint_step)));
+      4.0, std::ceil(kControllerSplineSpatialOversampling * travel_bound / joint_step));
     if (!std::isfinite(step_count) || step_count > 1000000.0) {
       error = "return controller spline exceeds validation sample budget";
       return false;
@@ -249,9 +251,12 @@ bool validateTimedReturnTrajectory(
     const auto steps = static_cast<std::size_t>(step_count);
     for (std::size_t sample = 1; sample <= steps; ++sample) {
       if (interrupted()) {
-        error = "controller spline validation interrupted";
+        error = "controller spline validation interrupted (samples=" +
+          std::to_string(metrics.spline_samples) + ", collision_checks=" +
+          std::to_string(metrics.collision_checks) + ")";
         return false;
       }
+      ++metrics.spline_samples;
       trajectory_msgs::msg::JointTrajectoryPoint point;
       const auto sample_time = time_a + rclcpp::Duration::from_seconds(
         duration * static_cast<double>(sample) / steps);
@@ -264,6 +269,13 @@ bool validateTimedReturnTrajectory(
         return false;
       }
       state.setVariablePositions(joints.joint_names, point.positions);
+      double sample_travel = 0.0;
+      for (std::size_t joint = 0; joint < point.positions.size(); ++joint) {
+        sample_travel = std::max(sample_travel,
+          std::abs(point.positions[joint] - previous_positions[joint]));
+      }
+      collision_travel += sample_travel;
+      previous_positions = point.positions;
       if (enforce_bounds && !state.satisfiesBounds(group, 1e-6)) {
         error = "cached controller spline violates joint position bounds";
         return false;
@@ -274,12 +286,24 @@ bool validateTimedReturnTrajectory(
         error = "cached controller spline violates minimum joint margin";
         return false;
       }
-      if (!validState(state, scene, group, error)) {
-        error = "controller spline invalid: segment " + std::to_string(index) +
-          " sample " + std::to_string(sample) + "/" + std::to_string(steps) + ": " + error;
-        return false;
+      // Accumulate spatial travel across resampled timing waypoints. Avoid full
+      // mesh/octomap collision checks for nearly identical successive states,
+      // while retaining cheap bounds/path checks at every spline sample.
+      if (collision_travel >= joint_step / kControllerSplineSpatialOversampling ||
+        (index + 1U == joints.points.size() && sample == steps))
+      {
+        ++metrics.collision_checks;
+        if (!validState(state, scene, group, error)) {
+          error = "controller spline invalid: segment " + std::to_string(index) +
+            " sample " + std::to_string(sample) + "/" + std::to_string(steps) + ": " + error;
+          return false;
+        }
+        collision_travel = 0.0;
       }
-      if (path_valid && !path_valid(state, error)) {return false;}
+      if (path_valid) {
+        state.update();
+        if (!path_valid(state, error)) {return false;}
+      }
     }
   }
   return true;
@@ -334,7 +358,8 @@ static bool validateReusableTrajectory(
       if (!shape || std::abs(shape->size[0] - config.dimensions.length) > 1e-9 ||
         std::abs(shape->size[1] - config.dimensions.width) > 1e-9 ||
         std::abs(shape->size[2] - config.dimensions.height) > 1e-9 ||
-        !endpointReached(actual, actual, expected, expected))
+        !endpointReached(actual, actual, expected, expected,
+          config.closed_chain_contact_position_error, config.closed_chain_contact_orientation_error))
       {
         error = "cached carry attachment dimensions or grasp transform mismatch";
         return false;
@@ -355,7 +380,7 @@ static bool validateReusableTrajectory(
     const double measured = current.getVariablePosition(name);
     const double planned = planned_start.getVariablePosition(name);
     if (!std::isfinite(measured) || !std::isfinite(planned) ||
-      std::abs(measured - planned) > (commanded.count(name) ? tolerance : 0.001))
+      std::abs(measured - planned) > tolerance)
     {
       error = "measured state differs from cached Pick start: " + name;
       return false;
@@ -627,9 +652,9 @@ bool PostPlacePlanner::endpoint(
       std::make_pair(config_.right_tcp, poses.right)})
   {
     const auto & actual = target.getGlobalLinkTransform(hand.first);
-    if ((actual.translation() - hand.second.translation()).norm() > 0.005 ||
+    if ((actual.translation() - hand.second.translation()).norm() > config_.cartesian_path_position_tolerance ||
       Eigen::Quaterniond(actual.linear()).angularDistance(
-        Eigen::Quaterniond(hand.second.linear())) > 0.02)
+        Eigen::Quaterniond(hand.second.linear())) > config_.cartesian_path_orientation_tolerance)
     {
       return false;
     }
@@ -767,9 +792,9 @@ bool PostPlacePlanner::segmentOnce(
   }
   if (!validateTimedReturnTrajectory(trajectory, scene, config_.return_validation_joint_step,
       error, canceled) ||
-    maximumJointDistance(trajectory.getFirstWayPoint(), start, trajectory.getGroup()) > 1e-3 ||
+    maximumJointDistance(trajectory.getFirstWayPoint(), start, trajectory.getGroup()) > config_.execution_joint_tolerance ||
     maximumJointDistance(trajectory.getLastWayPoint(), target, trajectory.getGroup()) >
-    std::min(1e-3, config_.reset_joint_tolerance))
+    config_.reset_joint_tolerance)
   {
     if (error.empty()) {
       error = name + " processed trajectory endpoint mismatch";

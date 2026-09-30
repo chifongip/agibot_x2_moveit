@@ -524,6 +524,7 @@ TEST(PostPlacePlanner, CachedPickRejectsChangedUncommandedJointAndAttachedObject
   config.planning_group = "arm";
   config.left_tcp = "hand";
   config.right_tcp = "hand";
+  config.execution_joint_tolerance = 0.1;
   moveit::core::RobotState start(robot);
   start.setToDefaultValues();
   start.update();
@@ -537,6 +538,8 @@ TEST(PostPlacePlanner, CachedPickRejectsChangedUncommandedJointAndAttachedObject
   ASSERT_TRUE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
   moveit::core::RobotState moved(start);
   moved.setVariablePosition("lift", 0.01);
+  EXPECT_TRUE(validateReusablePickTrajectory(message, start, moved, scene, config, error, canceled));
+  moved.setVariablePosition("lift", config.execution_joint_tolerance + 0.05);
   EXPECT_FALSE(validateReusablePickTrajectory(message, start, moved, scene, config, error, canceled));
   EXPECT_NE(error.find("lift"), std::string::npos);
   scene->getCurrentStateNonConst().attachBody("held_box", Eigen::Isometry3d::Identity(),
@@ -544,6 +547,37 @@ TEST(PostPlacePlanner, CachedPickRejectsChangedUncommandedJointAndAttachedObject
     std::set<std::string>{"hand"}, "hand");
   EXPECT_FALSE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
   EXPECT_NE(error.find("empty arms"), std::string::npos);
+}
+
+TEST(PostPlacePlanner, SplineValidationCostDependsOnMotionInsteadOfExecutionDuration)
+{
+  const auto robot = model();
+  const auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  moveit::core::RobotState start(robot), end(robot);
+  start.setToDefaultValues();
+  end = start;
+  end.setVariablePosition("slide", 0.4);
+  TrajectoryValidationStats fast, slow;
+  std::string error;
+  for (const double duration : {1.0, 60.0}) {
+    robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+    trajectory.addSuffixWayPoint(start, 0.0);
+    trajectory.addSuffixWayPoint(end, duration);
+    ASSERT_TRUE(validateTimedReturnTrajectory(trajectory, scene, 0.02, error,
+        []() {return false;}, true, 0.0, {}, duration == 1.0 ? &fast : &slow)) << error;
+  }
+  EXPECT_EQ(fast.spline_samples, slow.spline_samples);
+  EXPECT_LT(slow.collision_checks, 2U * fast.collision_checks);
+  EXPECT_LT(slow.collision_checks, 60U);
+  // Timing resampling of an unmoving robot must not repeat mesh checks.
+  robot_trajectory::RobotTrajectory stationary(robot, "arm");
+  for (int index = 0; index < 1000; ++index) {
+    stationary.addSuffixWayPoint(start, index == 0 ? 0.0 : 0.1);
+  }
+  TrajectoryValidationStats stats;
+  ASSERT_TRUE(validateTimedReturnTrajectory(stationary, scene, 0.02, error,
+      []() {return false;}, true, 0.0, {}, &stats)) << error;
+  EXPECT_EQ(stats.collision_checks, 2U);
 }
 
 TEST(PostPlacePlanner, CoordinatedRetreatUsesGraspPolicyWithoutAllowingEnvironmentContact)
