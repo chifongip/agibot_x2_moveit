@@ -297,7 +297,11 @@ ros2 run agibot_x2_manipulation capture_task_snapshot \
 
 The recorder exits successfully only after it receives all 31 finite X2 joint
 positions, a fresh localized `tag:0` object pose, and `base_link -> tag0` and
-`base_link -> tag9` transforms evaluated at the joint-state timestamp. It waits
+`base_link -> tag9` transforms. It first queries TF at the joint-state timestamp;
+when delayed/sparse camera updates cannot interpolate that time, it uses the
+latest available transform within `--max-age` of both the current ROS time and
+the joint sample. The YAML records the lookup mode and original timestamps.
+Fully static transforms are exempt from the timestamp freshness check. It waits
 up to 30 seconds; missing or stale data produces a nonzero exit without a
 snapshot. Start the task after this command succeeds. It sends no commands,
 ignores action status, and refuses to overwrite existing files. Ctrl-C cancels

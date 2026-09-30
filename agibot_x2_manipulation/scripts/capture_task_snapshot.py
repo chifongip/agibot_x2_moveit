@@ -89,7 +89,17 @@ def capture_readiness(capture, required_tags, object_id, now_ros, max_age):
     for tag_id in required_tags:
         transform = tags.get(tag_id, {}).get("pose", {}).get("transform")
         if transform is None:
-            return f"waiting for TF of tag {tag_id} at the joint-state timestamp"
+            error = tags.get(tag_id, {}).get("pose", {}).get("error", "no transform received")
+            return f"waiting for TF of tag {tag_id}: {error}"
+        stamp = transform["stamp"]
+        transform_time = stamp["sec"] + stamp["nanosec"] * 1e-9
+        # Zero is the conventional stamp for a fully static TF chain.
+        if transform_time != 0.0:
+            age = now_ros - transform_time
+            joint_stamp = joint["stamp"]
+            joint_time = joint_stamp["sec"] + joint_stamp["nanosec"] * 1e-9
+            if age < -0.1 or age > max_age or abs(transform_time - joint_time) > max_age:
+                return f"waiting for a fresh TF of tag {tag_id}"
         if not valid_pose(transform["translation"], transform["rotation"]):
             return f"waiting for a finite TF of tag {tag_id}"
     if "base_pose" in robot and "transform" not in robot["base_pose"]:
@@ -129,15 +139,22 @@ class TaskSnapshotRecorder(FailureSnapshotRecorder):
         pass
 
     def lookup_transform(self, parent_frame, child_frame):
-        # Interpolate tag/base TFs to the measured joint-state time.
+        # Prefer interpolation, but stationary captures also support delayed or
+        # sparse camera TFs. Readiness checks still enforce the freshness limit.
+        query_time = Time.from_msg(self.latest_joint_state.header.stamp)
         try:
-            transform = self.tf_buffer.lookup_transform(
-                parent_frame, child_frame,
-                Time.from_msg(self.latest_joint_state.header.stamp),
-            )
-            return {"transform": transform_to_dict(transform)}
-        except TransformException as error:
-            return {"error": str(error)}
+            transform = self.tf_buffer.lookup_transform(parent_frame, child_frame, query_time)
+            return {"transform": transform_to_dict(transform), "lookup_mode": "joint_state_time"}
+        except TransformException as exact_error:
+            try:
+                transform = self.tf_buffer.lookup_transform(parent_frame, child_frame, Time())
+                return {
+                    "transform": transform_to_dict(transform),
+                    "lookup_mode": "latest_available",
+                    "joint_time_lookup_error": str(exact_error),
+                }
+            except TransformException as latest_error:
+                return {"error": str(latest_error), "joint_time_lookup_error": str(exact_error)}
 
     def build_capture(self, reason, action_status=None):
         # Only required tags are replayed; cached transient detections are diagnostic.

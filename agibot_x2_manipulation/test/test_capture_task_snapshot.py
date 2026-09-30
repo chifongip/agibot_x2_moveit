@@ -26,6 +26,7 @@ def snapshot():
                      "orientation": dict(x=0.0, y=0.0, z=0.0, w=1.0)},
         }],
         "tags": [{"tag_id": tag, "pose": {"transform": {
+            "stamp": {"sec": 10, "nanosec": 0},
             "translation": dict(x=0.4, y=0.0, z=0.3),
             "rotation": dict(x=0.1, y=0.2, z=0.3, w=0.9),
         }}} for tag in [0, 9]],
@@ -116,3 +117,49 @@ def test_replay_launch_holds_measured_arm_state(tmp_path, monkeypatch):
     assert args["initial_arm_command_mode"] == "measured"
     assert args["use_dummy_apriltag"] == "false"
     assert args["posture_zmq_enabled"] == "false"
+
+
+def test_rejects_stale_latest_tag_transform():
+    data = snapshot()
+    data["tags"][0]["pose"]["transform"]["stamp"]["sec"] = 5
+    assert ready(data) == "waiting for a fresh TF of tag 0"
+
+
+def test_accepts_static_tag_transform():
+    data = snapshot()
+    data["tags"][0]["pose"]["transform"]["stamp"]["sec"] = 0
+    assert ready(data) is None
+
+
+def test_missing_tf_reports_underlying_error():
+    data = snapshot()
+    data["tags"][0]["pose"] = {"error": "frame tag0 does not exist"}
+    assert "frame tag0 does not exist" in ready(data)
+
+
+def test_delayed_camera_tf_falls_back_to_latest_pose():
+    from geometry_msgs.msg import TransformStamped
+    from types import SimpleNamespace
+    from tf2_ros import TransformException
+
+    calls = []
+    saved = TransformStamped()
+    saved.header.frame_id = "base_link"
+    saved.child_frame_id = "tag0"
+    saved.header.stamp.sec = 10
+    saved.transform.rotation.w = 1.0
+
+    def lookup(parent, child, stamp):
+        calls.append(stamp.nanoseconds)
+        if stamp.nanoseconds:
+            raise TransformException("extrapolation into the future")
+        return saved
+
+    recorder = MODULE.TaskSnapshotRecorder.__new__(MODULE.TaskSnapshotRecorder)
+    recorder.tf_buffer = SimpleNamespace(lookup_transform=lookup)
+    recorder.latest_joint_state = SimpleNamespace(header=SimpleNamespace(stamp=saved.header.stamp))
+    result = recorder.lookup_transform("base_link", "tag0")
+    assert calls == [10000000000, 0]
+    assert result["lookup_mode"] == "latest_available"
+    assert result["transform"]["rotation"]["w"] == 1.0
+    assert "extrapolation" in result["joint_time_lookup_error"]
