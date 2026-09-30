@@ -277,7 +277,21 @@ bool validateTimedReturnTrajectory(
       collision_travel += sample_travel;
       previous_positions = point.positions;
       if (enforce_bounds && !state.satisfiesBounds(group, 1e-6)) {
-        error = "cached controller spline violates joint position bounds";
+        std::ostringstream detail;
+        detail << std::setprecision(9) << "controller spline violates joint position bounds";
+        for (const auto & name : group->getVariableNames()) {
+          const auto & bounds = state.getRobotModel()->getVariableBounds(name);
+          const double position = state.getVariablePosition(name);
+          if (bounds.position_bounded_ &&
+            (position < bounds.min_position_ || position > bounds.max_position_))
+          {
+            detail << "; joint=" << name << " position=" << position <<
+              " limits=[" << bounds.min_position_ << ", " << bounds.max_position_ <<
+              "] excess=" << std::max(bounds.min_position_ - position, position - bounds.max_position_);
+          }
+        }
+        detail << "; segment=" << index << " sample=" << sample << "/" << steps;
+        error = detail.str();
         return false;
       }
       if (minimum_joint_margin > 0.0 &&

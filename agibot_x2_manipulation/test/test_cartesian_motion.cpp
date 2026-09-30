@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <srdfdom/model.h>
 #include <urdf_parser/urdf_parser.h>
+#include <joint_trajectory_controller/trajectory.hpp>
 #include <limits>
 
 namespace agibot_x2_manipulation
@@ -119,6 +120,46 @@ TEST(CartesianMotion, ChecksControllerSplineEvenWhenEndpointsLieOnLine)
   EXPECT_FALSE(validateCartesianTrajectory(path, scene, config, translated(0, 0), translated(0.3, 0.3),
       error, []() {return false;}));
   EXPECT_NE(error.find("Cartesian path deviation"), std::string::npos);
+  // Both IK endpoints are inside the limit, but their supplied derivatives
+  // produce a controller spline above lx/rx's upper position bound of 2.
+  first.positions = {1.95, 0.0, 1.95, 0.0};
+  last.positions = {1.95, 0.3, 1.95, 0.3};
+  first.velocities = {1.0, 0.3, 1.0, 0.3};
+  last.velocities = {-1.0, 0.3, -1.0, 0.3};
+  message.joint_trajectory.points = {first, last};
+  path.setRobotTrajectoryMsg(start, message);
+  auto from = translated(0.0, 0.0);
+  auto to = translated(0.3, 0.3);
+  from.left.translation().x() = from.right.translation().x() = 1.95;
+  to.left.translation().x() = to.right.translation().x() = 1.95;
+  config.cartesian_path_position_tolerance = 0.5;  // Isolate the joint-limit failure.
+  EXPECT_FALSE(validateCartesianTrajectory(path, scene, config, from, to, error,
+      []() {return false;}));
+  EXPECT_NE(error.find("joint position bounds"), std::string::npos);
+  EXPECT_NE(error.find("joint=lx"), std::string::npos);
+  config.cartesian_path_position_tolerance = 0.02;
+  config.velocity_scaling = config.acceleration_scaling = 0.25;
+  ASSERT_TRUE(retimeCartesianWithoutOvershoot(path, config, error)) << error;
+  EXPECT_TRUE(validateCartesianTrajectory(path, scene, config, from, to, error,
+      []() {return false;})) << error;
+  moveit_msgs::msg::RobotTrajectory repaired;
+  path.getRobotTrajectoryMsg(repaired);
+  EXPECT_EQ(repaired.joint_trajectory.points.front().positions, first.positions);
+  EXPECT_EQ(repaired.joint_trajectory.points.back().positions, last.positions);
+  // The fallback slows the segment rather than altering scaled limits.
+  EXPECT_GT(path.getDuration(), 1.0);
+  joint_trajectory_controller::Trajectory controller;
+  const auto & a = repaired.joint_trajectory.points.front();
+  const auto & b = repaired.joint_trajectory.points.back();
+  const rclcpp::Time time_a(rclcpp::Duration(a.time_from_start).nanoseconds(), RCL_ROS_TIME);
+  const rclcpp::Time time_b(rclcpp::Duration(b.time_from_start).nanoseconds(), RCL_ROS_TIME);
+  for (int sample = 0; sample <= 100; ++sample) {
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    controller.interpolate_between_points(time_a, a, time_b, b,
+      time_a + rclcpp::Duration::from_seconds(path.getDuration() * sample / 100.0), point);
+    for (const double velocity : point.velocities) {EXPECT_LE(std::abs(velocity), 0.25 + 1e-9);}
+    for (const double acceleration : point.accelerations) {EXPECT_LE(std::abs(acceleration), 0.25 + 1e-9);}
+  }
 }
 }  // namespace
 }  // namespace agibot_x2_manipulation

@@ -822,8 +822,13 @@ geometric deviation at synchronized progress along both tip paths, including
 the timed controller spline. They are independent of hardware execution and
 attachment tolerances. Joint continuity uses `maximum_joint_step`; Cartesian
 timing uses MoveIt's iterative parabolic time parameterization with velocity and
-acceleration scaling, preserving IK waypoints instead of TOTG path fitting. Segment
-timing is preserved across route concatenation to avoid smoothing away the
+acceleration scaling, preserving IK waypoints instead of TOTG path fitting.
+Timing that still causes controller-spline position overshoot is retried with
+zero velocity/acceleration at each Cartesian waypoint. Quintic intervals are
+lengthened to respect scaled velocity/acceleration limits, then rechecked for
+bounds, collisions, and Cartesian deviation. This fallback stops at waypoints
+and can make the motion slower; it preserves the planned joint positions.
+Segment timing is preserved across route concatenation to avoid smoothing away the
 Cartesian path. Pick lift is replanned from measured feedback instead of rebasing
 and retiming a cached whole carry route; free-space segment reuse remains active.
 Retries retain the original lift height and preserve measured XY/orientation,

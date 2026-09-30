@@ -23,6 +23,11 @@ bool validateCartesianTrajectory(
   const HandPosePair & from, const HandPosePair & to, std::string & error,
   const CancelFunction & interrupted, double minimum_joint_margin = 0.0);
 
+// Quintic segments with zero endpoint velocity/acceleration stay between joint
+// waypoint positions. Used only when normal timing overshoots position bounds.
+bool retimeCartesianWithoutOvershoot(
+  robot_trajectory::RobotTrajectory & path, const PickPlaceConfig & config, std::string & error);
+
 bool planCartesianMotion(
   const moveit::core::RobotState & start, const HandPosePair & target,
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,

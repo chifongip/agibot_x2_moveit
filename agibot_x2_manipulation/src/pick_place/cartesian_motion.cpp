@@ -88,6 +88,44 @@ bool validateCartesianTrajectory(
     error, interrupted, true, minimum_joint_margin, valid);
 }
 
+bool retimeCartesianWithoutOvershoot(
+  robot_trajectory::RobotTrajectory & path, const PickPlaceConfig & config, std::string & error)
+{
+  const auto * group = path.getGroup();
+  if (!group || path.empty() || !std::isfinite(config.velocity_scaling) ||
+    !std::isfinite(config.acceleration_scaling) || config.velocity_scaling <= 0.0 ||
+    config.velocity_scaling > 1.0 || config.acceleration_scaling <= 0.0 || config.acceleration_scaling > 1.0)
+  {error = "invalid Cartesian fallback timing configuration"; return false;}
+  const std::vector<double> zeros(group->getVariableCount(), 0.0);
+  for (std::size_t index = 0; index < path.getWayPointCount(); ++index) {
+    auto & state = *path.getWayPointPtr(index);
+    if (!state.satisfiesBounds(group))
+    {error = "Cartesian fallback waypoint exceeds joint position bounds"; return false;}
+    state.setJointGroupVelocities(group, zeros);
+    state.setJointGroupAccelerations(group, zeros);
+    if (index == 0U) {continue;}
+    const auto & previous = path.getWayPoint(index - 1U);
+    double duration = path.getWayPointDurationFromPrevious(index);
+    for (const auto & name : group->getVariableNames()) {
+      const auto & bounds = path.getRobotModel()->getVariableBounds(name);
+      const double velocity = (bounds.velocity_bounded_ ? bounds.max_velocity_ : 1.0) * config.velocity_scaling;
+      const double acceleration = (bounds.acceleration_bounded_ ? bounds.max_acceleration_ : 1.0) * config.acceleration_scaling;
+      if (!std::isfinite(velocity) || !std::isfinite(acceleration) || velocity <= 0.0 || acceleration <= 0.0)
+      {error = "invalid Cartesian fallback motion limits for " + name; return false;}
+      const double distance = std::abs(state.getVariablePosition(name) - previous.getVariablePosition(name));
+      // Peaks of s(u)=10u^3-15u^4+6u^5: max s'=15/8,
+      // max |s''|=10/sqrt(3). Stretch intervals to respect scaled limits.
+      duration = std::max({duration, 1.875 * distance / velocity,
+        std::sqrt((10.0 / std::sqrt(3.0)) * distance / acceleration)});
+    }
+    if (!std::isfinite(duration) || duration <= 0.0)
+    {error = "invalid Cartesian fallback interval duration"; return false;}
+    path.setWayPointDurationFromPrevious(index, duration);
+  }
+  error.clear();
+  return true;
+}
+
 bool planCartesianMotion(
   const moveit::core::RobotState & start, const HandPosePair & target,
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
@@ -163,8 +201,17 @@ bool planCartesianMotion(
   {
     if (std::chrono::steady_clock::now() >= deadline) {
       error = "Cartesian validation deadline reached: " + error;
-    } else if (canceled()) {error = "Cartesian validation canceled: " + error;}
-    return false;
+      return false;
+    }
+    if (canceled()) {error = "Cartesian validation canceled: " + error; return false;}
+    if (error.find("joint position bounds") == std::string::npos) {return false;}
+    const auto original_error = error;
+    if (!retimeCartesianWithoutOvershoot(path, config, error) ||
+      !validateCartesianTrajectory(path, scene, config, from, target, error, interrupted, minimum_joint_margin))
+    {error = "Cartesian overshoot timing fallback failed: " + error; return false;}
+    RCLCPP_INFO(rclcpp::get_logger("cartesian_motion"),
+      "Cartesian spline overshoot repaired with waypoint stops and scaled motion limits: %s",
+      original_error.c_str());
   }
   const auto final = hands(path.getLastWayPoint(), config);
   if (!endpointReached(final.left, final.right, target.left, target.right,
