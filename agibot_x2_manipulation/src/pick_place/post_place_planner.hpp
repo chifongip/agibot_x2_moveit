@@ -89,6 +89,11 @@ public:
     std::chrono::steady_clock::time_point outer_deadline =
     std::chrono::steady_clock::time_point::max(), const std::string & named_target = "",
     const std::string & intermediate_target = "");
+  bool planRetreat(
+    const moveit::core::RobotState & start, const HandPosePair & target,
+    const planning_scene::PlanningScenePtr & scene, PostPlacePlan & output,
+    std::string & error, const CancelFunction & canceled,
+    std::chrono::steady_clock::time_point deadline);
   bool planToNamedTarget(
     const moveit::core::RobotState & start, const planning_scene::PlanningScenePtr & scene,
     const std::string & named_target, PostPlacePlan & output, std::string & error,

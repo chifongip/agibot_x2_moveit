@@ -2085,6 +2085,56 @@ private:
     return outcome(true, kSuccess, "box picked and moved to carry pose", held_pose_);
   }
 
+  std::string postPlaceStageName(PostPlaceStage stage) const
+  {
+    if (stage == PostPlaceStage::RETREAT) {return "retreat";}
+    if (stage == PostPlaceStage::PREPARE) {return "to_" + config_.prepare_named_target;}
+    return config_.prepare_named_target.empty() ? "to_" + config_.post_place_named_target :
+      "from_" + config_.prepare_named_target + "_to_" + config_.post_place_named_target;
+  }
+
+  bool planPostPlaceStage(
+    const moveit::core::RobotState & start, const Eigen::Isometry3d & pose,
+    const Eigen::Isometry3d & left, const Eigen::Isometry3d & right,
+    const planning_scene::PlanningScenePtr & scene, PostPlaceStage stage,
+    PostPlacePlan & output, std::string & error, const CancelFunction & canceled,
+    std::chrono::steady_clock::time_point deadline, double retreat_distance = 1.0)
+  {
+    output.segments.clear();
+    moveit::core::RobotState empty_start(start);
+    empty_start.clearAttachedBody(config_.box_id);
+    empty_start.update();
+    if (stage != PostPlaceStage::RETREAT) {
+      return post_place_planner_->planToNamedTarget(empty_start, scene,
+        stage == PostPlaceStage::PREPARE ? config_.prepare_named_target :
+        config_.post_place_named_target, output, error, canceled, deadline);
+    }
+    std::vector<const moveit::core::AttachedBody *> attached;
+    empty_start.getAttachedBodies(attached);
+    if (!attached.empty()) {
+      error = "post-place continuation blocked by attached object: " + attached.front()->getName();
+      return false;
+    }
+    auto target = motion_planner_.graspFromBoxToTcp(
+      pose, left, right, config_.pregrasp_distance * retreat_distance);
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+      return post_place_planner_->planRetreat(empty_start,
+        {target.left_pregrasp, target.right_pregrasp}, scene, output, error, canceled, deadline);
+    }
+    target.left_contact = target.left_pregrasp;
+    target.right_contact = target.right_pregrasp;
+    target.left_pregrasp = empty_start.getGlobalLinkTransform(config_.left_tcp);
+    target.right_pregrasp = empty_start.getGlobalLinkTransform(config_.right_tcp);
+    PostPlaceSegment retreat;
+    retreat.name = "coordinated_retreat";
+    retreat.retreat = true;
+    moveit::core::RobotState retreat_end(empty_start);
+    if (!motion_planner_.buildRetreat(empty_start, target, scene, retreat.trajectory,
+        retreat_end, error, canceled, deadline)) {return false;}
+    output.segments.push_back(std::move(retreat));
+    return true;
+  }
+
   bool planPostPlaceSequence(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & pose,
     const Eigen::Isometry3d & left, const Eigen::Isometry3d & right,
@@ -2093,71 +2143,65 @@ private:
     std::chrono::steady_clock::time_point deadline, bool include_prepare = true)
   {
     output.segments.clear();
-    const std::string intermediate = include_prepare ? config_.prepare_named_target : "";
-    moveit::core::RobotState empty_start(start);
-    empty_start.clearAttachedBody(config_.box_id);
-    empty_start.update();
-    std::vector<const moveit::core::AttachedBody *> attached;
-    empty_start.getAttachedBodies(attached);
-    if (!attached.empty()) {
-      error = "post-place continuation blocked by attached object: " + attached.front()->getName();
+    const std::vector<double> distances = include_retreat &&
+      config_.motion_planning_mode != MotionPlanningMode::POSE_TO_POSE ?
+      std::vector<double>{1.0, 1.5, 2.0} : std::vector<double>{1.0};
+    for (const auto distance : distances) {
+      PostPlacePlan candidate;
+      moveit::core::RobotState current(start);
+      current.clearAttachedBody(config_.box_id);
+      bool feasible = true;
+      for (const auto stage : {PostPlaceStage::RETREAT, PostPlaceStage::PREPARE, PostPlaceStage::READY}) {
+        if ((stage == PostPlaceStage::RETREAT && !include_retreat) ||
+          (stage == PostPlaceStage::PREPARE &&
+          (!include_prepare || config_.prepare_named_target.empty()))) {continue;}
+        PostPlacePlan part;
+        if (canceled() || std::chrono::steady_clock::now() >= deadline ||
+          !planPostPlaceStage(current, pose, left, right, scene, stage, part, error,
+          canceled, deadline, distance)) {feasible = false; break;}
+        for (const auto & segment : part.segments) {
+          robot_trajectory::RobotTrajectory trajectory(current.getRobotModel(), config_.planning_group);
+          trajectory.setRobotTrajectoryMsg(current, segment.trajectory);
+          if (trajectory.empty()) {error = "empty post-place trajectory"; feasible = false; break;}
+          current = trajectory.getLastWayPoint();
+          candidate.segments.push_back(segment);
+        }
+        if (!feasible) {break;}
+      }
+      if (feasible && !candidate.segments.empty()) {output = std::move(candidate); return true;}
+    }
+    return false;
+  }
+
+  bool refreshPostPlaceTable(
+    std::uint64_t & consumed_generation, const CancelFunction & canceled,
+    const FeedbackFunction & feedback, const std::string & phase,
+    const geometry_msgs::msg::PoseStamped & pose, std::string & error)
+  {
+    if (!config_.table_collision_enabled || !table_tag_pose_tracker_) {return true;}
+    geometry_msgs::msg::PoseStamped observation;
+    std::uint64_t generation = consumed_generation;
+    const double timeout = std::max(0.0, std::min(config_.tag_reacquisition_timeout,
+      std::chrono::duration<double>(phase_deadline_ - std::chrono::steady_clock::now()).count()));
+    if (!table_tag_pose_tracker_->waitForStablePoseAfter(consumed_generation, timeout,
+        canceled, observation, generation, error, [&]() {
+          RCLCPP_INFO(node_->get_logger(), "%s: waiting for updated table state", phase.c_str());
+          feedback("waiting_for_table/" + phase, 0.90F, pose);
+        }))
+    {
+      error = "waiting for updated table state: " + error;
       return false;
     }
-    if (!include_retreat) {
-      return post_place_planner_->plan(empty_start, {}, scene, false, output, error, canceled,
-        deadline, config_.post_place_named_target, intermediate);
+    // Consume even if scene application fails: a retry must acquire a new observation.
+    consumed_generation = generation;
+    try {
+      return planning_scene_.applyTable(tablePoseFromVerticalTag(toEigen(observation.pose),
+        config_.table_dimensions, config_.table_tag_to_tabletop_center), error) &&
+        planning_scene_.synchronize(error);
+    } catch (const std::exception & exception) {
+      error = "invalid fresh table observation: " + std::string(exception.what());
+      return false;
     }
-    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
-      // Pose-to-pose mode has no closed-chain constraint to preserve after
-      // release. Plan the one requested disengagement pose, followed by the
-      // named target, instead of searching closed-chain retreat variants.
-      const auto retreat = motion_planner_.graspFromBoxToTcp(
-        pose, left, right, config_.pregrasp_distance);
-      const HandPosePair retreat_target{retreat.left_pregrasp, retreat.right_pregrasp};
-      return post_place_planner_->plan(
-        empty_start, retreat_target, scene, true, output, error, canceled, deadline,
-        config_.post_place_named_target, intermediate);
-    }
-    // Try farther coordinated disengagement endpoints if the nominal endpoint
-    // has no named-target continuation. Each complete retreat/return attempt
-    // may use the remaining global budget: splitting that budget before the
-    // named-target search can reject a feasible pair merely because retreat
-    // generation consumed its arbitrary per-attempt slice.
-    const std::vector<double> distances{1.0, 1.5, 2.0};
-    for (std::size_t attempt = 0; attempt < distances.size(); ++attempt) {
-      const auto now = std::chrono::steady_clock::now();
-      if (canceled() || now >= deadline) {
-        break;
-      }
-      const auto attempt_deadline = deadline;
-      moveit::core::RobotState retreat_end(empty_start);
-      PostPlaceSegment retreat;
-      auto target = motion_planner_.graspFromBoxToTcp(
-        pose, left, right, config_.pregrasp_distance * distances[attempt]);
-      // Coordinated interpolation starts at actual TCPs, not approximate placement IK targets.
-      target.left_contact = target.left_pregrasp;
-      target.right_contact = target.right_pregrasp;
-      target.left_pregrasp = retreat_end.getGlobalLinkTransform(config_.left_tcp);
-      target.right_pregrasp = retreat_end.getGlobalLinkTransform(config_.right_tcp);
-      retreat.name = "coordinated_retreat";
-      retreat.retreat = true;
-      if (!motion_planner_.buildRetreat(retreat_end, target, scene, retreat.trajectory,
-          retreat_end, error, canceled, attempt_deadline))
-      {
-        continue;
-      }
-      PostPlacePlan named;
-      if (!post_place_planner_->plan(retreat_end, {}, scene, false, named, error, canceled,
-          attempt_deadline, config_.post_place_named_target, intermediate))
-      {
-        continue;
-      }
-      output.segments.push_back(std::move(retreat));
-      output.segments.insert(output.segments.end(), named.segments.begin(), named.segments.end());
-      return true;
-    }
-    error = "no coordinated retreat with a valid named-target continuation: " + error;
-    return false;
   }
 
   bool validatePostPlaceSegment(
@@ -2395,48 +2439,65 @@ private:
 
     held_pose_ = geometry_msgs::msg::PoseStamped();
     PostPlaceProgress progress(config_.prepare_named_target);
+    std::uint64_t table_generation = 0;
+    unsigned int last_pause_id = phase_controller_.snapshot().pause_id;
     while (!progress.complete()) {
-      const auto * pending = progress.current();
-      const std::string phase = pending ?
-        (pending->retreat ? "retreat" : pending->name) : "return";
+      const std::string phase = postPlaceStageName(progress.stage());
       if (!runPhase(phase, false, feedback, 0.90F, place_message, canceled, error,
           [&](const CancelFunction & planning_canceled, std::string & failure) {
+            progress.invalidate();
             if (!refreshMotionState(failure, planning_canceled, false)) {return false;}
-            bool scene_changed = false;
+            const auto pause_id = phase_controller_.snapshot().pause_id;
+            if (pause_id != last_pause_id && table_tag_pose_tracker_) {
+              // This attempt starts after Continue acceptance, so requiring an
+              // observation newer than now also excludes pre-Continue detections.
+              table_generation = std::max(table_generation, table_tag_pose_tracker_->generation());
+              last_pause_id = pause_id;
+            }
             if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_,
-                failure, planning_canceled, &scene_changed)) {
-              if (scene_changed) {progress.invalidate();}
-              return false;
-            }
+                failure, planning_canceled) ||
+              !refreshPostPlaceTable(table_generation, planning_canceled, feedback,
+                phase, place_message, failure)) {return false;}
             current = move_group_.getCurrentState(config_.reset_state_timeout);
-            if (!current) {failure = "measured return state unavailable"; return false;}
-            const auto * segment = progress.current();
-            if (!segment || !validatePostPlaceSegment(*segment, *current,
-                planning_scene_.snapshot(), failure, planning_canceled))
-            {
-              const auto deadline = std::min(phase_deadline_, std::chrono::steady_clock::now() +
-                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::duration<double>(config_.return_planning_timeout)));
-              if (!progress.replan([&](PostPlacePlan & candidate) {
-                  return planPostPlaceSequence(*current, place_pose, held_box_to_left_contact_,
-                    held_box_to_right_contact_, planning_scene_.snapshot(), progress.include_retreat(),
-                    candidate, failure, planning_canceled, deadline, progress.include_prepare());
-                }, failure)) {return false;}
-              segment = progress.current();
+            if (!current) {failure = "measured post-place state unavailable"; return false;}
+            const auto deadline = std::min(phase_deadline_, std::chrono::steady_clock::now() +
+              std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+              std::chrono::duration<double>(config_.return_planning_timeout)));
+            if (!progress.replan([&](PostPlacePlan & candidate) {
+                const std::vector<double> distances = progress.stage() == PostPlaceStage::RETREAT &&
+                  config_.motion_planning_mode != MotionPlanningMode::POSE_TO_POSE ?
+                  std::vector<double>{1.0, 1.5, 2.0} : std::vector<double>{1.0};
+                for (const auto distance : distances) {
+                  if (planning_canceled() || std::chrono::steady_clock::now() >= deadline) {break;}
+                  if (planPostPlaceStage(*current, place_pose, held_box_to_left_contact_,
+                      held_box_to_right_contact_, planning_scene_.snapshot(), progress.stage(),
+                      candidate, failure, planning_canceled, deadline, distance)) {return true;}
+                }
+                return false;
+              }, failure)) {return false;}
+            while (const auto * segment = progress.current()) {
+              if (!refreshMotionState(failure, planning_canceled, false)) {return false;}
+              bool scene_changed = false;
+              if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_,
+                  failure, planning_canceled, &scene_changed)) {return false;}
+              current = move_group_.getCurrentState(config_.reset_state_timeout);
+              if (!current) {failure = "measured post-place state unavailable"; return false;}
+              if (!validatePostPlaceSegment(*segment, *current,
+                  planning_scene_.snapshot(), failure, planning_canceled)) {return false;}
+              if (!segment->no_motion && !trajectory_executor_.execute(segment->trajectory, canceled)) {
+                failure = trajectory_executor_.error("post-place execution failed");
+                return false;
+              }
+              if (canceled()) {failure = "post-place execution canceled"; return false;}
+              progress.advance_segment();
             }
-            if (!segment->no_motion && !trajectory_executor_.execute(segment->trajectory, canceled)) {
-              failure = trajectory_executor_.error("return execution failed");
-              progress.invalidate();
-              return false;
-            }
-            return true;
+            return progress.stage_complete();
           }))
       {
         return outcome(false, kPlanningFailed, "box placed; " + error, place_message);
       }
-      const auto * completed = progress.current();
-      taskCheckpoint(completed->retreat ? "retreat" : completed->name, "released");
-      progress.advance();
+      taskCheckpoint(phase, "released");
+      progress.advance_stage();
     }
     if (canceled()) {
       setState(ManipulationState::EMPTY,

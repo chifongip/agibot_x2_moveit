@@ -992,6 +992,41 @@ bool PostPlacePlanner::plan(
   return false;
 }
 
+bool PostPlacePlanner::planRetreat(
+  const moveit::core::RobotState & start, const HandPosePair & target,
+  const planning_scene::PlanningScenePtr & scene, PostPlacePlan & output,
+  std::string & error, const CancelFunction & canceled, Deadline deadline)
+{
+  output.segments.clear();
+  error.clear();
+  const auto release = contactScene(scene, true);
+  const auto strict = contactScene(scene, false);
+  const auto * group = start.getJointModelGroup(config_.planning_group);
+  if (!group) {error = "retreat planning group unavailable"; return false;}
+  auto checked_start = start;
+  if (!validState(checked_start, release, group, error)) {
+    error = "retreat start invalid: " + error;
+    return false;
+  }
+  auto end = start;
+  PostPlaceSegment retreat;
+  retreat.name = "retreat";
+  retreat.retreat = true;
+  const bool planned = planCartesianMotion(start, target, release, config_, retreat.trajectory,
+    end, error, canceled, deadline);
+  if (trace_.enabled()) {
+    trace_.write(node_->now().nanoseconds(), "cartesian_segment", planned, error,
+      {{"segment", "retreat"}});
+  }
+  if (!planned) {return false;}
+  if (!validState(end, strict, group, error)) {
+    error = "retreat endpoint has not cleared the placed box: " + error;
+    return false;
+  }
+  output.segments.push_back(std::move(retreat));
+  return true;
+}
+
 bool PostPlacePlanner::planToNamedTarget(
   const moveit::core::RobotState & start, const planning_scene::PlanningScenePtr & scene,
   const std::string & named_target, PostPlacePlan & output, std::string & error,

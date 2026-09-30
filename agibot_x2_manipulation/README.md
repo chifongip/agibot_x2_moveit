@@ -815,34 +815,48 @@ refresh behavior and does not require reacquiring tags that are absent.
 
 ### Post-place return planning
 
-Place and PickPlace feasibility checks include release, retreat, and return to
-the exact `post_place_named_target` joint configuration via `prepare_named_target`.
-Before placement motion,
-the server checks this continuation on an independent scene snapshot with the
-box released at the selected placement pose. The live collision scene is not
-changed by this check. If the continuation fails, adaptive placement may try
-another candidate inside its existing pose tolerances.
-Candidate continuation checks share one return budget per adaptive placement
-search, including time already spent generating the placement candidate.
+Place and PickPlace `plan_only` feasibility checks include release, retreat,
+Prepare, and return to the exact `post_place_named_target` joint configuration.
+They compose the same stage planners using hypothetical endpoints on an
+independent released-box scene snapshot. Ordinary execution checks placement
+feasibility before moving, then plans post-place stages after physical release.
 
-After physical release, the server searches again from measured feedback. It
-plans an outward retreat using the existing coordinated approach search in
-reverse, with actual release TCPs as its interpolation start. Only this retreat
-uses the existing grasp touch allowances for the task box (hand pads, TCPs, and
-wrist links); tables and other obstacles remain collision-checked. The box stays
-in the snapshot throughout retreat planning and validation. The retreat endpoint
-must be collision-free with all task-box touch allowances disabled.
-If that endpoint has no valid named-target continuation, the server also tries
-retreat distances of 1.5 and 2 times `pregrasp_distance`, dividing the remaining
-shared budget between attempts. This changes no configured grasp parameters.
-The dedicated named-target planner then tries a direct return; if direct return fails, it
-searches paired hand poses above and toward the robot from the table. These are
-pose endpoints connected by whole-dual-arm RRTConnect plans, not straight
-Cartesian hand paths. Both segments of a clearance route must pass before any
-segment executes. The table, placed box, visible obstacles, and octomap remain
-present. Named-target return and reset never inherit retreat touch allowances.
-Wrist collisions with the table are always checked. Both the retreat and named
-continuation must be feasible before any post-place segment executes.
+Post-place execution plans and executes each stage independently: Retreat →
+`prepare_named_target` → `post_place_named_target`. An empty Prepare target skips
+that stage. A colliding Ready target does not block a feasible Retreat or Prepare.
+Each completed stage is checkpointed; failures pause the active stage after its
+configured retries. Continue replans that unfinished stage from measured state
+without repeating completed stages. If part of a clearance route executed before
+failure, its cached remainder is discarded and the same stage target is replanned
+from current feedback. Cancellation does not mark the interrupted stage complete.
+The action succeeds only after the final named target completes.
+
+Retreat starts at measured TCP poses and retains the placed box as a world
+obstacle. Pose-to-pose mode uses Cartesian disengagement; coordinated mode uses
+the approach search in reverse and may try 1.5 and 2 times `pregrasp_distance`
+when the nominal Retreat itself is infeasible. Only Retreat uses task-box touch
+allowances for hand pads, TCPs, and wrist links. Its endpoint must be collision-free
+with those allowances disabled. Tables and other obstacles remain checked;
+Prepare, Ready, and Reset never inherit Retreat touch allowances. Named-target
+stages preserve their existing direct and clearance-route searches and controller
+spline validation. Each segment is checked against current feedback and scene
+before execution.
+
+When table tracking is enabled, every post-place planning attempt explicitly
+waits for a fresh stable table observation, applies `work_table`, and synchronizes
+the MoveIt scene before obtaining measured robot state and planning. Retries
+require a stable observation newer than the last one consumed, even if its pose
+is unchanged. Continue requires an observation newer than the resumed attempt's
+freshness barrier, so observations predating Continue cannot satisfy the wait.
+Feedback reports `waiting_for_table/<stage>` while waiting; stage names are
+`retreat`, `to_<prepare>`, and `from_<prepare>_to_<ready>` (or `to_<ready>` when
+Prepare is skipped). Waiting is bounded by `tag_reacquisition_timeout` and the
+remaining phase deadline, and supports cancellation and Reset interruption.
+Timeouts use the existing retry/pause flow; no planning uses the old table
+observation after such a timeout. Table tracking disabled requires no observation
+wait. Existing visible-obstacle freshness checks remain in force. The released
+task box is still represented at its selected placement pose; it is not reacquired
+from detections during post-place retries.
 
 The return-specific defaults are `return_planning_timeout: 30.0` seconds,
 `return_planning_time_per_attempt: 2.0` seconds, and `return_ik_attempts: 8`.
@@ -1269,12 +1283,12 @@ release, retreat, and return-to-prepare checkpoints are preserved. Other motion
 goals are rejected while the task is active or paused. Standard action
 cancellation and reset preemption remain available.
 
-Place keeps the remaining return segments and completed checkpoints together.
-A failed replan discards its temporary candidate and invalidates the pending
-segment, so Continue obtains a complete new sequence before executing again.
-Reaching Prepare completes only that intermediate checkpoint; the task continues
-through Ready before reporting success. Failed or empty planning results cannot
-shorten the saved sequence or count as completed motion.
+Place tracks completed stages separately from the active stage's planned route.
+A failed replan discards its temporary candidate; Continue obtains a new plan only
+for the unfinished stage, after acquiring a newer stable table observation when
+tracking is enabled. Reaching Prepare completes that checkpoint; Ready is planned
+and executed afterward before reporting success. Failed or empty planning results
+cannot advance a stage or count as completed motion.
 
 Attachment/release failures known to occur before dispatch may retry. An
 uncertain result after dispatch requires explicit recovery; the physical

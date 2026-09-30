@@ -940,6 +940,70 @@ TEST_F(ReturnSearchTest, HypotheticalReleaseClearsOnlyItsAttachedBox)
   EXPECT_TRUE(output.segments.empty());
 }
 
+TEST_F(ReturnSearchTest, PreparePlansDespiteReadyCollisionAndReadyReplansAfterTableUpdate)
+{
+  const auto robot = model();
+  for (const auto mode : {MotionPlanningMode::POSE_TO_POSE, MotionPlanningMode::CLOSED_CHAIN}) {
+    auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+    obstacle(scene, -0.3, 0.6);  // Ready is blocked; Prepare and the release state are clear.
+    auto settings = config();
+    settings.motion_planning_mode = mode;
+    settings.post_place_named_target = "ready";
+    auto node = std::make_shared<rclcpp::Node>("independent_prepare_test");
+    PostPlacePlanner planner(node, settings, robot);
+    moveit::core::RobotState start(robot);
+    start.setToDefaultValues();
+    start.setVariablePosition("slide", 0.3);
+    start.update();
+    PostPlacePlan output;
+    std::string error;
+    EXPECT_FALSE(planner.plan(start, {}, scene, false, output, error,
+        []() {return false;}, std::chrono::steady_clock::time_point::max(), "ready", "prepare"));
+    EXPECT_NE(error.find("return named target invalid"), std::string::npos);
+    ASSERT_TRUE(planner.planToNamedTarget(start, scene, "prepare", output, error,
+        []() {return false;})) << error;
+    for (const auto & segment : output.segments) {
+      EXPECT_TRUE(planner.validateSegment(segment, start, scene, error,
+          []() {return false;}, true)) << error;
+      robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+      trajectory.setRobotTrajectoryMsg(start, segment.trajectory);
+      start = trajectory.getLastWayPoint();
+    }
+    EXPECT_NEAR(start.getVariablePosition("slide"), 0.0, 1e-3);
+    EXPECT_NEAR(start.getVariablePosition("lift"), 0.2, 1e-3);
+    EXPECT_FALSE(planner.planToNamedTarget(start, scene, "ready", output, error,
+        []() {return false;}));
+    EXPECT_TRUE(output.segments.empty());
+    obstacle(scene, -0.8);  // A later refreshed scene clears Ready.
+    ASSERT_TRUE(planner.planToNamedTarget(start, scene, "ready", output, error,
+        []() {return false;})) << error;
+    EXPECT_TRUE(planner.validateSegment(output.segments.front(), start, scene, error,
+        []() {return false;}, true)) << error;
+  }
+}
+
+TEST_F(ReturnSearchTest, RejectsCollidingPrepareWithoutCheckingReady)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  obstacle(scene, 0.0, 0.6);
+  auto settings = config();
+  settings.post_place_named_target = "missing_ready";
+  auto node = std::make_shared<rclcpp::Node>("independent_prepare_collision_test");
+  PostPlacePlanner planner(node, settings, robot);
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", 0.3);
+  start.update();
+  PostPlacePlan output;
+  std::string error;
+  EXPECT_FALSE(planner.planToNamedTarget(start, scene, "prepare", output, error,
+      []() {return false;}));
+  EXPECT_NE(error.find("return named target invalid: collision"), std::string::npos);
+  EXPECT_EQ(error.find("missing_ready"), std::string::npos);
+  EXPECT_TRUE(output.segments.empty());
+}
+
 TEST_F(ReturnSearchTest, UsesExplicitResetTargetAndRejectsUnreleasedObjects)
 {
   const auto robot = model();

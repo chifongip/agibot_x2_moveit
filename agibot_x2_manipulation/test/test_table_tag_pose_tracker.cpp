@@ -258,6 +258,46 @@ TEST_F(TableTagPoseTrackerTest, UsesLatestTransformWhenDetectionTfArrivesLater)
   EXPECT_NEAR(stable_pose.pose.position.x, 0.25, 1e-6);
 }
 
+TEST_F(TableTagPoseTrackerTest, RequiresNewStableObservationAndAcceptsUnchangedPose)
+{
+  const auto publish_sample = [&](double x = 0.25) {
+      const auto stamp = node_->now();
+      publishTransform(x, stamp);
+      spinFor(std::chrono::milliseconds(10));
+      publishDetection(stamp);
+      spinFor(std::chrono::milliseconds(20));
+    };
+  for (int index = 0; index < 3; ++index) {publish_sample();}
+  const auto previous = tracker_->generation();
+  ASSERT_GT(previous, 0U);
+  geometry_msgs::msg::PoseStamped pose;
+  std::uint64_t consumed = 0;
+  std::string error;
+  EXPECT_FALSE(tracker_->waitForStablePoseAfter(previous, 0.02,
+      []() {return false;}, pose, consumed, error));
+  EXPECT_EQ(consumed, 0U);
+  int waits = 0;
+  ASSERT_TRUE(tracker_->waitForStablePoseAfter(previous, 0.2,
+      []() {return false;}, pose, consumed, error, [&]() {
+        ++waits;
+        publish_sample();
+      })) << error;
+  EXPECT_EQ(waits, 1);
+  EXPECT_GT(consumed, previous);
+  EXPECT_NEAR(pose.pose.position.x, 0.25, 1e-6);
+  // An old observation cannot be reused after Continue's generation barrier.
+  EXPECT_FALSE(tracker_->waitForStablePoseAfter(consumed, 0.02,
+      []() {return false;}, pose, consumed, error));
+  EXPECT_FALSE(tracker_->waitForStablePoseAfter(consumed, 1.0,
+      []() {return true;}, pose, consumed, error));
+  EXPECT_EQ(error, "waiting for stable table tag pose canceled");
+  const auto stable_generation = tracker_->generation();
+  publish_sample(0.4);  // Movement outside the stability window is not a stable update.
+  EXPECT_EQ(tracker_->generation(), stable_generation);
+  EXPECT_FALSE(tracker_->waitForStablePoseAfter(0, 0.02,
+      []() {return false;}, pose, consumed, error));
+}
+
 TEST_F(TableTagPoseTrackerTest, RejectsStaleLatestTransform)
 {
   tracker_.reset();

@@ -11,14 +11,13 @@ from ament_index_python.packages import get_package_share_directory
 from agibot_x2_manipulation_msgs.action import Pick, Place
 from agibot_x2_manipulation_msgs.msg import ManipulationTaskStatus
 from agibot_x2_manipulation_msgs.srv import ContinueManipulation
-from geometry_msgs.msg import Pose
 import launch_testing
 import pytest
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from moveit_msgs.msg import CollisionObject
-from moveit_msgs.srv import ApplyPlanningScene
+from moveit_msgs.srv import ApplyPlanningScene, GetPositionFK
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 
@@ -40,20 +39,17 @@ class TestPlaceContinue(workflow.TestDummyWorkflow):
             rclpy.spin_once(self.node, timeout_sec=0.05)
         self.assertTrue(predicate(), [(s.phase, s.status, s.failure) for s in self.statuses[-8:]])
 
-    @staticmethod
-    def blocker_request(present):
+    def blocker_request(self, present):
         obj = CollisionObject()
         obj.id = "place_continue_blocker"
         obj.header.frame_id = "base_link"
         obj.operation = CollisionObject.ADD if present else CollisionObject.REMOVE
         if present:
             primitive = SolidPrimitive()
-            primitive.type = SolidPrimitive.BOX
-            primitive.dimensions = [4.0, 4.0, 4.0]
+            primitive.type = SolidPrimitive.SPHERE
+            primitive.dimensions = [0.03]
             obj.primitives = [primitive]
-            pose = Pose()
-            pose.orientation.w = 1.0
-            obj.primitive_poses = [pose]
+            obj.primitive_poses = [self.ready_blocker_pose]
         request = ApplyPlanningScene.Request()
         request.scene.is_diff = True
         request.scene.robot_state.is_diff = True
@@ -68,6 +64,11 @@ class TestPlaceContinue(workflow.TestDummyWorkflow):
         self.assertTrue(scene.wait_for_service(timeout_sec=40.0))
         self.assertTrue(resume.wait_for_service(timeout_sec=40.0))
         blocking = None
+        fk = self.node.create_client(GetPositionFK, "/compute_fk")
+        self.assertTrue(fk.wait_for_service(timeout_sec=40.0))
+        srdf = Path(get_package_share_directory("agibot_x2_moveit_config")) / "config/x2_ultra.srdf"
+        ready = ET.parse(srdf).find(".//group_state[@name='ready'][@group='dual_arm']")
+        expected = {joint.attrib["name"]: float(joint.attrib["value"]) for joint in ready}
 
         def status(message):
             nonlocal blocking
@@ -88,6 +89,16 @@ class TestPlaceContinue(workflow.TestDummyWorkflow):
         try:
             picked = self.send_goal(Pick, "/pick_box", Pick.Goal(instance_id="tag:0"), 90.0)
             self.assertTrue(picked.object_held)
+            request = GetPositionFK.Request()
+            request.header.frame_id = "base_link"
+            request.fk_link_names = ["right_hand_pad_link"]
+            configuration = {**joints, **expected}
+            request.robot_state.joint_state.name = list(configuration)
+            request.robot_state.joint_state.position = list(configuration.values())
+            computed = fk.call_async(request)
+            self.wait(computed.done)
+            self.assertEqual(computed.result().error_code.val, 1)
+            self.ready_blocker_pose = computed.result().pose_stamped[0].pose
             client = ActionClient(self.node, Place, "/place_box")
             self.assertTrue(client.wait_for_server(timeout_sec=10.0))
             goal = Place.Goal()
@@ -104,7 +115,15 @@ class TestPlaceContinue(workflow.TestDummyWorkflow):
             paused = next(s for s in reversed(self.statuses)
                           if s.task_id == task_id and s.status == "paused")
             self.assertEqual(paused.object_disposition, "released")
+            self.assertEqual(paused.phase, "from_prepare_to_ready")
+            self.assertEqual(paused.last_completed_phase, "to_prepare")
+            self.assertIn("return named target invalid: collision", paused.failure)
+            checkpoints_before = [s.last_completed_phase for s in self.statuses
+                                  if s.task_id == task_id]
+            self.assertIn("retreat", checkpoints_before)
+            self.assertIn("to_prepare", checkpoints_before)
             self.assertFalse(result.done())
+            resume_index = len(self.statuses)
             removed = scene.call_async(self.blocker_request(False))
             self.wait(removed.done)
             self.assertTrue(removed.result().success)
@@ -121,9 +140,10 @@ class TestPlaceContinue(workflow.TestDummyWorkflow):
             self.assertIn("to_prepare", checkpoints)
             self.assertIn("from_prepare_to_ready", checkpoints)
             # Action success alone would miss the original early-completion bug.
-            srdf = Path(get_package_share_directory("agibot_x2_moveit_config")) / "config/x2_ultra.srdf"
-            ready = ET.parse(srdf).find(".//group_state[@name='ready'][@group='dual_arm']")
-            expected = {joint.attrib["name"]: float(joint.attrib["value"]) for joint in ready}
+            resumed_phases = [s.phase for s in self.statuses[resume_index:]
+                              if s.task_id == task_id]
+            self.assertNotIn("retreat", resumed_phases)
+            self.assertNotIn("to_prepare", resumed_phases)
             self.wait(lambda: all(name in joints and abs(joints[name] - value) <= 0.1
                                   for name, value in expected.items()), timeout=10.0)
             client.destroy()
@@ -134,6 +154,7 @@ class TestPlaceContinue(workflow.TestDummyWorkflow):
             self.node.destroy_subscription(joint_subscription)
             self.node.destroy_client(scene)
             self.node.destroy_client(resume)
+            self.node.destroy_client(fk)
 
 
 @launch_testing.post_shutdown_test()

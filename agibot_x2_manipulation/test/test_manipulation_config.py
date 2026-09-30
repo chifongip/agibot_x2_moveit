@@ -290,7 +290,8 @@ def test_post_place_separates_coordinated_retreat_from_named_target_planning():
         Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
     ).read_text(encoding="utf-8")
     assert "motion_planner_.buildRetreat(" in server_source
-    assert "post_place_planner_->plan(retreat_end, {}, scene, false" in server_source
+    assert "post_place_planner_->planToNamedTarget(empty_start, scene," in server_source
+    assert "post_place_planner_->planRetreat(empty_start," in server_source
     assert "validatePostPlaceSegment(" in server_source
     assert "postPlaceRetreatTarget" not in server_source
 

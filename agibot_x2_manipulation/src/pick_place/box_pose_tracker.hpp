@@ -13,6 +13,7 @@
 #include <Eigen/Geometry>
 
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -128,6 +129,13 @@ public:
     geometry_msgs::msg::PoseStamped & output, std::string & error,
     const std::function<void()> & waiting = {}) const;
 
+  // A stable observation generation advances even when the detected pose is unchanged.
+  std::uint64_t generation() const;
+  bool waitForStablePoseAfter(
+    std::uint64_t minimum_generation, double timeout, const std::function<bool()> & canceled,
+    geometry_msgs::msg::PoseStamped & output, std::uint64_t & generation,
+    std::string & error, const std::function<void()> & waiting = {}) const;
+
 private:
   void onDetections(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message);
   void updateStablePose(
@@ -143,6 +151,7 @@ private:
   mutable std::condition_variable stable_pose_condition_;
   TableTagPoseStabilityFilter stability_filter_;
   bool have_stable_pose_{false};
+  std::uint64_t stable_generation_{0};
   geometry_msgs::msg::PoseStamped stable_pose_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;

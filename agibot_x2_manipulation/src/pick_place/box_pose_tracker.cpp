@@ -419,6 +419,7 @@ void TableTagPoseTracker::updateStablePose(
     stable_pose_.pose.position.z = stable_sample.translation().z();
     stable_pose_.pose.orientation = tf2::toMsg(Eigen::Quaterniond(stable_sample.linear()));
     have_stable_pose_ = true;
+    ++stable_generation_;
     stable_pose = stable_pose_;
   }
   stable_pose_condition_.notify_all();
@@ -432,6 +433,21 @@ bool TableTagPoseTracker::waitForStablePose(
   geometry_msgs::msg::PoseStamped & output, std::string & error,
   const std::function<void()> & waiting) const
 {
+  std::uint64_t consumed_generation = 0;
+  return waitForStablePoseAfter(0, timeout, canceled, output, consumed_generation, error, waiting);
+}
+
+std::uint64_t TableTagPoseTracker::generation() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return stable_generation_;
+}
+
+bool TableTagPoseTracker::waitForStablePoseAfter(
+  std::uint64_t minimum_generation, double timeout, const std::function<bool()> & canceled,
+  geometry_msgs::msg::PoseStamped & output, std::uint64_t & generation,
+  std::string & error, const std::function<void()> & waiting) const
+{
   error.clear();
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout);
   bool announced = false;
@@ -441,10 +457,11 @@ bool TableTagPoseTracker::waitForStablePose(
       error = "waiting for stable table tag pose canceled";
       return false;
     }
-    if (have_stable_pose_ &&
+    if (have_stable_pose_ && stable_generation_ > minimum_generation &&
       (node_->now() - stable_pose_.header.stamp).seconds() <= maximum_age_)
     {
       output = stable_pose_;
+      generation = stable_generation_;
       return true;
     }
     const auto now = std::chrono::steady_clock::now();

@@ -51,7 +51,17 @@ def make_test_description(box_profiles_file=None):
         arguments=["--endpoint", f"tcp://127.0.0.1:{port}", "--initial-pose", "locomanipulation"],
         output="screen",
     )
-    return LaunchDescription([fake, stack, launch_testing.actions.ReadyToTest()])
+    # The table detector is disabled in this fixture. Publish a test-only
+    # table outside the workspace so post-place freshness waits can complete.
+    table = Node(
+        package="agibot_x2_manipulation", executable="dummy_apriltag_node",
+        name="simulated_table_tag", parameters=[{
+            "parent_frame": "base_link", "tag_frame": "tag9", "tag_id": 9,
+            "detections_topic": "/front_center_rectify/detections",
+            "x": 10.0, "y": 0.0, "z": 0.0, "publish_rate": 30.0,
+        }],
+    )
+    return LaunchDescription([fake, stack, table, launch_testing.actions.ReadyToTest()])
 
 
 class TestMovedBoxRetry(unittest.TestCase):
