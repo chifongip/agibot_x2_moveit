@@ -628,6 +628,7 @@ public:
     const moveit::core::RobotState * preferred_endpoint = nullptr,
     bool * validated_segment_timing = nullptr)
   {
+    cartesian_segments_.clear();
     std::size_t motion_segments = 0;
     bool all_segments_timed = true;
     if (validated_segment_timing) {*validated_segment_timing = false;}
@@ -680,7 +681,12 @@ public:
         robot_trajectory::RobotTrajectory cartesian(state.getRobotModel(), config_.planning_group);
         cartesian.setRobotTrajectoryMsg(state, message);
         if (trajectory.getWayPointCount() == 1U) {*trajectory.getFirstWayPointPtr() = cartesian.getFirstWayPoint();}
+        const auto first = trajectory.getWayPointCount() - 1U;
+        const HandPosePair from{state.getGlobalLinkTransform(config_.left_tcp),
+          state.getGlobalLinkTransform(config_.right_tcp)};
         trajectory.append(cartesian, cartesian.getWayPointDurationFromPrevious(1), 1);
+        cartesian_segments_.push_back({first, trajectory.getWayPointCount() - 1U,
+          from, {grasp.left_contact, grasp.right_contact}});
         state = end;
         ++motion_segments;
         continue;
@@ -1620,7 +1626,7 @@ public:
     }
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       moveit_msgs::msg::CollisionObject saved_box;
-      if (plan_only && !planning_scene_.beginVirtualAttachment(saved_box, error)) {
+      if (plan_only && !planning_scene_.beginVirtualAttachment(saved_box, error, &box_to_left_contact)) {
         return false;
       }
       const bool planned = appendPoseToPoseObjectPath(
@@ -1874,6 +1880,7 @@ public:
       if (planned && !canceled()) {
         selected.pose = target;
         selected.route = CarryRoute::DIRECT;
+        selected.cartesian = cartesian_segments_;
         selected.trajectory = std::move(trajectory);
         selected.end_state = std::make_shared<moveit::core::RobotState>(end);
         search_success = true;
@@ -2041,6 +2048,7 @@ public:
           }
           selected.pose = endpoint.pose;
           selected.route = route;
+          selected.cartesian = cartesian_segments_;
           selected.trajectory = std::move(trajectory);
           selected.end_state = std::make_shared<moveit::core::RobotState>(end);
           RCLCPP_INFO(
@@ -2133,7 +2141,7 @@ public:
     const std::string route_name = std::string("place_") + carryRouteName(route);
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       moveit_msgs::msg::CollisionObject saved_box;
-      if (ignore_box && !planning_scene_.beginVirtualAttachment(saved_box, error)) {
+      if (ignore_box && !planning_scene_.beginVirtualAttachment(saved_box, error, &box_to_left_contact)) {
         return false;
       }
       const bool planned = appendPoseToPoseObjectPath(
@@ -3049,6 +3057,7 @@ private:
     std::chrono::steady_clock::time_point::max()};
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;
   std::unique_ptr<PlanningTraceLogger> planning_trace_;
+  std::vector<CartesianSegment> cartesian_segments_;
   PoseSegmentCache * segment_cache_{nullptr};
   mutable std::size_t ik_calls_{0};
   mutable double ik_seconds_{0.0};
@@ -3247,6 +3256,16 @@ bool DualArmMotionPlanner::validateHeldClosure(std::string & error)
 void DualArmMotionPlanner::clearGraspMarkers()
 {
   impl_->clearGraspMarkers();
+}
+
+std::vector<CartesianSegment> DualArmMotionPlanner::cartesianSegments() const
+{
+  return impl_->cartesian_segments_;
+}
+
+std::size_t DualArmMotionPlanner::searchCalls() const
+{
+  return impl_->ik_calls_ + impl_->ompl_calls_;
 }
 
 }  // namespace agibot_x2_manipulation

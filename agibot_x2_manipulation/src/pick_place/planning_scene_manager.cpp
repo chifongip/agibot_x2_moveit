@@ -306,6 +306,10 @@ PlanningSceneManager::PlanningSceneManager(
   if (!scene_monitor_->getPlanningScene()) {
     throw std::runtime_error("failed to create MoveIt planning scene monitor");
   }
+  // Humble applies incoming full snapshots as diffs when no parent scene is
+  // maintained. Keep a parent so synchronization also removes absent objects,
+  // allowing Continue to observe an obstacle removed through MoveIt's service.
+  scene_monitor_->monitorDiffs(true);
   scene_monitor_->startStateMonitor();
   scene_monitor_->startSceneMonitor();
   const bool load_octomap_monitor =
@@ -366,6 +370,10 @@ bool PlanningSceneManager::synchronize(std::string & error)
       error = "failed to synchronize the refreshed MoveIt planning scene";
       return false;
     }
+    // Humble clears the child diff before replacing its parent snapshot. World
+    // geometry uses a copy, so rebuild it once more from the updated parent.
+    planning_scene_monitor::LockedPlanningSceneRW synchronized(scene_monitor_);
+    synchronized->clearDiffs();
     return true;
   } catch (const std::exception & exception) {
     error = "planning-scene synchronization failed: " + std::string(exception.what());
@@ -664,7 +672,22 @@ bool PlanningSceneManager::detachBox(std::string & error)
   }
 }
 
-bool PlanningSceneManager::attachBox(std::string & error)
+bool PlanningSceneManager::restoreSavedObjects(
+  const moveit_msgs::msg::PlanningSceneWorld & world, bool held, std::string & error)
+{
+  std::vector<moveit_msgs::msg::CollisionObject> objects;
+  for (auto object : world.collision_objects) {
+    if (held && object.id == config_.box_id) {continue;}
+    object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    objects.push_back(std::move(object));
+  }
+  if (!scene_interface_.applyCollisionObjects(objects)) {
+    error = "failed to restore saved detection geometry"; return false;
+  }
+  return synchronize(error);
+}
+
+bool PlanningSceneManager::attachBox(std::string & error, const Eigen::Isometry3d * box_to_left)
 {
   try {
     // A previous request may have succeeded before its verification timed out.
@@ -679,8 +702,13 @@ bool PlanningSceneManager::attachBox(std::string & error)
     }
     moveit_msgs::msg::AttachedCollisionObject object;
     object.link_name = config_.left_tcp;
-    object.object.id = config_.box_id;
-    object.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    if (box_to_left) {
+      object.object = makeBoxObject(config_.box_id, config_.dimensions, box_to_left->inverse());
+      object.object.header.frame_id = config_.left_tcp;
+    } else {
+      object.object.id = config_.box_id;
+      object.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    }
     object.touch_links = boxTouchLinks(config_);
     if (!scene_interface_.applyAttachedCollisionObject(object)) {
       error = "MoveIt rejected box attachment to the planning scene";
@@ -775,7 +803,8 @@ bool PlanningSceneManager::restoreWorldBox(
 }
 
 bool PlanningSceneManager::beginVirtualAttachment(
-  moveit_msgs::msg::CollisionObject & saved_object, std::string & error)
+  moveit_msgs::msg::CollisionObject & saved_object, std::string & error,
+  const Eigen::Isometry3d * box_to_left)
 {
   try {
     const auto objects = scene_interface_.getObjects({config_.box_id});
@@ -791,7 +820,7 @@ bool PlanningSceneManager::beginVirtualAttachment(
     return false;
   }
   // Local spline checks must observe the attachment acknowledged by MoveIt.
-  const bool attached = attachBox(error);
+  const bool attached = attachBox(error, box_to_left);
   if (!attached) {return false;}
   if (synchronize(error)) {return true;}
   const auto synchronization_error = error;

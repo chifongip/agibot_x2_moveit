@@ -89,6 +89,7 @@ add_library(pick_place_core
   src/pick_place/attachment_controller.cpp
   src/pick_place/box_pose_tracker.cpp
   src/pick_place/cartesian_motion.cpp
+  src/pick_place/saved_plan.cpp
   src/pick_place/dual_arm_motion_planner.cpp
   src/pick_place/locomanipulation_posture_controller.cpp
   src/pick_place/manipulation_state_store.cpp
@@ -205,6 +206,11 @@ if(BUILD_TESTING)
   target_include_directories(test_locomanipulation_posture_controller PRIVATE src include)
   target_link_libraries(test_locomanipulation_posture_controller pick_place_core)
   ament_target_dependencies(test_locomanipulation_posture_controller aimdk_msgs rclcpp)
+  ament_add_gtest(test_saved_plan test/test_saved_plan.cpp)
+  target_include_directories(test_saved_plan PRIVATE src include)
+  target_link_libraries(test_saved_plan pick_place_core)
+  ament_target_dependencies(test_saved_plan moveit_core moveit_ros_planning rclcpp)
+
   ament_add_gtest(test_post_place_planner test/test_post_place_planner.cpp)
   target_include_directories(test_post_place_planner PRIVATE src include)
   target_link_libraries(test_post_place_planner pick_place_core)

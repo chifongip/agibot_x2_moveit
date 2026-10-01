@@ -791,6 +791,69 @@ ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   motion_planning_mode:=pose_to_pose allow_execution:=false
 ```
 
+### Execute a saved complete plan
+
+Successful `plan_only: true` goals for Pick, Place, PickPlace, and MoveCarryPose
+return `plan_id` and `planning_mode`. Submit the same action with
+`plan_only: false, plan_id: '<returned ID>'` to execute its saved sequence.
+The saved target, selected box/profile, grasp geometry, detection snapshot,
+and ordered trajectories are authoritative; other goal target fields are ignored.
+PickPlace retains prepare → pregrasp → approach → attach → carry → place →
+release → retreat → prepare → ready. Pick, Place, and carry goals retain their
+complete corresponding portions. Attach/release remain explicit physical
+checkpoints between trajectories. The operator panel exposes **Execute saved
+plan**, with the normal physical-motion unlock and per-command confirmation.
+
+An empty `plan_id` preserves the ordinary behavior. Both `pose_to_pose` and
+`closed_chain` remain available; this feature does not select a different mode.
+The server stores one successful plan per action type in memory. A newer
+successful plan of that type replaces it. Claiming a plan consumes its ID and
+invalidates other saved plans. Ordinary physical manipulation, posture changes,
+reset, recovery, and profile reload invalidate saved plans. Restarting the server
+also clears them. `plan_only: true` with a nonempty ID is invalid.
+
+Saved execution performs no IK, OMPL search, or retiming. The scene monitor
+retains a parent scene so full MoveIt snapshots honor obstacle removals as well
+as additions when Continue refreshes the scene. Before every segment,
+it waits for settled feedback and checks the complete robot start, current scene,
+attachment geometry, joint bounds, controller spline, and the applicable Cartesian
+or closed-chain constraints. Detection jitter does not replace the saved geometry;
+missing detections, newly detected obstacles, or movement beyond tolerance block
+execution. A small measured-start discrepancy gets a checked, limit-compliant
+alignment prefix; every saved waypoint and derivative stays unchanged, with only
+a uniform timestamp offset. Feedback slightly outside joint limits may align
+inward within the existing `place_start_state_bounds_tolerance`, never farther
+outside the limit. No limits or tuned parameters are changed.
+
+A validation failure pauses immediately. Continue revalidates the same unfinished
+segment and never replans or repeats completed checkpoints. Failure after motion
+or attachment/release dispatch stops the sequence and requires recovery; it never
+replays a partly executed trajectory. Logs identify the plan, segment, alignment,
+and new planner-call count. Validate with fake feedback before hardware execution.
+
+The new action fields require rebuilding `agibot_x2_manipulation_msgs` and all
+clients that use these four actions. For captured simulation validation:
+
+```bash
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-saved-plan-results \
+  --saved-plan --exercise-carry --mode pose_to_pose \
+  --domain-id 118 --port-base 19961
+```
+
+The output directory must be new. The harness checks saved execution and rejects
+missing/consumed IDs; use `--mode closed_chain` to exercise that existing mode,
+add `--exercise-pause` to inject/remove an external obstacle and verify Continue,
+or omit `--saved-plan` to check ordinary execution.
+See [saved-plan validation](test/saved_plan_validation.md) for captured results
+and the remaining closed-chain standalone Place limitation.
+The versioned [simulation task helper](scripts/send_simulation_task.sh) also
+supports `--saved-plan` to preview and execute in one command, or `--plan-id ID`
+to execute an earlier preview. The workspace `tools/send_simulation_task.sh`
+copy provides the same interactive menu and command-line options.
+
 Pick and Place use the dual-arm SRDF state `prepare` as an empty-arm intermediate
 (`prepare_named_target: prepare`). Pick plans current state → prepare → pregrasp
 → contact → Carry A before starting motion. Grasp IK and pregrasp planning are

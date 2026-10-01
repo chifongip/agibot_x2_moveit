@@ -17,9 +17,24 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace agibot_x2_manipulation
 {
+
+struct HandPosePair
+{
+  Eigen::Isometry3d left;
+  Eigen::Isometry3d right;
+};
+
+struct CartesianSegment
+{
+  std::size_t first{0};
+  std::size_t last{0};
+  HandPosePair from;
+  HandPosePair to;
+};
 
 struct PlannedGrasp
 {
@@ -34,6 +49,7 @@ struct AdaptiveCarryPlan
 {
   Eigen::Isometry3d pose{Eigen::Isometry3d::Identity()};
   CarryRoute route{CarryRoute::DIRECT};
+  std::vector<CartesianSegment> cartesian;
   moveit_msgs::msg::RobotTrajectory trajectory;
   std::shared_ptr<moveit::core::RobotState> end_state;
 };
@@ -130,6 +146,8 @@ public:
   bool validateHeldClosure(std::string & error);
   void clearGraspMarkers();
   void traceReuse(const std::string & stage, bool reused, const std::string & reason, double seconds);
+  std::vector<CartesianSegment> cartesianSegments() const;
+  std::size_t searchCalls() const;
 
 private:
   class Impl;

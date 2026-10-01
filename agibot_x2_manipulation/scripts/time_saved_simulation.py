@@ -182,6 +182,10 @@ def parse_arguments(argv=None):
         default=114,
         help="Isolated offline ROS domain (default: %(default)s).",
     )
+    parser.add_argument("--exercise-pause", action="store_true", help="Inject an external obstacle, then remove it and Continue the same saved segment.")
+    parser.add_argument("--exercise-carry", action="store_true", help="Exercise saved carry A/B actions between pick and place.")
+    parser.add_argument("--saved-plan", action="store_true", help="Plan each action once, then execute its returned plan ID.")
+    parser.add_argument("--mode", choices=("pose_to_pose", "closed_chain"), default="pose_to_pose")
     parser.add_argument("--port-base", type=int, default=19261)
     parser.add_argument("--action-timeout", type=float, default=240.0)
     args = parser.parse_args(argv)
@@ -200,10 +204,12 @@ def run_simulations(arguments):
     from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy
     from sensor_msgs.msg import JointState
     from visualization_msgs.msg import MarkerArray
-    from moveit_msgs.srv import GetPlanningScene
-    from agibot_x2_manipulation_msgs.action import Pick, Place, PickPlace
-    from agibot_x2_manipulation_msgs.msg import ManipulationState
-    from agibot_x2_manipulation_msgs.srv import RecoverManipulationState
+    from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene, GetPositionFK
+    from moveit_msgs.msg import CollisionObject
+    from shape_msgs.msg import SolidPrimitive
+    from agibot_x2_manipulation_msgs.action import Pick, Place, PickPlace, MoveCarryPose
+    from agibot_x2_manipulation_msgs.msg import ManipulationState, ManipulationTaskStatus
+    from agibot_x2_manipulation_msgs.srv import RecoverManipulationState, ContinueManipulation
 
     capture_root = arguments.capture_dir.resolve()
     output_dir = arguments.output_dir.resolve()
@@ -218,7 +224,8 @@ def run_simulations(arguments):
     run_started = time.monotonic()
     report = {
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
-        "mode": "pose_to_pose",
+        "mode": arguments.mode,
+        "saved_plan_execution": arguments.saved_plan,
         "environment": {
             "ROS_DOMAIN_ID": os.environ.get("ROS_DOMAIN_ID"),
             "feedback": "fake_zmq_joint_states",
@@ -229,6 +236,8 @@ def run_simulations(arguments):
     rclpy.init(domain_id=arguments.domain_id)
     node = Node("saved_objects_full_simulation_test")
     joints = []
+    task_states = []
+    pause_exercised = False
     states = []
     tables = []
     node.create_subscription(
@@ -241,6 +250,10 @@ def run_simulations(arguments):
         QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
     )
     node.create_subscription(MarkerArray, "/table_markers", tables.append, 10)
+    node.create_subscription(ManipulationTaskStatus, "/manipulation_task_status", task_states.append, 10)
+    apply_scene = node.create_client(ApplyPlanningScene, "/apply_planning_scene")
+    fk_client = node.create_client(GetPositionFK, "/compute_fk")
+    continue_client = node.create_client(ContinueManipulation, "/continue_manipulation")
     scene_client = node.create_client(GetPlanningScene, "/get_planning_scene")
     recover = node.create_client(
         RecoverManipulationState, "/recover_manipulation_state"
@@ -270,11 +283,48 @@ def run_simulations(arguments):
             "world": [o.id for o in result.scene.world.collision_objects],
         }
 
-    def action(action_type, topic, goal, case):
+    def action(action_type, topic, goal, case, expected_success=True):
+        nonlocal pause_exercised
+        if arguments.saved_plan and not goal.plan_only and not goal.plan_id and expected_success:
+            previous = case["actions"][-1] if case["actions"] else None
+            if not previous or previous["action"] != topic or not previous["plan_only"]:
+                import copy
+                preview = copy.deepcopy(goal)
+                preview.plan_only = True
+                previous = action(action_type, topic, preview, case)
+            assert previous.get("plan_id"), "plan-only returned no saved plan ID"
+            goal.plan_id = previous["plan_id"]
+        if arguments.saved_plan and not goal.plan_only and expected_success:
+            import copy
+            invalid = copy.deepcopy(goal)
+            invalid.plan_id = "missing-" + goal.plan_id
+            action(action_type, topic, invalid, case, expected_success=False)
+        pause_probe = arguments.exercise_pause and arguments.saved_plan and not goal.plan_only and expected_success and not pause_exercised
+        if pause_probe:
+            assert apply_scene.wait_for_service(timeout_sec=5) and fk_client.wait_for_service(timeout_sec=5)
+            req = GetPositionFK.Request()
+            req.header.frame_id = "base_link"
+            req.fk_link_names = ["left_hand_tcp_link"]
+            req.robot_state.joint_state = joints[-1]
+            future = fk_client.call_async(req)
+            assert spin_until(future.done, 5), "FK timeout for obstacle injection"
+            assert future.result().error_code.val == 1, "FK failed for obstacle injection"
+            obstacle = CollisionObject()
+            obstacle.id = "saved_plan_validation_obstacle"
+            obstacle.header.frame_id = "base_link"
+            obstacle.operation = CollisionObject.ADD
+            shape = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[0.04, 0.04, 0.04])
+            obstacle.primitives = [shape]
+            obstacle.primitive_poses = [future.result().pose_stamped[0].pose]
+            req = ApplyPlanningScene.Request()
+            req.scene.is_diff = True
+            req.scene.world.collision_objects = [obstacle]
+            future = apply_scene.call_async(req)
+            assert spin_until(future.done, 5) and future.result().success, "obstacle injection failed"
         timeout = arguments.action_timeout
         client = ActionClient(node, action_type, topic)
         assert client.wait_for_server(timeout_sec=5), f"{topic} unavailable"
-        record = {"action": topic, "plan_only": goal.plan_only, "feedback": []}
+        record = {"action": topic, "plan_only": goal.plan_only, "expected_success": expected_success, "feedback": []}
         case["actions"].append(record)
         started = time.monotonic()
 
@@ -305,16 +355,35 @@ def run_simulations(arguments):
         deadline = time.monotonic() + timeout
         while not result_future.done() and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.2)
+            if pause_probe and not pause_exercised and record["feedback"] and record["feedback"][-1]["stage"].startswith("paused/"):
+                assert spin_until(lambda: bool(task_states) and task_states[-1].status == "paused" and task_states[-1].can_continue, 5), "saved pause status unavailable"
+                status = task_states[-1]
+                record["pause_validation"] = {"task_id": status.task_id, "pause_id": status.pause_id, "phase": status.phase, "failure": status.failure}
+                assert "collision" in status.failure, status.failure
+                obstacle.operation = CollisionObject.REMOVE
+                req = ApplyPlanningScene.Request()
+                req.scene.is_diff = True
+                req.scene.world.collision_objects = [obstacle]
+                future = apply_scene.call_async(req)
+                assert spin_until(future.done, 5) and future.result().success, "obstacle removal failed"
+                record["scene_after_obstacle_removal"] = scene()
+                assert obstacle.id not in record["scene_after_obstacle_removal"]["world"], "obstacle still present after removal"
+                assert continue_client.wait_for_service(timeout_sec=5), "Continue unavailable"
+                req = ContinueManipulation.Request(task_id=status.task_id, pause_id=status.pause_id)
+                future = continue_client.call_async(req)
+                assert spin_until(future.done, 5) and future.result().success, "Continue failed"
+                pause_exercised = True
+                continue
             # A paused workflow requires human Continue; preserve that failure rather
             # than changing parameters or pretending the workflow has completed.
-            if record["feedback"] and any(
+            if record["feedback"] and not (pause_probe and pause_exercised) and (record["feedback"][-1]["stage"].startswith("paused/") or any(
                 word in record["feedback"][-1]["stage"].lower()
                 for word in [
                     "waiting_for_continue",
                     "retry_paused",
                     "awaiting_continue",
                 ]
-            ):
+            )):
                 break
         if not result_future.done():
             cancel = handle.cancel_goal_async()
@@ -330,6 +399,8 @@ def run_simulations(arguments):
                 success=bool(result.success),
                 error_code=int(result.error_code),
                 message=result.message,
+                plan_id=result.plan_id,
+                planning_mode=result.planning_mode,
             )
             if hasattr(result, "object_held"):
                 record["object_held"] = bool(result.object_held)
@@ -347,11 +418,19 @@ def run_simulations(arguments):
             )
         save()
         client.destroy()
-        assert (
-            record.get("status") == GoalStatus.STATUS_SUCCEEDED
-            and record["success"]
-            and not record.get("timed_out")
-        ), record["message"]
+        assert not record.get("timed_out"), record["message"]
+        if expected_success:
+            if pause_probe:
+                assert pause_exercised and record.get("pause_validation"), "injected obstacle did not pause saved execution"
+            assert record.get("status") == GoalStatus.STATUS_SUCCEEDED and record["success"], record["message"]
+            if arguments.saved_plan and not goal.plan_only:
+                assert record["plan_id"] == goal.plan_id, "executed plan ID changed"
+                assert all(item["stage"].startswith(("saved/", "checking_detections", "paused/saved/")) for item in record["feedback"]), "saved execution entered planning"
+                import copy
+                action(action_type, topic, copy.deepcopy(goal), case, expected_success=False)
+        else:
+            assert record.get("status") == GoalStatus.STATUS_ABORTED and not record["success"], "invalid/consumed plan unexpectedly succeeded"
+            assert "saved plan is absent" in record["message"], record["message"]
         return record
 
     try:
@@ -381,7 +460,7 @@ def run_simulations(arguments):
                 "snapshot:=" + str(path),
                 "use_rviz:=false",
                 "allow_execution:=true",
-                "motion_planning_mode:=pose_to_pose",
+                "motion_planning_mode:=" + arguments.mode,
                 "manipulation_state_file:=" + str(output_dir / (name + ".state")),
                 "zmq_endpoint:=tcp://*:" + str(port),
                 "fake_zmq_endpoint:=tcp://127.0.0.1:" + str(port),
@@ -403,10 +482,10 @@ def run_simulations(arguments):
                     50,
                 ), "startup/state/table timeout"
                 assert (
-                    "Pick/place motion planning mode: pose_to_pose"
+                    "Pick/place motion planning mode: " + arguments.mode
                     in (output_dir / (name + ".log")).read_text()
                 ), "server not using pose_to_pose"
-                case["verified_planning_mode"] = "pose_to_pose"
+                case["verified_planning_mode"] = arguments.mode
                 if case["task_kind"] == "place":
                     assert spin_until(
                         lambda: bool(states)
@@ -473,6 +552,9 @@ def run_simulations(arguments):
                         assert case["picked_scene"][
                             "attached"
                         ], "Pick attachment absent"
+                        if arguments.exercise_carry:
+                            for target in (MoveCarryPose.Goal.CARRY_A, MoveCarryPose.Goal.CARRY_B, MoveCarryPose.Goal.CARRY_A):
+                                action(MoveCarryPose, "/move_carry_pose", MoveCarryPose.Goal(target_pose=target, plan_only=False), case)
                         action(Place, "/place_box", Place.Goal(plan_only=False), case)
                 assert spin_until(
                     lambda: states[-1].state == 1, 5

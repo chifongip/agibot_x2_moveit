@@ -12,12 +12,6 @@
 namespace agibot_x2_manipulation
 {
 
-struct HandPosePair
-{
-  Eigen::Isometry3d left;
-  Eigen::Isometry3d right;
-};
-
 std::vector<HandPosePair> returnClearanceCandidates(
   const HandPosePair & hands, const Eigen::Vector3d & up, const Eigen::Vector3d & back,
   const PickPlaceConfig & config);

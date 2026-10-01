@@ -1,6 +1,8 @@
 string instance_id
 geometry_msgs/PoseStamped place_pose
 bool plan_only
+# Empty preserves normal execution; otherwise execute this saved plan.
+string plan_id
 ---
 uint16 SUCCESS=0
 uint16 BUSY=1
@@ -11,6 +13,9 @@ uint16 EXECUTION_FAILED=5
 uint16 ATTACHMENT_FAILED=6
 uint16 SAFETY_ABORT=7
 bool success
+# Identifier of the complete saved or executed plan.
+string plan_id
+string planning_mode
 uint16 error_code
 string message
 geometry_msgs/PoseStamped achieved_pose

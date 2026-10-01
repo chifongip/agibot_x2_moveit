@@ -61,6 +61,7 @@ public:
   PlanningSceneManager(
     const rclcpp::Node::SharedPtr & node, const PickPlaceConfig & config);
 
+  bool restoreSavedObjects(const moveit_msgs::msg::PlanningSceneWorld & world, bool held, std::string & error);
   bool synchronize(std::string & error);
   planning_scene::PlanningScenePtr snapshot() const;
   planning_scene::PlanningScenePtr releasedBoxSnapshot(const Eigen::Isometry3d & pose) const;
@@ -78,7 +79,7 @@ public:
   bool clearManagedBoxes(std::string & error);
   bool removeBox(std::string & error);
   bool detachBox(std::string & error);
-  bool attachBox(std::string & error);
+  bool attachBox(std::string & error, const Eigen::Isometry3d * box_to_left = nullptr);
   bool verifyBoxState(bool expect_attached, bool expect_world, std::string & error);
   bool clearBox(std::string & error);
   bool placeBox(const Eigen::Isometry3d & pose, std::string & error);
@@ -87,7 +88,8 @@ public:
   bool restoreWorldBox(
     const moveit_msgs::msg::CollisionObject & saved_object, std::string & error);
   bool beginVirtualAttachment(
-    moveit_msgs::msg::CollisionObject & saved_object, std::string & error);
+    moveit_msgs::msg::CollisionObject & saved_object, std::string & error,
+    const Eigen::Isometry3d * box_to_left = nullptr);
   bool endVirtualAttachment(
     const moveit_msgs::msg::CollisionObject & saved_object, std::string & error);
   // When collision_pairs is supplied, collect at most one contact per pair and

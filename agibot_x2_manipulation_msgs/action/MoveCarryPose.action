@@ -2,6 +2,8 @@ uint8 CARRY_A=0
 uint8 CARRY_B=1
 uint8 target_pose
 bool plan_only
+# Empty preserves normal execution; otherwise execute this saved plan.
+string plan_id
 ---
 uint16 SUCCESS=0
 uint16 BUSY=1
@@ -12,6 +14,9 @@ uint16 SAFETY_ABORT=7
 uint16 INVALID_STATE=8
 uint16 RECOVERY_REQUIRED=9
 bool success
+# Identifier of the complete saved or executed plan.
+string plan_id
+string planning_mode
 uint16 error_code
 string message
 bool object_held
