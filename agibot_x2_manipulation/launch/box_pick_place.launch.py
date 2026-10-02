@@ -114,7 +114,6 @@ def generate_launch_description():
     image_decompress_input_reliability = LaunchConfiguration(
         "image_decompress_input_reliability"
     )
-    image_decompress_rmw = LaunchConfiguration("image_decompress_rmw")
     use_raw_image_throttler = LaunchConfiguration("use_raw_image_throttler")
     throttled_camera_image = LaunchConfiguration("throttled_camera_image")
     throttled_camera_info = LaunchConfiguration("throttled_camera_info")
@@ -362,15 +361,6 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
-                "image_decompress_rmw",
-                default_value="rmw_cyclonedds_cpp",
-                choices=["rmw_cyclonedds_cpp", "rmw_fastrtps_cpp"],
-                description=(
-                    "RMW used only by the compressed-image decoder. Keep the "
-                    "action/control nodes on the launch process's default RMW."
-                ),
-            ),
-            DeclareLaunchArgument(
                 "use_raw_image_throttler",
                 default_value="false",
                 choices=["true", "false"],
@@ -443,7 +433,6 @@ def generate_launch_description():
                 name="best_effort_image_decompressor",
                 output="screen",
                 condition=IfCondition(use_image_decompressor),
-                additional_env={"RMW_IMPLEMENTATION": image_decompress_rmw},
                 parameters=[
                     {
                         "input_topic": compressed_camera_image,

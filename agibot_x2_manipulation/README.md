@@ -550,7 +550,6 @@ For a remote host, use the integrated latest-frame decoder and detector:
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/ubuntu/x2_ws/install/setup.bash
-unset RMW_IMPLEMENTATION
 
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   command_transport:=zmq \
@@ -560,11 +559,10 @@ ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
 ```
 
-The decoder runs with Cyclone DDS only (`image_decompress_rmw` defaults to
-`rmw_cyclonedds_cpp`). AprilTag, MoveIt, `ros2_control`, action clients, and
-action servers retain the launch process's default Fast DDS. Do **not** export
-`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` globally: doing so can make the action
-server fail when it receives incompatible DDS data.
+The decoder, AprilTag, MoveIt, `ros2_control`, and action clients/servers
+inherit the launch environment's middleware. Neither camera launch overrides
+`RMW_IMPLEMENTATION`; keep it consistent with the robot (for example,
+`rmw_fastrtps_cpp` for a Fast DDS robot).
 
 The decoder keeps only the newest compressed frame, decodes it in a worker, and
 publishes `/x2/rgb_image_decompressed` as a raw `sensor_msgs/msg/Image`. Its
@@ -645,22 +643,21 @@ straight-arm pose; it can make coordinated dual-arm OMPL planning much harder.
 Do not launch `box_pick_place.launch.py` merely to check perception: it starts
 the controller manager. Run the decoder and detector separately instead.
 
-On a remote computer, run the decoder in its own terminal with Cyclone DDS:
+On a remote computer, run the decoder in its own terminal using the same
+middleware environment as the robot:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/ubuntu/x2_ws/install/setup.bash
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 run agibot_x2_manipulation best_effort_image_decompressor --ros-args \
   -p max_rate_hz:=10.0
 ```
 
-In a second terminal, use the default RMW for AprilTag:
+In a second terminal, use the same middleware environment for AprilTag:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/ubuntu/x2_ws/install/setup.bash
-unset RMW_IMPLEMENTATION
 ros2 run apriltag_ros apriltag_node --ros-args \
   --params-file /home/ubuntu/x2_ws/install/agibot_x2_manipulation/share/agibot_x2_manipulation/config/apriltag.yaml \
   -r /image_rect:=/x2/rgb_image_decompressed \
@@ -1528,3 +1525,75 @@ server restart, that worker is gone: the last active checkpoint is published as
 `interrupted` with Continue disabled, and the existing physical-state recovery
 controls must be used. Browser reconnection while the server remains running can
 resume the same paused task.
+
+## Optimized standalone camera pipelines
+
+The perception-only launch below leaves the existing camera and manipulation
+launch files unchanged. It starts one C++ preprocessor and one AprilTag detector
+per enabled camera, without starting robot control or shared state:
+
+```bash
+ros2 launch agibot_x2_manipulation optimized_camera_apriltag.launch.py
+```
+
+Stop other detectors for these cameras first to avoid duplicate detections and
+TF publishers. Both cameras use a 640×480 bounding box without upsampling and
+preserve aspect ratio (for example, 1920×1080 becomes 640×360). RGBD defaults to
+10 Hz and front-center to 1 Hz. The preprocessors drop superseded compressed
+frames before decoding, decode reduced-resolution grayscale JPEGs, and rectify
+at the output resolution using cached maps. They publish only `mono8` images
+and scaled rectified calibration with identical source timestamps/frame IDs.
+The input calibration is cached between updates; its frame ID and effective
+ROI/binning dimensions must agree with the JPEG. Missing/invalid calibration,
+unsupported distortion models, and malformed JPEGs are dropped with diagnostics.
+Supported distortion models are `plumb_bob`, `rational_polynomial`, and
+`equidistant`. This optimization does not reduce camera encoding or network traffic.
+
+| Camera | Image output | Paired calibration | Detection output |
+| --- | --- | --- | --- |
+| RGBD | `/x2/optimized/rgbd/image_rect` | `/x2/optimized/rgbd/camera_info` | `/detections` |
+| Front-center | `/x2/optimized/front_center/image_rect` | `/x2/optimized/front_center/camera_info` | `/front_center_rectify/detections` |
+
+Use `enable_rgbd:=false` or `enable_front_center:=false` for a single camera.
+Each camera exposes `<camera>_compressed_image`, `<camera>_camera_info`,
+`<camera>_output_image`, `<camera>_output_camera_info`, `<camera>_max_rate_hz`,
+`<camera>_width`, `<camera>_height`, `<camera>_input_reliability`, and
+`<camera>_apriltag_config`, where `<camera>` is `rgbd` or `front_center`.
+Compressed-input reliability defaults to `reliable`; calibration subscriptions
+use best-effort sensor QoS to accept either publisher reliability. Output QoS
+is best-effort, volatile, depth one. All preprocessors and detectors inherit
+the launch environment's middleware; there is no camera-specific override. Disable `publish_front_center_static_tf` if an existing
+publisher already supplies `rgb_head_center -> rgb_head_front_center`.
+
+To use these external detectors with the unchanged manipulation launch:
+
+```bash
+ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
+  use_apriltag:=false \
+  start_table_tag_detector:=false \
+  use_image_decompressor:=false \
+  use_raw_image_throttler:=false
+```
+
+That second command starts the normal manipulation/control stack. Validate
+perception independently, and use simulated control or plan-only goals when
+validating manipulation. Shared robot TF must still come from the existing
+state bringup. To return to the original workflow, stop this optimized launch
+and start the existing launches with their usual options.
+
+For CPU validation, replay the same recording into each pipeline independently,
+match actual output dimensions/rates and detector parameters, and measure the
+sum of CPU across all preprocessing and detector processes. Repeat runs and
+compare memory, frame latency, detections, and pose variability. Smaller source
+images may need no JPEG reduction; small/distant tags must be checked at the
+chosen resolution. Automated synthetic tests establish transport/geometry
+behavior; representative recorded-camera CPU and pose comparisons are still
+required before adopting the optimized pipeline on a robot.
+
+Local validation: the focused build and camera/launch/configuration tests pass,
+including a synthetic tag0 pose comparison within 2 mm per translation axis.
+A three-run, 30-frame-per-run synthetic 1920×1080 JPEG benchmark (640×360
+output, one OpenCV thread) measured approximately 15.25 ms CPU/frame for full
+color decode + resize + grayscale versus 10.17 ms for reduced grayscale decode
++ resize, a 33% reduction for these stages. This excludes DDS, rectification,
+and AprilTag and is not a measurement of total camera-pipeline CPU savings.
