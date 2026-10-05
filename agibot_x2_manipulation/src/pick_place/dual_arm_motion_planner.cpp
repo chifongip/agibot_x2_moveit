@@ -2998,7 +2998,7 @@ public:
         dual_group, config_.place_start_state_bounds_tolerance))
     {
       const auto [margin, joint] = current->getMinDistanceToPositionBounds(dual_group);
-      error = "current robot state exceeds position bounds before Place";
+      error = "current robot state exceeds position bounds during held-object validation";
       if (joint) {
         error += " at " + joint->getName() + " (margin=" + std::to_string(margin) +
           " rad, tolerance=" + std::to_string(config_.place_start_state_bounds_tolerance) +
@@ -3014,8 +3014,10 @@ public:
         config_.execution_position_limit(config_.closed_chain_contact_position_error),
         config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
         "execution held-object closure", error)) {return false;}
-    if (!planning_scene_.collisionFree(*current, true, false)) {
-      error = "current held-object state is in collision before Place";
+    std::string collision_pairs;
+    if (!planning_scene_.collisionFree(*current, true, false, &collision_pairs)) {
+      error = "current held-object state is in collision during held-object validation: " +
+        collision_pairs;
       return false;
     }
     Eigen::Isometry3d estimated = left_estimate;
