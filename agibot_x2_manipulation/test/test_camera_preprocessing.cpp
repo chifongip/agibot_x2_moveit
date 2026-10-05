@@ -88,3 +88,59 @@ TEST(CameraPreprocessing, FisheyeAndInvalidCalibration)
   info.k[0] = std::numeric_limits<double>::quiet_NaN();
   EXPECT_THROW(geometry.configure(info, {1280, 960}, {640, 480}), std::runtime_error);
 }
+
+TEST(CameraPreprocessing, PreserveEightTermPlumbBobCalibration)
+{
+  auto info = calibration();
+  info.d = {0.2, 0.01, 0.001, -0.001, 0.001, 0.18, 0.005, 0.0001};
+  auto rational = info;
+  rational.distortion_model = "rational_polynomial";
+  CameraGeometry plumb_geometry, rational_geometry;
+  EXPECT_NO_THROW(plumb_geometry.configure(info, {1280, 960}, {640, 480}));
+  EXPECT_NO_THROW(rational_geometry.configure(rational, {1280, 960}, {640, 480}));
+  cv::Mat image(480, 640, CV_8UC1);
+  cv::randu(image, 0, 255);
+  EXPECT_EQ(cv::norm(plumb_geometry.rectify(image), rational_geometry.rectify(image)), 0.0);
+  // Removing denominator coefficients must produce a different rectification.
+  info.d.resize(5);
+  CameraGeometry truncated;
+  truncated.configure(info, {1280, 960}, {640, 480});
+  EXPECT_GT(cv::norm(plumb_geometry.rectify(image), truncated.rectify(image)), 0.0);
+}
+
+TEST(CameraPreprocessing, SupportedPinholeCoefficientLayoutsAndInvalidCounts)
+{
+  for (const std::string model : {"plumb_bob", "rational_polynomial"}) {
+    for (const size_t count : {0, 4, 5, 8, 12, 14}) {
+      auto info = calibration();
+      info.distortion_model = model;
+      info.d.assign(count, 0.0);
+      if (count > 0) {
+        info.d[0] = 0.01;
+      }
+      CameraGeometry geometry;
+      EXPECT_NO_THROW(geometry.configure(info, {1280, 960}, {640, 480})) << model << count;
+    }
+    for (const size_t count : {1, 3, 6, 7, 9, 13, 15}) {
+      auto info = calibration();
+      info.distortion_model = model;
+      info.d.assign(count, 0.0);
+      CameraGeometry geometry;
+      EXPECT_THROW(geometry.configure(info, {1280, 960}, {640, 480}), std::runtime_error);
+    }
+  }
+}
+
+TEST(CameraPreprocessing, ZeroFisheyeCoefficientsStillRequireRectification)
+{
+  auto info = calibration();
+  info.distortion_model = "equidistant";
+  info.d.assign(4, 0.0);
+  CameraGeometry geometry;
+  geometry.configure(info, {1280, 960}, {640, 480});
+  cv::Mat image(480, 640, CV_8UC1);
+  cv::randu(image, 0, 255);
+  EXPECT_GT(cv::norm(image, geometry.rectify(image)), 0.0);
+  info.d.resize(8);
+  EXPECT_THROW(geometry.configure(info, {1280, 960}, {640, 480}), std::runtime_error);
+}

@@ -124,10 +124,15 @@ public:
         info.distortion_model != "rational_polynomial") {
       throw std::runtime_error("Unsupported distortion model");
     }
-    if ((fisheye && info.d.size() != 4) ||
-        (info.distortion_model == "plumb_bob" && info.d.size() != 5) ||
-        (info.distortion_model == "rational_polynomial" && info.d.size() != 8)) {
-      throw std::runtime_error("Invalid distortion coefficient count");
+    // Some HAL publishers label eight-term rational calibration as plumb_bob.
+    // Preserve every coefficient and accept the pinhole layouts OpenCV supports.
+    const size_t count = info.d.size();
+    const bool pinhole_count =
+        count == 0 || count == 4 || count == 5 || count == 8 || count == 12 || count == 14;
+    if ((fisheye && count != 4) || (!fisheye && !pinhole_count)) {
+      throw std::runtime_error("Invalid distortion coefficient count: model=" +
+                               info.distortion_model + ", count=" + std::to_string(count) +
+                               (fisheye ? "; expected 4" : "; expected 0, 4, 5, 8, 12 or 14"));
     }
     if (info.width == 0 || info.height == 0 || info.k[0] <= 0 || info.k[4] <= 0 || info.p[0] <= 0 ||
         info.p[5] <= 0) {
@@ -161,7 +166,8 @@ public:
       throw std::runtime_error("Invalid rectification rotation");
     }
     cv::Mat new_k = projection(cv::Rect(0, 0, 3, 3)).clone();
-    identity_ = std::all_of(info.d.begin(), info.d.end(), [](double v) { return v == 0.0; }) &&
+    identity_ = !fisheye &&
+                std::all_of(info.d.begin(), info.d.end(), [](double v) { return v == 0.0; }) &&
                 cv::norm(r - cv::Mat::eye(3, 3, CV_64F)) < 1e-12 && cv::norm(k - new_k) < 1e-12;
     if (!identity_) {
       cv::Mat d(info.d, true);

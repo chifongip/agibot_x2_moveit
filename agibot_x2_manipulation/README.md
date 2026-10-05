@@ -1547,7 +1547,16 @@ The input calibration is cached between updates; its frame ID and effective
 ROI/binning dimensions must agree with the JPEG. Missing/invalid calibration,
 unsupported distortion models, and malformed JPEGs are dropped with diagnostics.
 Supported distortion models are `plumb_bob`, `rational_polynomial`, and
-`equidistant`. This optimization does not reduce camera encoding or network traffic.
+`equidistant`. Pinhole models accept OpenCV coefficient layouts of 0, 4, 5, 8,
+12, or 14 values, preserving all coefficients. This includes HAL calibration
+labelled `plumb_bob` with eight rational coefficients; fisheye requires four.
+An empty pinhole distortion vector means zero distortion, but valid intrinsics
+are still required. This optimization does not reduce camera encoding or network traffic.
+
+RGBD subscribes to `/camera/color/image_raw/compressed` with calibration from
+`/camera/color/camera_info`. Front-center subscribes to
+`/aima/hal/sensor/rgb_head_front_center/rgb_image/compressed` with calibration
+from `/aima/hal/sensor/rgb_head_front_center/camera_info`.
 
 | Camera | Image output | Paired calibration | Detection output |
 | --- | --- | --- | --- |

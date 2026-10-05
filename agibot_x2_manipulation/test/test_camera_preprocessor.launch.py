@@ -120,7 +120,7 @@ class TestCameraPreprocessor(unittest.TestCase):
         info.header.frame_id = "camera"
         info.width, info.height = 640, 480
         info.distortion_model = "plumb_bob"
-        info.d = [0.0] * 5
+        info.d = [0.0] * 8
         info.k = [400.0, 0.0, 320.0, 0.0, 400.0, 240.0, 0.0, 0.0, 1.0]
         info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
         info.p = [400.0, 0.0, 320.0, 0.0, 0.0, 400.0, 240.0, 0.0, 0.0, 0.0, 1.0, 0.0]

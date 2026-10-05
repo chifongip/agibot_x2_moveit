@@ -11,12 +11,14 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
-def camera_actions(camera, sensor, calibration, namespace, rate, config, share):
+def camera_actions(
+    camera, image_topic, camera_info_topic, namespace, rate, config, share
+):
     """Declare each independent camera interface and start its two nodes."""
     defaults = {
         f"enable_{camera}": "true",
-        f"{camera}_compressed_image": f"/aima/hal/sensor/{sensor}/rgb_image/compressed",
-        f"{camera}_camera_info": f"/aima/hal/sensor/{sensor}/{calibration}",
+        f"{camera}_compressed_image": image_topic,
+        f"{camera}_camera_info": camera_info_topic,
         f"{camera}_output_image": f"/x2/optimized/{camera}/image_rect",
         f"{camera}_output_camera_info": f"/x2/optimized/{camera}/camera_info",
         f"{camera}_max_rate_hz": rate,
@@ -123,8 +125,8 @@ def generate_launch_description():
     actions.extend(
         camera_actions(
             "rgbd",
-            "rgbd_head_front",
-            "rgb_camera_info",
+            "/camera/color/image_raw/compressed",
+            "/camera/color/camera_info",
             "",
             "10.0",
             "apriltag.yaml",
@@ -134,8 +136,8 @@ def generate_launch_description():
     actions.extend(
         camera_actions(
             "front_center",
-            "rgb_head_front_center",
-            "camera_info",
+            "/aima/hal/sensor/rgb_head_front_center/rgb_image/compressed",
+            "/aima/hal/sensor/rgb_head_front_center/camera_info",
             "front_center_rectify",
             "1.0",
             "rgb_head_front_center_apriltag.yaml",

@@ -78,3 +78,17 @@ def test_custom_relative_topics_and_static_tf_disable():
             (prefix + "/custom/camera_info", prefix + "/custom/calibration"),
         ]
     assert not description.entities[-1].condition.evaluate(context)
+
+
+def test_rgbd_input_defaults_use_color_camera_compressed_stream():
+    context = LaunchContext()
+    for action in module().generate_launch_description().entities:
+        if isinstance(action, DeclareLaunchArgument):
+            action.execute(context)
+    assert (
+        context.launch_configurations["rgbd_compressed_image"]
+        == "/camera/color/image_raw/compressed"
+    )
+    assert (
+        context.launch_configurations["rgbd_camera_info"] == "/camera/color/camera_info"
+    )
