@@ -271,6 +271,64 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidModeAndUnsafeExecutionValues)
   EXPECT_THROW(loadPickPlaceConfig(relative_log_directory), std::runtime_error);
 }
 
+TEST_F(PickPlaceConfigTest, PoseAccuracyOverridesPreserveLegacyFallbacks)
+{
+  auto legacy = node("pose_legacy");
+  legacy->declare_parameter<double>("cartesian_path_position_tolerance", 0.03);
+  legacy->declare_parameter<double>("closed_chain_contact_position_error", 0.07);
+  legacy->declare_parameter<double>("recovery_position_tolerance", 0.09);
+  const auto old = loadPickPlaceConfig(legacy);
+  EXPECT_FALSE(old.planning_position_tolerance);
+  EXPECT_FALSE(old.execution_position_tolerance);
+  EXPECT_DOUBLE_EQ(old.planning_position_limit(), 0.03);
+  EXPECT_DOUBLE_EQ(old.execution_position_limit(old.cartesian_path_position_tolerance), 0.03);
+  EXPECT_DOUBLE_EQ(old.execution_position_limit(old.closed_chain_contact_position_error), 0.07);
+  EXPECT_DOUBLE_EQ(old.execution_position_limit(old.recovery_position_tolerance), 0.09);
+
+  auto overrides = std::make_shared<rclcpp::Node>("pose_overrides",
+    rclcpp::NodeOptions().parameter_overrides({
+      rclcpp::Parameter("planning_position_tolerance", 0.02),
+      rclcpp::Parameter("planning_orientation_tolerance", 0.05),
+      rclcpp::Parameter("execution_position_tolerance", 0.1),
+      rclcpp::Parameter("execution_orientation_tolerance", 0.17)}));
+  const auto config = loadPickPlaceConfig(overrides);
+  EXPECT_DOUBLE_EQ(config.planning_position_limit(), 0.02);
+  EXPECT_DOUBLE_EQ(config.planning_orientation_limit(), 0.05);
+  EXPECT_DOUBLE_EQ(config.execution_position_limit(0.003), 0.1);
+  EXPECT_DOUBLE_EQ(config.execution_orientation_limit(0.01), 0.17);
+  EXPECT_DOUBLE_EQ(config.closed_chain_contact_position_error, 0.002);
+
+  auto partial = std::make_shared<rclcpp::Node>("pose_partial",
+    rclcpp::NodeOptions().parameter_overrides({
+      rclcpp::Parameter("planning_position_tolerance", 0.025),
+      rclcpp::Parameter("execution_position_tolerance", 0.12)}));
+  const auto partial_config = loadPickPlaceConfig(partial);
+  EXPECT_DOUBLE_EQ(partial_config.planning_position_limit(), 0.025);
+  EXPECT_DOUBLE_EQ(partial_config.planning_orientation_limit(),
+    partial_config.cartesian_path_orientation_tolerance);
+  EXPECT_DOUBLE_EQ(partial_config.execution_position_limit(0.003), 0.12);
+  EXPECT_DOUBLE_EQ(partial_config.execution_orientation_limit(0.04), 0.04);
+  EXPECT_DOUBLE_EQ(partial_config.execution_orientation_limit(0.09), 0.09);
+}
+
+TEST_F(PickPlaceConfigTest, RejectsInvalidPoseAccuracyOverrides)
+{
+  for (const auto & name : {"planning_position_tolerance", "planning_orientation_tolerance",
+      "execution_position_tolerance", "execution_orientation_tolerance"})
+  {
+    for (double value : {0.0, -0.1, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()})
+    {
+      auto invalid = std::make_shared<rclcpp::Node>("bad_pose_accuracy",
+        rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter(name, value)}));
+      EXPECT_THROW(loadPickPlaceConfig(invalid), std::runtime_error) << name;
+    }
+    auto wrong_type = std::make_shared<rclcpp::Node>("bad_pose_type",
+      rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter(name, "invalid")}));
+    EXPECT_THROW(loadPickPlaceConfig(wrong_type), std::exception) << name;
+  }
+}
+
 TEST_F(PickPlaceConfigTest, RejectsInvalidSearchBudgetsAndInitialState)
 {
   const auto bad_budget = node("bad_budget");

@@ -876,11 +876,37 @@ rotation from that lift. General carry transitions retain joint-space planning.
 Cartesian failures cannot fall back to an unrestricted joint-space segment.
 
 `cartesian_step` (0.01 m) controls the paired waypoint spacing.
-`cartesian_path_position_tolerance` (0.02 m) and
-`cartesian_path_orientation_tolerance` (0.0872664626 rad, 5 degrees) bound
+`planning_position_tolerance` (0.02 m) and
+`planning_orientation_tolerance` (0.0872664626 rad, 5 degrees) bound
 geometric deviation at synchronized progress along both tip paths, including
-the timed controller spline. They are independent of hardware execution and
-attachment tolerances. Joint continuity uses `maximum_joint_step`; Cartesian
+the generated, timed controller spline. `execution_position_tolerance` (0.1 m)
+and `execution_orientation_tolerance` (0.1745329252 rad, 10 degrees) apply to
+measured Cartesian starts/alignment, attachment/contact confirmation,
+held-object consistency, and HOLDING recovery. These settings do not add
+continuous TCP tracking or new endpoint checks to every motion segment.
+
+Saved Cartesian trajectories retain planning validation; only their measured
+alignment prefixes use execution tolerance. Collision, bounds, motion limits,
+and the existing joint-feedback admission checks still apply. Both planning
+modes remain available, and closed-chain solver/planned contact limits remain
+unchanged. Grasp search ranges and box/table detection-movement thresholds are
+also unchanged.
+
+Legacy parameters remain supported. If a new parameter is absent, the check
+uses its original value: Cartesian checks use `cartesian_path_*_tolerance`,
+contact/attachment/closure use `closed_chain_contact_*_error`, and recovery uses
+`recovery_*_tolerance`. Each explicitly configured new parameter overrides only
+its corresponding position or orientation component. Values must be finite
+and positive. Startup logs report the effective planning and execution limits;
+saved plans retain their captured configuration. The shipped configuration
+deliberately broadens measured Cartesian admission from 2 cm/5 degrees to
+10 cm/10 degrees while keeping generated-path accuracy at 2 cm/5 degrees.
+No runtime tolerance-update support is added; restart the server after changing
+configuration, then create new previews.
+See [tolerance validation](test/tolerance_validation.md) for regression and
+captured-simulation results.
+
+Joint continuity uses `maximum_joint_step`; Cartesian
 timing uses MoveIt's iterative parabolic time parameterization with velocity and
 acceleration scaling, preserving IK waypoints instead of TOTG path fitting.
 Controller interpolation may exceed model position bounds by
@@ -1189,9 +1215,10 @@ ros2 service call /recover_manipulation_state \
 The state file records the last adaptive box pose and both rigid box-to-TCP
 transforms. On restart, `CONFIRM_HOLDING` independently reconstructs the box
 pose from the measured left and right TCP transforms and requires the two
-estimates to agree within `recovery_position_tolerance` and
-`recovery_angular_tolerance`. Legacy state files fall back to the configured
-carry pose. These tolerances do not check the tag pose or compare raw joint
+estimates to agree within `execution_position_tolerance` and
+`execution_orientation_tolerance`. When these settings are absent, recovery
+retains `recovery_position_tolerance` and `recovery_angular_tolerance` as its
+legacy fallbacks. Legacy state files fall back to the configured carry pose. These tolerances do not check the tag pose or compare raw joint
 values directly.
 
 For a fault recovery after the operator has stopped the base and verified that

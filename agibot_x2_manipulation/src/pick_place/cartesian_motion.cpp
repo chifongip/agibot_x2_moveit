@@ -64,10 +64,10 @@ bool validateCartesianState(
     }
   }
   const double t = std::clamp(progress, 0.0, 1.0);
-  if (!endpointReached(actual.left, actual.right,
+  if (!check_pose_tolerance(actual.left, actual.right,
       interpolate(from.left, to.left, t), interpolate(from.right, to.right, t),
-      position_tolerance, orientation_tolerance))
-  {error = "Cartesian path deviation exceeds position/orientation tolerance"; return false;}
+      position_tolerance, orientation_tolerance, "Cartesian path deviation exceeds position/orientation tolerance", error))
+  {return false;}
   return true;
 }
 
@@ -82,7 +82,7 @@ bool validateCartesianTrajectory(
   {error = "Cartesian validation scene or tip links unavailable"; return false;}
   const auto valid = [&](const moveit::core::RobotState & state, std::string & failure) {
       return validateCartesianState(hands(state, config), from, to,
-        config.cartesian_path_position_tolerance, config.cartesian_path_orientation_tolerance, failure);
+        config.planning_position_limit(), config.planning_orientation_limit(), failure);
     };
   return validateTimedReturnTrajectory(trajectory, scene, config.return_validation_joint_step,
     error, interrupted, true, minimum_joint_margin, valid, nullptr,
@@ -182,8 +182,8 @@ bool planCartesianMotion(
     candidate.update();
     if (!candidate.satisfiesBounds(group) || !endpointReached(
         candidate.getGlobalLinkTransform(config.left_tcp), candidate.getGlobalLinkTransform(config.right_tcp),
-        expected_left, expected_right, config.cartesian_path_position_tolerance,
-        config.cartesian_path_orientation_tolerance))
+        expected_left, expected_right, config.planning_position_limit(),
+        config.planning_orientation_limit()))
     {error = "Cartesian waypoint violates bounds or pose accuracy"; return false;}
     for (const auto * joint : group->getActiveJointModels()) {
       if (joint->distance(state.getJointPositions(joint), candidate.getJointPositions(joint)) > config.max_joint_step)
@@ -216,7 +216,7 @@ bool planCartesianMotion(
   }
   const auto final = hands(path.getLastWayPoint(), config);
   if (!endpointReached(final.left, final.right, target.left, target.right,
-      config.cartesian_path_position_tolerance, config.cartesian_path_orientation_tolerance))
+      config.planning_position_limit(), config.planning_orientation_limit()))
   {error = "Cartesian timed endpoint differs from target"; return false;}
   path.getRobotTrajectoryMsg(output);
   end = path.getLastWayPoint();

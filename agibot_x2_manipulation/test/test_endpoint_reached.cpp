@@ -15,6 +15,25 @@ TEST(EndpointReached, AcceptsEqualEndpointsAndNumericalNoise)
   EXPECT_TRUE(endpointReached(pose, pose, noisy, pose));
 }
 
+TEST(EndpointReached, ExecutionPoseCheckReportsHandAndBothErrors)
+{
+  const auto target = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d right(target);
+  right.translation().x() = 0.06;
+  right.linear() = Eigen::AngleAxisd(0.12, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  std::string error;
+  EXPECT_TRUE(check_pose_tolerance(target, right, target, target, 0.1, 0.17,
+    "execution recovery", error));
+  EXPECT_FALSE(check_pose_tolerance(target, right, target, target, 0.05, 0.17,
+    "execution contact", error));
+  EXPECT_NE(error.find("execution contact right"), std::string::npos);
+  EXPECT_NE(error.find("position_error=0.06"), std::string::npos);
+  EXPECT_NE(error.find("orientation_error=0.12"), std::string::npos);
+  EXPECT_FALSE(check_pose_tolerance(target, right, target, target, 0.1, 0.1,
+    "execution recovery", error));
+  EXPECT_NE(error.find("limit=0.1"), std::string::npos);
+}
+
 TEST(EndpointReached, RequiresBothArmsAndPreservesSmallMotions)
 {
   const auto pose = Eigen::Isometry3d::Identity();

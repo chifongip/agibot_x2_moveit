@@ -207,6 +207,16 @@ public:
     move_group_.setMaxAccelerationScalingFactor(config_.acceleration_scaling);
     move_group_.setPlanningTime(10.0);
     post_place_planner_ = std::make_unique<PostPlacePlanner>(node_, config_, move_group_.getRobotModel());
+    RCLCPP_INFO(node_->get_logger(),
+      "Pose tolerances (m/rad): planning Cartesian %.6f/%.6f; execution alignment %.6f/%.6f; "
+      "execution contact %.6f/%.6f; execution recovery %.6f/%.6f",
+      config_.planning_position_limit(), config_.planning_orientation_limit(),
+      config_.execution_position_limit(config_.cartesian_path_position_tolerance),
+      config_.execution_orientation_limit(config_.cartesian_path_orientation_tolerance),
+      config_.execution_position_limit(config_.closed_chain_contact_position_error),
+      config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+      config_.execution_position_limit(config_.recovery_position_tolerance),
+      config_.execution_orientation_limit(config_.recovery_angular_tolerance));
     RCLCPP_INFO(
       node_->get_logger(), "Pick/place motion planning mode: %s",
       motionPlanningModeName(config_.motion_planning_mode));
@@ -1360,25 +1370,18 @@ private:
       return false;
     }
     current->update();
-    const auto within_tolerance = [this](
-      const Eigen::Isometry3d & actual, const Eigen::Isometry3d & expected) {
-        const double position_error = (actual.translation() - expected.translation()).norm();
-        const Eigen::Quaterniond qa(actual.linear());
-        const Eigen::Quaterniond qb(expected.linear());
-        const double angle_error = 2.0 * std::acos(
-          std::clamp(std::abs(qa.dot(qb)), 0.0, 1.0));
-        return position_error <= config_.recovery_position_tolerance &&
-               angle_error <= config_.recovery_angular_tolerance;
-      };
     Eigen::Isometry3d recovered_pose;
     if (held_geometry_valid_) {
       const Eigen::Isometry3d left_estimate =
         current->getGlobalLinkTransform(config_.left_tcp) * held_box_to_left_contact_.inverse();
       const Eigen::Isometry3d right_estimate =
         current->getGlobalLinkTransform(config_.right_tcp) * held_box_to_right_contact_.inverse();
-      if (!within_tolerance(left_estimate, right_estimate)) {
+      if (!check_pose_tolerance(left_estimate, right_estimate, left_estimate, left_estimate,
+          config_.execution_position_limit(config_.recovery_position_tolerance),
+          config_.execution_orientation_limit(config_.recovery_angular_tolerance),
+          "execution recovery closure", error)) {
         error =
-          "left/right TCPs do not imply the same persisted box pose within recovery tolerances";
+          "left/right TCPs do not imply the same persisted box pose within recovery tolerances: " + error;
         return false;
       }
       recovered_pose = left_estimate;
@@ -1395,13 +1398,14 @@ private:
       const auto & nominal_carry_pose = carryPose(MoveCarryPose::Goal::CARRY_A);
       const auto grasp = computeGraspGeometry(
         nominal_carry_pose, config_.dimensions, 0.0, config_.contact_height_offset);
-      if (!within_tolerance(
-          current->getGlobalLinkTransform(config_.left_tcp),
-          grasp.left_contact) ||
-        !within_tolerance(current->getGlobalLinkTransform(config_.right_tcp), grasp.right_contact))
+      if (!check_pose_tolerance(current->getGlobalLinkTransform(config_.left_tcp),
+          current->getGlobalLinkTransform(config_.right_tcp), grasp.left_contact, grasp.right_contact,
+          config_.execution_position_limit(config_.recovery_position_tolerance),
+          config_.execution_orientation_limit(config_.recovery_angular_tolerance),
+          "execution recovery carry contact", error))
       {
         error =
-          "TCP poses do not match the configured legacy carry pose within recovery tolerances";
+          "TCP poses do not match the configured legacy carry pose within recovery tolerances: " + error;
         return false;
       }
       recovered_pose = nominal_carry_pose;
@@ -1864,11 +1868,12 @@ private:
               graspContactScene(scene, config_)->isStateColliding(checked, config_.planning_group))
             {failure = "saved checkpoint state is invalid"; return false;}
             const Eigen::Isometry3d & pose = step.kind == SavedStepKind::ATTACH ? plan->pick_pose : plan->place_pose;
-            if (!endpointReached(current->getGlobalLinkTransform(config_.left_tcp),
+            if (!check_pose_tolerance(current->getGlobalLinkTransform(config_.left_tcp),
                 current->getGlobalLinkTransform(config_.right_tcp), pose * plan->box_to_left,
-                pose * plan->box_to_right, config_.closed_chain_contact_position_error,
-                config_.closed_chain_contact_orientation_error))
-            {failure = "saved checkpoint contact has not converged"; return false;}
+                pose * plan->box_to_right, config_.execution_position_limit(config_.closed_chain_contact_position_error),
+                config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+                "execution saved checkpoint contact", failure))
+            {return false;}
             if (step.kind == SavedStepKind::ATTACH) {
               held_pose_ = stampedPose(pose);
               held_box_to_left_contact_ = plan->box_to_left;
@@ -2356,23 +2361,25 @@ private:
           auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!measured) {failure = "attachment state unavailable"; return false;}
           const auto & contact = selected_grasp.candidate.grasp;
-          if (pick_replan_required || !endpointReached(
+          if (pick_replan_required || !check_pose_tolerance(
               measured->getGlobalLinkTransform(config_.left_tcp),
               measured->getGlobalLinkTransform(config_.right_tcp),
               contact.left_contact, contact.right_contact,
-              config_.closed_chain_contact_position_error,
-              config_.closed_chain_contact_orientation_error))
+              config_.execution_position_limit(config_.closed_chain_contact_position_error),
+              config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+              "execution contact", failure))
           {
             if (!approach_attempt(planning_canceled, failure)) {return false;}
             measured = move_group_.getCurrentState(config_.reset_state_timeout);
             const auto & updated_contact = selected_grasp.candidate.grasp;
-            if (!measured || !endpointReached(
+            if (!measured || !check_pose_tolerance(
                 measured->getGlobalLinkTransform(config_.left_tcp),
                 measured->getGlobalLinkTransform(config_.right_tcp),
                 updated_contact.left_contact, updated_contact.right_contact,
-                config_.closed_chain_contact_position_error,
-                config_.closed_chain_contact_orientation_error))
-            {failure = "attachment contact has not converged"; return false;}
+                config_.execution_position_limit(config_.closed_chain_contact_position_error),
+                config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+                "execution contact", failure))
+            {failure = "attachment contact has not converged: " + failure; return false;}
           }
           return attachment_.attach(failure, &attach_dispatched);
         }, [&]() {return attach_dispatched;})) {
@@ -2751,11 +2758,12 @@ private:
           if (!measured) {failure = "release state unavailable"; return false;}
           const auto contact = motion_planner_.graspFromBoxToTcp(
             place_pose, held_box_to_left_contact_, held_box_to_right_contact_, 0.0);
-          if (!endpointReached(measured->getGlobalLinkTransform(config_.left_tcp),
+          if (!check_pose_tolerance(measured->getGlobalLinkTransform(config_.left_tcp),
               measured->getGlobalLinkTransform(config_.right_tcp),
               contact.left_contact, contact.right_contact,
-              config_.closed_chain_contact_position_error,
-              config_.closed_chain_contact_orientation_error))
+              config_.execution_position_limit(config_.closed_chain_contact_position_error),
+              config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+              "execution contact", failure))
           {
             if (!place_attempt(planning_canceled, failure)) {return false;}
             place_pose = selected_place_pose;
@@ -2764,13 +2772,14 @@ private:
             measured = move_group_.getCurrentState(config_.reset_state_timeout);
             const auto updated_contact = motion_planner_.graspFromBoxToTcp(
               place_pose, held_box_to_left_contact_, held_box_to_right_contact_, 0.0);
-            if (!measured || !endpointReached(
+            if (!measured || !check_pose_tolerance(
                 measured->getGlobalLinkTransform(config_.left_tcp),
                 measured->getGlobalLinkTransform(config_.right_tcp),
                 updated_contact.left_contact, updated_contact.right_contact,
-                config_.closed_chain_contact_position_error,
-                config_.closed_chain_contact_orientation_error))
-            {failure = "release contact has not converged"; return false;}
+                config_.execution_position_limit(config_.closed_chain_contact_position_error),
+                config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+                "execution contact", failure))
+            {failure = "release contact has not converged: " + failure; return false;}
           }
           return attachment_.detach(failure, &detach_dispatched);
         }, [&]() {return detach_dispatched;})) {

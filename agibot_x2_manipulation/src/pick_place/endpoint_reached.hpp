@@ -4,6 +4,9 @@
 #include <moveit/robot_state/robot_state.h>
 
 #include <cmath>
+#include <sstream>
+#include <string>
+#include <utility>
 
 namespace agibot_x2_manipulation
 {
@@ -58,6 +61,31 @@ inline bool endpointReached(
              orientation_tolerance;
     };
   return reached(actual_left, target_left) && reached(actual_right, target_right);
+}
+
+inline bool check_pose_tolerance(
+  const Eigen::Isometry3d & actual_left, const Eigen::Isometry3d & actual_right,
+  const Eigen::Isometry3d & target_left, const Eigen::Isometry3d & target_right,
+  double position_tolerance, double orientation_tolerance,
+  const std::string & check, std::string & error)
+{
+  for (const auto & hand : {std::make_pair("left", std::make_pair(&actual_left, &target_left)),
+      std::make_pair("right", std::make_pair(&actual_right, &target_right))})
+  {
+    const auto & actual = *hand.second.first;
+    const auto & target = *hand.second.second;
+    if (!endpointReached(actual, actual, target, target, position_tolerance, orientation_tolerance)) {
+      std::ostringstream message;
+      message << check << " " << hand.first << ": position_error="
+              << (actual.translation() - target.translation()).norm()
+              << " m (limit=" << position_tolerance << "), orientation_error="
+              << std::abs(Eigen::AngleAxisd(actual.linear().transpose() * target.linear()).angle())
+              << " rad (limit=" << orientation_tolerance << ")";
+      error = message.str();
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace agibot_x2_manipulation

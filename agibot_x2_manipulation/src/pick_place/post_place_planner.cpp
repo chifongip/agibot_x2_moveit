@@ -379,8 +379,10 @@ static bool validateReusableTrajectory(
       if (!shape || std::abs(shape->size[0] - config.dimensions.length) > 1e-9 ||
         std::abs(shape->size[1] - config.dimensions.width) > 1e-9 ||
         std::abs(shape->size[2] - config.dimensions.height) > 1e-9 ||
-        !endpointReached(actual, actual, expected, expected,
-          config.closed_chain_contact_position_error, config.closed_chain_contact_orientation_error))
+        !check_pose_tolerance(actual, actual, expected, expected,
+          config.execution_position_limit(config.closed_chain_contact_position_error),
+          config.execution_orientation_limit(config.closed_chain_contact_orientation_error),
+          "execution cached attachment", error))
       {
         error = "cached carry attachment dimensions or grasp transform mismatch";
         return false;
@@ -675,9 +677,9 @@ bool PostPlacePlanner::endpoint(
       std::make_pair(config_.right_tcp, poses.right)})
   {
     const auto & actual = target.getGlobalLinkTransform(hand.first);
-    if ((actual.translation() - hand.second.translation()).norm() > config_.cartesian_path_position_tolerance ||
+    if ((actual.translation() - hand.second.translation()).norm() > config_.planning_position_limit() ||
       Eigen::Quaterniond(actual.linear()).angularDistance(
-        Eigen::Quaterniond(hand.second.linear())) > config_.cartesian_path_orientation_tolerance)
+        Eigen::Quaterniond(hand.second.linear())) > config_.planning_orientation_limit())
     {
       return false;
     }
@@ -1150,10 +1152,13 @@ bool PostPlacePlanner::validateSegment(
         last.getGlobalLinkTransform(config_.right_tcp)};
       const HandPosePair measured{current.getGlobalLinkTransform(config_.left_tcp),
         current.getGlobalLinkTransform(config_.right_tcp)};
-      if (!validateCartesianState(measured, from, to, config_.cartesian_path_position_tolerance,
-          config_.cartesian_path_orientation_tolerance, error) ||
-        !validateCartesianTrajectory(trajectory, validation_scene, config_, from, to,
-          error, canceled)) {return false;}
+      if (!validateCartesianState(measured, from, to,
+          config_.execution_position_limit(config_.cartesian_path_position_tolerance),
+          config_.execution_orientation_limit(config_.cartesian_path_orientation_tolerance), error))
+      {error = "execution measured retreat start: " + error; return false;}
+      if (!validateCartesianTrajectory(trajectory, validation_scene, config_, from, to,
+          error, canceled))
+      {error = "planning retreat path: " + error; return false;}
     }
     moveit::core::RobotState retreat_end(trajectory.getLastWayPoint());
     if (!validState(retreat_end, contactScene(scene, false), trajectory.getGroup(), error)) {

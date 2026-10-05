@@ -6,6 +6,7 @@
 #include <Eigen/Geometry>
 #include <rclcpp/rclcpp.hpp>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,19 @@ struct PickPlaceConfig
   double pregrasp_distance{0.0};
   double contact_height_offset{0.0};
   double lift_height{0.0};
+  // Unset overrides preserve the corresponding legacy check's tolerance.
+  std::optional<double> planning_position_tolerance;
+  std::optional<double> planning_orientation_tolerance;
+  std::optional<double> execution_position_tolerance;
+  std::optional<double> execution_orientation_tolerance;
+  double planning_position_limit() const
+  {return planning_position_tolerance.value_or(cartesian_path_position_tolerance);}
+  double planning_orientation_limit() const
+  {return planning_orientation_tolerance.value_or(cartesian_path_orientation_tolerance);}
+  double execution_position_limit(double legacy) const
+  {return execution_position_tolerance.value_or(legacy);}
+  double execution_orientation_limit(double legacy) const
+  {return execution_orientation_tolerance.value_or(legacy);}
   double cartesian_step{0.0};
   double cartesian_path_position_tolerance{0.02};
   double cartesian_path_orientation_tolerance{0.0872664626};

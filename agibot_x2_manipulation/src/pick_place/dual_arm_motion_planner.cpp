@@ -3010,17 +3010,10 @@ public:
       current->getGlobalLinkTransform(config_.left_tcp) * held_box_to_left_contact_.inverse();
     const Eigen::Isometry3d right_estimate =
       current->getGlobalLinkTransform(config_.right_tcp) * held_box_to_right_contact_.inverse();
-    const double position_error =
-      (left_estimate.translation() - right_estimate.translation()).norm();
-    const double orientation_error = poseAngularError(left_estimate, right_estimate);
-    if (position_error > config_.closed_chain_contact_position_error ||
-      orientation_error > config_.closed_chain_contact_orientation_error)
-    {
-      error = "left/right TCPs disagree on held box pose (position_error=" +
-        std::to_string(position_error) + ", orientation_error=" +
-        std::to_string(orientation_error) + ")";
-      return false;
-    }
+    if (!check_pose_tolerance(left_estimate, right_estimate, left_estimate, left_estimate,
+        config_.execution_position_limit(config_.closed_chain_contact_position_error),
+        config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+        "execution held-object closure", error)) {return false;}
     if (!planning_scene_.collisionFree(*current, true, false)) {
       error = "current held-object state is in collision before Place";
       return false;

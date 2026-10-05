@@ -23,6 +23,21 @@ T parameter(const rclcpp::Node::SharedPtr & node, const std::string & name, cons
   return node->declare_parameter<T>(name, default_value);
 }
 
+std::optional<double> optional_pose_tolerance(
+  const rclcpp::Node::SharedPtr & node, const std::string & name)
+{
+  if (!node->has_parameter(name)) {
+    node->declare_parameter(name, rclcpp::ParameterType::PARAMETER_DOUBLE);
+  }
+  rclcpp::Parameter value;
+  if (!node->get_parameter(name, value)) {return std::nullopt;}
+  const double tolerance = value.as_double();
+  if (!std::isfinite(tolerance) || tolerance <= 0.0) {
+    throw std::runtime_error(name + " must be finite and positive");
+  }
+  return tolerance;
+}
+
 std::string defaultStateFile()
 {
   const char * ros_home = std::getenv("ROS_HOME");
@@ -104,6 +119,10 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
       throw std::runtime_error("Cartesian step and path tolerances must be finite and positive");
     }
   }
+  config.planning_position_tolerance = optional_pose_tolerance(node, "planning_position_tolerance");
+  config.planning_orientation_tolerance = optional_pose_tolerance(node, "planning_orientation_tolerance");
+  config.execution_position_tolerance = optional_pose_tolerance(node, "execution_position_tolerance");
+  config.execution_orientation_tolerance = optional_pose_tolerance(node, "execution_orientation_tolerance");
   config.max_pose_age = parameter<double>(node, "maximum_box_pose_age", 0.50);
   config.ik_timeout = parameter<double>(node, "ik_timeout", 0.05);
   config.grasp_position_tolerance = parameter<double>(node, "grasp_position_tolerance", 0.015);

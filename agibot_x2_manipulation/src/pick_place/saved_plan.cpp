@@ -82,22 +82,30 @@ bool prepareSavedMotion(
     if (!shape || std::abs(shape->size[0] - config.dimensions.length) > 1e-9 ||
       std::abs(shape->size[1] - config.dimensions.width) > 1e-9 ||
       std::abs(shape->size[2] - config.dimensions.height) > 1e-9 ||
-      !endpointReached(pose, pose, expected, expected,
-        config.closed_chain_contact_position_error, config.closed_chain_contact_orientation_error))
-    {error = "saved attachment geometry mismatch"; return false;}
+      !check_pose_tolerance(pose, pose, expected, expected,
+        config.execution_position_limit(config.closed_chain_contact_position_error),
+        config.execution_orientation_limit(config.closed_chain_contact_orientation_error),
+        "execution saved attachment", error))
+    {error = "saved attachment geometry mismatch: " + error; return false;}
   } else if (!bodies.empty()) {error = "saved empty-arm segment has an attachment"; return false;}
   const auto validation_scene = step.contact || step.held ? graspContactScene(scene, config) :
     step.retreat ? retreatContactScene(scene, config) : scene;
-  const auto valid = [&](const moveit::core::RobotState & state, std::string & failure) {
+  const auto closure_valid = [&](const moveit::core::RobotState & state, std::string & failure, bool execution) {
       if (step.held && config.motion_planning_mode == MotionPlanningMode::CLOSED_CHAIN) {
         const Eigen::Isometry3d box = state.getGlobalLinkTransform(config.left_tcp) * plan.box_to_left.inverse();
         const Eigen::Isometry3d right_box = state.getGlobalLinkTransform(config.right_tcp) * plan.box_to_right.inverse();
-        if (!endpointReached(right_box, right_box, box, box,
+        if (!check_pose_tolerance(box, right_box, box, box,
+            execution ? config.execution_position_limit(config.closed_chain_contact_position_error) :
             config.closed_chain_contact_position_error,
-            config.closed_chain_contact_orientation_error))
-        {failure = "saved path violates held-object closure"; return false;}
+            execution ? config.execution_orientation_limit(config.closed_chain_contact_orientation_error) :
+            config.closed_chain_contact_orientation_error,
+            execution ? "execution alignment closure" : "planning saved-path closure", failure))
+        {return false;}
       }
       return true;
+    };
+  const auto valid = [&](const moveit::core::RobotState & state, std::string & failure) {
+      return closure_valid(state, failure, false);
     };
   robot_trajectory::RobotTrajectory suffix(current.getRobotModel(), config.planning_group);
   suffix.setRobotTrajectoryMsg(current, step.trajectory);
@@ -112,7 +120,9 @@ bool prepareSavedMotion(
       path.addSuffixWayPoint(suffix.getWayPoint(i), i == range.first ? 0.0 : suffix.getWayPointDurationFromPrevious(i));
     }
     if (!validateCartesianTrajectory(path, validation_scene, config, range.from, range.to,
-        error, canceled, step.held ? config.minimum_carry_joint_margin : 0.0)) {return false;}
+        error, canceled, step.held ? config.minimum_carry_joint_margin : 0.0)) {
+      error = "planning saved Cartesian path: " + error; return false;
+    }
   }
   if (step.retreat && scene->isStateColliding(suffix.getLastWayPoint(), config.planning_group))
   {error = "saved retreat endpoint is still in contact"; return false;}
@@ -183,18 +193,21 @@ bool prepareSavedMotion(
           position > std::max(bounds.max_position_, initial) + 1e-6))
         {failure = "alignment increases position-bounds violation: " + name; return false;}
       }
-      if (!valid(state, failure)) {return false;}
+      if (!closure_valid(state, failure, true)) {return false;}
       for (const auto & range : step.cartesian) {
         if (range.first == 0 && !validateCartesianState(
             {state.getGlobalLinkTransform(config.left_tcp), state.getGlobalLinkTransform(config.right_tcp)},
-            range.from, range.to, config.cartesian_path_position_tolerance,
-            config.cartesian_path_orientation_tolerance, failure)) {return false;}
+            range.from, range.to,
+            config.execution_position_limit(config.cartesian_path_position_tolerance),
+            config.execution_orientation_limit(config.cartesian_path_orientation_tolerance), failure)) {return false;}
       }
       return true;
     };
   if (!validateTimedReturnTrajectory(alignment, validation_scene, config.return_validation_joint_step,
       error, canceled, false, step.held ? config.minimum_carry_joint_margin : 0.0,
-      alignment_valid, nullptr, config.controller_spline_bounds_tolerance)) {return false;}
+      alignment_valid, nullptr, config.controller_spline_bounds_tolerance)) {
+    error = "execution measured alignment: " + error; return false;
+  }
   for (auto & point : output.joint_trajectory.points) {
     point.time_from_start = rclcpp::Duration(point.time_from_start) + rclcpp::Duration::from_seconds(duration);
   }

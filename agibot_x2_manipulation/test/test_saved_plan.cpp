@@ -125,6 +125,38 @@ TEST(SavedPlan, RejectsCartesianDeviationWithoutChangingTrajectory)
   EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, *f.step.start, f.scene, output, seconds, error, []{return false;}));
   EXPECT_EQ(output, f.step.trajectory);
 }
+TEST(SavedPlan, ExecutionAlignmentDoesNotRelaxSavedCartesianPath)
+{
+  Fixture f;
+  f.plan.config.left_tcp = "tip"; f.plan.config.right_tcp = "tip";
+  f.plan.config.planning_position_tolerance = 0.02;
+  f.plan.config.planning_orientation_tolerance = 0.05;
+  f.plan.config.execution_position_tolerance = 0.1;
+  f.plan.config.execution_orientation_tolerance = 0.17;
+  HandPosePair from{Eigen::Isometry3d::Identity(), Eigen::Isometry3d::Identity()};
+  auto to = from; to.left.translation().x() = 0.2; to.right.translation().x() = 0.2;
+  f.step.cartesian = {{0, 1, from, to}};
+  auto current = *f.step.start; current.setVariablePosition("j", -0.03); current.update();
+  moveit_msgs::msg::RobotTrajectory output; double seconds; std::string error;
+  ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error, []{return false;})) << error;
+  ASSERT_EQ(output.joint_trajectory.points.size(), 3U);
+  for (size_t i = 0; i < 2; ++i) {
+    auto point = output.joint_trajectory.points[i + 1];
+    point.time_from_start = f.step.trajectory.joint_trajectory.points[i].time_from_start;
+    EXPECT_EQ(point, f.step.trajectory.joint_trajectory.points[i]);
+  }
+  f.plan.config.execution_position_tolerance = 0.025;
+  EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error, []{return false;}));
+  EXPECT_NE(error.find("execution measured alignment"), std::string::npos);
+  EXPECT_NE(error.find("position_error="), std::string::npos);
+  f.plan.config.execution_position_tolerance.reset();
+  EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error, []{return false;}));
+  f.plan.config.execution_position_tolerance = 1.0;
+  f.step.cartesian[0].from.left.translation().y() = 0.1;
+  EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error, []{return false;}));
+  EXPECT_NE(error.find("planning saved Cartesian path"), std::string::npos);
+}
+
 TEST(SavedPlan, AlignsSlightlyOutOfBoundsFeedbackWithoutChangingSavedPath)
 {
   Fixture f;
@@ -139,6 +171,27 @@ TEST(SavedPlan, AlignsSlightlyOutOfBoundsFeedbackWithoutChangingSavedPath)
   EXPECT_DOUBLE_EQ(output.joint_trajectory.points[1].positions.front(), -1.0);
   f.step.start->setVariablePosition("j", -1.03); f.step.start->update();
   EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, *f.step.start, f.scene, output, seconds, error, []{return false;}));
+}
+
+TEST(SavedPlan, BroadExecutionToleranceStillRejectsAlignmentCollision)
+{
+  Fixture f;
+  f.plan.config.execution_position_tolerance = 0.1;
+  auto current = *f.step.start; current.setVariablePosition("j", -0.03); current.update();
+  moveit_msgs::msg::CollisionObject obstacle;
+  obstacle.header.frame_id = "base"; obstacle.id = "alignment_obstacle";
+  obstacle.operation = moveit_msgs::msg::CollisionObject::ADD;
+  shape_msgs::msg::SolidPrimitive shape;
+  shape.type = shape_msgs::msg::SolidPrimitive::BOX; shape.dimensions = {0.01, 0.01, 0.01};
+  obstacle.primitives.push_back(shape);
+  geometry_msgs::msg::Pose pose; pose.orientation.w = 1; pose.position.x = -0.015;
+  obstacle.primitive_poses.push_back(pose);
+  ASSERT_TRUE(f.scene->processCollisionObjectMsg(obstacle));
+  moveit_msgs::msg::RobotTrajectory output; double seconds; std::string error;
+  ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, *f.step.start, f.scene, output, seconds, error, []{return false;})) << error;
+  EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error, []{return false;}));
+  EXPECT_NE(error.find("execution measured alignment"), std::string::npos);
+  EXPECT_NE(error.find("collision"), std::string::npos);
 }
 TEST(SavedPlan, RejectsStaleStartInvalidBoundsAndAttachment)
 {

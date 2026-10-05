@@ -34,6 +34,13 @@ pick_place_server:
     contact_height_offset: 0.0
     lift_height: 0.08
     cartesian_step: 0.01
+    # Generated Cartesian trajectory accuracy (m / rad).
+    planning_position_tolerance: 0.02
+    planning_orientation_tolerance: 0.0872664626  # 5 degrees
+    # Measured alignment, contact, held-state consistency, and recovery (m / rad).
+    execution_position_tolerance: 0.1
+    execution_orientation_tolerance: 0.1745329252  # 10 degrees
+    # Legacy fallbacks below remain supported when the new settings are absent.
     # Geometric path deviation for pose_to_pose approach, pick lift, descent,
     # and retreat; independent of measured execution/attachment tolerances.
     cartesian_path_position_tolerance: 0.02  # m
