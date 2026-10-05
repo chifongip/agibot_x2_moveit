@@ -474,9 +474,11 @@ Set `table_collision_enabled: true` to include a currently fresh, stable table-t
 pose in Pick, Place, PickPlace, carry, and reset scene updates. These actions use
 one validated detection snapshot and one scene diff to replace managed obstacles.
 Stale/invisible boxes and the configured table model are removed; unrelated
-external obstacles remain. Missing table detections do not block planning with
-an explicit target, but a tag-derived placement target still requires a fresh
-stable table pose. Selected, held, and released task boxes are protected during
+external obstacles remain. Standalone Pick uses a fresh stable table observation
+when available, without waiting for one; the selected box detection is still
+required. Place and combined PickPlace retain their table acquisition requirements,
+and a tag-derived placement target requires a fresh stable table pose.
+Selected, held, and released task boxes are protected during
 their manipulation stages. Empty-action cleanup reconciles fresh obstacles and
 removes task contact allowances rather than erasing every managed box.
 Existing pre-execution checks remain; no continuous motion monitoring is added.
@@ -1073,6 +1075,13 @@ observation. Executed PickPlace captures a new snapshot for its Place portion;
 its initial target check does not freeze a tag-derived target before Pick.
 Detection tracking and table visualization remain live. A new Pick/Place action
 acquires fresh observations; cancellation and exceptions discard the local snapshot.
+For standalone Pick, table acquisition is optional and does not wait: a fresh
+stable observation is frozen with the box snapshot, while an absent or expired
+observation removes the previous managed table. Saved Pick execution also proceeds
+without a fresh table detection; a fresh observation, when present, must pass the
+existing movement check, and any table geometry saved in the plan remains
+collision-checked. This applies to ordinary and plan-only Pick; Place and combined
+PickPlace keep their existing table requirements.
 The snapshot is expressed in `planning_frame`; keep the robot base/posture and
 physical table stationary during an action. After repositioning, cancel/restart
 the action to acquire a new snapshot. External planning-scene/OctoMap updates
@@ -1090,8 +1099,8 @@ Pick/Place wait for reacquisition, then pause for Continue if the retry budget i
 exhausted. Profile changes remain invalidations.
 
 `tag_reacquisition_timeout: 10.0` seconds is the shared wait limit for fresh box
-selection, planned visible-box checks, and stable table-tag acquisition in Pick,
-Place, and PickPlace. These actions publish `waiting_for_detection`
+selection, planned visible-box checks, and required stable table-tag acquisition
+in Place and PickPlace. These actions publish `waiting_for_detection`
 feedback while waiting before the next motion, retain the current held-object
 state, and respond to cancellation/reset requests. All boxes in a planned
 snapshot share one deadline. The held box is excluded from visible-box checks;

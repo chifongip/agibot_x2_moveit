@@ -518,14 +518,16 @@ private:
     return true;
   }
 
-  ScopeExit freezeDetectionScene()
+  ScopeExit freezeDetectionScene(bool table_required = true)
   {
     detection_snapshot_active_ = true;
+    detection_table_required_ = table_required;
     detection_scene_captured_ = false;
     detection_table_pose_.reset();
     detection_boxes_.clear();
     return ScopeExit([this]() {
       detection_snapshot_active_ = false;
+      detection_table_required_ = true;
       detection_scene_captured_ = false;
       detection_table_pose_.reset();
       detection_boxes_.clear();
@@ -836,11 +838,17 @@ private:
     const CancelFunction & canceled = []() {return false;})
   {
     if (config_.table_collision_enabled && table_tag_pose_tracker_) {
-      if (detection_snapshot_active_) {
+      if (detection_snapshot_active_ && detection_table_required_) {
         Eigen::Isometry3d tag_pose;
         if (!waitForStableTableTagPose(tag_pose, error, canceled)) {return false;}
         observations.table = SceneBox{config_.table_collision_id, config_.table_dimensions,
           tablePoseFromVerticalTag(tag_pose, config_.table_dimensions,
+            config_.table_tag_to_tabletop_center)};
+        return true;
+      }
+      if (detection_snapshot_active_ && detection_table_pose_) {
+        observations.table = SceneBox{config_.table_collision_id, config_.table_dimensions,
+          tablePoseFromVerticalTag(*detection_table_pose_, config_.table_dimensions,
             config_.table_tag_to_tabletop_center)};
         return true;
       }
@@ -850,9 +858,11 @@ private:
           0.0, []() {return false;}, tag_pose, observation_error))
       {
         try {
+          const auto accepted_pose = toEigen(tag_pose.pose);
           observations.table = SceneBox{config_.table_collision_id, config_.table_dimensions,
-            tablePoseFromVerticalTag(toEigen(tag_pose.pose), config_.table_dimensions,
+            tablePoseFromVerticalTag(accepted_pose, config_.table_dimensions,
               config_.table_tag_to_tabletop_center)};
+          if (detection_snapshot_active_) {detection_table_pose_ = accepted_pose;}
         } catch (const std::exception & exception) {
           error = "invalid fresh table observation: " + std::string(exception.what());
           return false;
@@ -1793,8 +1803,16 @@ private:
     }
     if (plan.table_tag) {
       geometry_msgs::msg::PoseStamped observed;
+      const bool required = plan.action != "pick";
+      std::string observation_error;
       if (!table_tag_pose_tracker_ || !table_tag_pose_tracker_->waitForStablePose(
-          config_.tag_reacquisition_timeout, canceled, observed, error)) {return false;}
+          required ? config_.tag_reacquisition_timeout : 0.0, canceled,
+          observed, observation_error))
+      {
+        if (!required && !canceled()) {return true;}
+        error = observation_error.empty() ? "table-tag tracking is not configured" : observation_error;
+        return false;
+      }
       const auto actual = toEigen(observed.pose);
       if (!validate_table_detection(actual, *plan.table_tag, plan.config, error)) {return false;}
     }
@@ -2088,9 +2106,9 @@ private:
 
   TaskOutcome runPick(
     bool plan_only, const std::string & instance_id, const FeedbackFunction & feedback,
-    const CancelFunction & canceled)
+    const CancelFunction & canceled, bool table_required = true)
   {
-    auto detection_scope = freezeDetectionScene();
+    auto detection_scope = freezeDetectionScene(table_required);
     if (canceled()) {
       return outcome(false, kSafetyAbort, "pick canceled before validation");
     }
@@ -3210,7 +3228,7 @@ private:
         task = runPick(
           goal->get_goal()->plan_only, goal->get_goal()->instance_id, feedback,
           [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested() ||
-            shutting_down_.load() || !rclcpp::ok();});
+            shutting_down_.load() || !rclcpp::ok();}, false);
       }
     } catch (const std::exception & exception) {
       move_group_.stop();
@@ -3443,6 +3461,7 @@ private:
   // Accessed only by the reserved action worker. Trackers/markers remain live;
   // accepted detections enter MoveIt once per action (or confirmed box movement).
   bool detection_snapshot_active_{false};
+  bool detection_table_required_{true};
   bool detection_scene_captured_{false};
   std::optional<Eigen::Isometry3d> detection_table_pose_;
   std::vector<TrackedBoxPose> detection_boxes_;

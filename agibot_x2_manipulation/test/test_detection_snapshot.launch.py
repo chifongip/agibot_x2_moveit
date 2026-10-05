@@ -13,6 +13,7 @@ from moveit_msgs.msg import PlanningSceneComponents
 from moveit_msgs.srv import GetPlanningScene
 import pytest
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.qos import qos_profile_sensor_data
 from tf2_ros import TransformBroadcaster
 
@@ -105,6 +106,13 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
             ManipulationTaskStatus, "/manipulation_task_status", status, 50)
         timer = self.node.create_timer(0.03, publish)
         try:
+            # Pick no longer waits for a table. Publish stable observations
+            # after the server is ready before testing snapshot retention.
+            ready = ActionClient(self.node, Pick, "/pick_box")
+            try:
+                self.assertTrue(ready.wait_for_server(timeout_sec=40.0))
+            finally:
+                ready.destroy()
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
                 rclpy.spin_once(self.node, timeout_sec=0.03)
