@@ -81,6 +81,7 @@ def camera_actions(
                 namespace=namespace,
                 condition=enabled,
                 output="screen",
+                arguments=["--ros-args", "--log-level", "error"],
                 parameters=[
                     {
                         "input_image_topic": LaunchConfiguration(
