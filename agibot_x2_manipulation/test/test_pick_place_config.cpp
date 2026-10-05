@@ -329,6 +329,75 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidPoseAccuracyOverrides)
   }
 }
 
+TEST_F(PickPlaceConfigTest, DetectionOverridesPreserveLegacyAndPartialFallbacks)
+{
+  auto legacy = node("detection_legacy");
+  legacy->declare_parameter<double>("grasp_position_tolerance", 0.03);
+  legacy->declare_parameter<double>("grasp_orientation_tolerance", 0.12);
+  legacy->declare_parameter<double>("closed_chain_contact_position_error", 0.07);
+  legacy->declare_parameter<double>("closed_chain_contact_orientation_error", 0.2);
+  const auto old = loadPickPlaceConfig(legacy);
+  EXPECT_FALSE(old.detection_position_tolerance);
+  EXPECT_FALSE(old.detection_orientation_tolerance);
+  EXPECT_DOUBLE_EQ(old.detection_position_limit(old.grasp_position_tolerance), 0.03);
+  EXPECT_DOUBLE_EQ(old.detection_position_limit(old.closed_chain_contact_position_error), 0.07);
+  EXPECT_DOUBLE_EQ(old.detection_orientation_limit(old.grasp_orientation_tolerance), 0.12);
+  EXPECT_DOUBLE_EQ(old.detection_orientation_limit(old.closed_chain_contact_orientation_error), 0.2);
+
+  auto partial = node("detection_partial");
+  partial->declare_parameter<double>("detection_position_tolerance", 0.06);
+  const auto p = loadPickPlaceConfig(partial);
+  EXPECT_DOUBLE_EQ(p.detection_position_limit(p.grasp_position_tolerance), 0.06);
+  EXPECT_DOUBLE_EQ(p.detection_position_limit(p.closed_chain_contact_position_error), 0.06);
+  EXPECT_DOUBLE_EQ(p.detection_orientation_limit(p.grasp_orientation_tolerance), p.grasp_orientation_tolerance);
+  EXPECT_DOUBLE_EQ(p.detection_orientation_limit(p.closed_chain_contact_orientation_error), p.closed_chain_contact_orientation_error);
+}
+
+TEST_F(PickPlaceConfigTest, DetectionOverridesDoNotChangeGraspSearch)
+{
+  auto n = node("detection_independence");
+  n->declare_parameter<double>("detection_position_tolerance", 0.1);
+  n->declare_parameter<double>("detection_orientation_tolerance", 0.17);
+  auto config = loadPickPlaceConfig(n);
+  const auto candidates = [](const PickPlaceConfig & c) {
+      GraspCandidateOptions options;
+      options.position_tolerance = c.grasp_position_tolerance;
+      options.orientation_tolerance = c.grasp_orientation_tolerance;
+      options.maximum_candidates = 64;
+      return generateGraspCandidates(Eigen::Isometry3d::Identity(), {0.15, 0.35, 0.32}, 0.08, 0.0, options);
+    };
+  const auto before = candidates(config);
+  ASSERT_FALSE(before.empty());
+  config.detection_position_tolerance = 0.002;
+  config.detection_orientation_tolerance = 0.01;
+  const auto after = candidates(config);
+  ASSERT_EQ(before.size(), after.size());
+  for (size_t i = 0; i < before.size(); ++i) {
+    EXPECT_TRUE(before[i].grasp.left_contact.matrix().isApprox(after[i].grasp.left_contact.matrix()));
+    EXPECT_TRUE(before[i].grasp.right_contact.matrix().isApprox(after[i].grasp.right_contact.matrix()));
+    EXPECT_DOUBLE_EQ(before[i].correction_cost, after[i].correction_cost);
+  }
+  config.grasp_position_tolerance = 0.3;
+  config.grasp_orientation_tolerance = 0.4;
+  EXPECT_DOUBLE_EQ(config.detection_position_limit(config.grasp_position_tolerance), 0.002);
+  EXPECT_DOUBLE_EQ(config.detection_orientation_limit(config.grasp_orientation_tolerance), 0.01);
+}
+
+TEST_F(PickPlaceConfigTest, RejectsInvalidDetectionOverrides)
+{
+  for (const auto & name : {"detection_position_tolerance", "detection_orientation_tolerance"}) {
+    for (double value : {0.0, -0.1, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()}) {
+      auto invalid = std::make_shared<rclcpp::Node>("invalid_detection",
+        rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter(name, value)}));
+      EXPECT_THROW(loadPickPlaceConfig(invalid), std::runtime_error) << name;
+    }
+    auto invalid = std::make_shared<rclcpp::Node>("invalid_detection_type",
+      rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter(name, "invalid")}));
+    EXPECT_THROW(loadPickPlaceConfig(invalid), std::exception) << name;
+  }
+}
+
 TEST_F(PickPlaceConfigTest, RejectsInvalidSearchBudgetsAndInitialState)
 {
   const auto bad_budget = node("bad_budget");

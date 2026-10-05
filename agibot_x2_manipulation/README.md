@@ -509,6 +509,26 @@ both contacts up/down or along the face by 15 mm, rotate the mirrored wrists by
 box tilt while keeping the measured tag top-center and yaw fixed. Near a box
 diagonal, it can also try the other face pair. The selected rigid box-to-TCP
 geometry is retained through approach, carry, split Pick/Place, and retreat.
+`grasp_position_tolerance` and `grasp_orientation_tolerance` control coordinated
+grasp candidate search. The independent `detection_position_tolerance` and
+`detection_orientation_tolerance` check detected box movement against the planned
+snapshot and table-tag movement before saved execution. The shipped detection
+limits are 0.1 m / 0.1745329252 rad (10 degrees), preserving the previous movement
+thresholds. Changing detection limits does not change grasp candidates; changing
+grasp search limits does not change detection checks when detection limits are
+explicitly configured.
+
+Legacy configurations remain supported per component. An absent detection
+position/orientation setting falls back to the corresponding grasp tolerance
+for boxes, or `closed_chain_contact_*_error` for the saved-plan table check.
+Explicit detection values must be finite, positive doubles. Startup logs report
+effective box/table limits; movement failures identify the instance/tag and
+report errors and limits. Detection freshness/stability, held/released target
+exclusions, and snapshot/retry behavior remain unchanged. Restart the server
+after configuration changes and create new previews; live updates are not added.
+See [detection tolerance validation](test/detection_tolerance_validation.md)
+for regression and captured-simulation results.
+
 Tune `grasp_*_tolerance`, `maximum_grasp_candidates`, and the search/planning
 timeouts in `config/box_manipulation.yaml`; keep tolerances conservative on
 hardware. These parameters improve geometric feasibility but do not provide

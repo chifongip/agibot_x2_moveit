@@ -45,6 +45,8 @@ struct PickPlaceConfig
   std::optional<double> planning_orientation_tolerance;
   std::optional<double> execution_position_tolerance;
   std::optional<double> execution_orientation_tolerance;
+  std::optional<double> detection_position_tolerance;
+  std::optional<double> detection_orientation_tolerance;
   double planning_position_limit() const
   {return planning_position_tolerance.value_or(cartesian_path_position_tolerance);}
   double planning_orientation_limit() const
@@ -53,6 +55,10 @@ struct PickPlaceConfig
   {return execution_position_tolerance.value_or(legacy);}
   double execution_orientation_limit(double legacy) const
   {return execution_orientation_tolerance.value_or(legacy);}
+  double detection_position_limit(double legacy) const
+  {return detection_position_tolerance.value_or(legacy);}
+  double detection_orientation_limit(double legacy) const
+  {return detection_orientation_tolerance.value_or(legacy);}
   double cartesian_step{0.0};
   double cartesian_path_position_tolerance{0.02};
   double cartesian_path_orientation_tolerance{0.0872664626};

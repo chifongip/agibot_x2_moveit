@@ -40,6 +40,9 @@ pick_place_server:
     # Measured alignment, contact, held-state consistency, and recovery (m / rad).
     execution_position_tolerance: 0.1
     execution_orientation_tolerance: 0.1745329252  # 10 degrees
+    # Box/table movement against the planned detection snapshot (m / rad).
+    detection_position_tolerance: 0.1
+    detection_orientation_tolerance: 0.1745329252  # 10 degrees
     # Legacy fallbacks below remain supported when the new settings are absent.
     # Geometric path deviation for pose_to_pose approach, pick lift, descent,
     # and retreat; independent of measured execution/attachment tolerances.
@@ -51,8 +54,8 @@ pick_place_server:
     ik_timeout: 0.05
     # Coordinated dual-arm search. These are shared grasp hypotheses, not
     # independent per-hand pose tolerances.
-    grasp_position_tolerance: 0.1
-    grasp_orientation_tolerance: 0.1745329252  # 10 degrees
+    grasp_position_tolerance: 0.05  # 5 cm
+    grasp_orientation_tolerance: 0.0872664626  # 5 degrees
     pregrasp_distance_tolerance: 0.020
     alternate_face_alignment_tolerance: 0.261799388  # 15 degrees from best face pair
     maximum_grasp_candidates: 128

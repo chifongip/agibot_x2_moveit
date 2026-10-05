@@ -291,8 +291,10 @@ bool BoxPoseTracker::withinTolerance(
     std::clamp(std::abs(reference_q.dot(current_q)), 0.0, 1.0));
   if (position_error > position_tolerance_ || angular_error > orientation_tolerance_) {
     if (moved) {*moved = true;}
-    error = "box moved after planning (position=" + std::to_string(position_error) +
-      " m, angle=" + std::to_string(angular_error) + " rad)";
+    error = "box moved after planning: " + reference.instance_id +
+      " (position=" + std::to_string(position_error) + " m, limit=" +
+      std::to_string(position_tolerance_) + "; angle=" + std::to_string(angular_error) +
+      " rad, limit=" + std::to_string(orientation_tolerance_) + ")";
     return false;
   }
   return true;

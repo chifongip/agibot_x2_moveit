@@ -179,7 +179,8 @@ public:
     box_pose_tracker_(
       node, config_.planning_frame, config_.box_pose_topic, config_.box_states_topic,
       config_.max_pose_age,
-      config_.grasp_position_tolerance, config_.grasp_orientation_tolerance),
+      config_.detection_position_limit(config_.grasp_position_tolerance),
+      config_.detection_orientation_limit(config_.grasp_orientation_tolerance)),
     move_group_(node, config_.planning_group), planning_scene_(node, config_),
     perception_(node, config_, planning_scene_), attachment_(node, config_),
     trajectory_executor_(node, config_, move_group_),
@@ -217,6 +218,12 @@ public:
       config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
       config_.execution_position_limit(config_.recovery_position_tolerance),
       config_.execution_orientation_limit(config_.recovery_angular_tolerance));
+    RCLCPP_INFO(node_->get_logger(),
+      "Detection tolerances (m/rad): boxes %.6f/%.6f; table %.6f/%.6f",
+      config_.detection_position_limit(config_.grasp_position_tolerance),
+      config_.detection_orientation_limit(config_.grasp_orientation_tolerance),
+      config_.detection_position_limit(config_.closed_chain_contact_position_error),
+      config_.detection_orientation_limit(config_.closed_chain_contact_orientation_error));
     RCLCPP_INFO(
       node_->get_logger(), "Pick/place motion planning mode: %s",
       motionPlanningModeName(config_.motion_planning_mode));
@@ -1786,9 +1793,7 @@ private:
       if (!table_tag_pose_tracker_ || !table_tag_pose_tracker_->waitForStablePose(
           config_.tag_reacquisition_timeout, canceled, observed, error)) {return false;}
       const auto actual = toEigen(observed.pose);
-      if (!endpointReached(actual, actual, *plan.table_tag, *plan.table_tag,
-          config_.closed_chain_contact_position_error, config_.closed_chain_contact_orientation_error))
-      {error = "table moved beyond saved-plan tolerance"; return false;}
+      if (!validate_table_detection(actual, *plan.table_tag, plan.config, error)) {return false;}
     }
     return true;
   }

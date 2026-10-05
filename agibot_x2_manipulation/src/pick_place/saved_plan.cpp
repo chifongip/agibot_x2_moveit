@@ -31,6 +31,21 @@ double peakPolynomial(const std::function<double (double)> & value, double a, do
 }
 }  // namespace
 
+bool validate_table_detection(
+  const Eigen::Isometry3d & actual, const Eigen::Isometry3d & reference,
+  const PickPlaceConfig & config, std::string & error)
+{
+  const double position_limit = config.detection_position_limit(config.closed_chain_contact_position_error);
+  const double orientation_limit = config.detection_orientation_limit(config.closed_chain_contact_orientation_error);
+  if (endpointReached(actual, actual, reference, reference, position_limit, orientation_limit)) {return true;}
+  error = "table moved beyond saved-plan tolerance: tag:" + std::to_string(config.table_tag_id) +
+    " position_error=" + std::to_string((actual.translation() - reference.translation()).norm()) +
+    " m (limit=" + std::to_string(position_limit) + "), orientation_error=" +
+    std::to_string(std::abs(Eigen::AngleAxisd(actual.linear().transpose() * reference.linear()).angle())) +
+    " rad (limit=" + std::to_string(orientation_limit) + ")";
+  return false;
+}
+
 bool prepareSavedMotion(
   const SavedStep & step, const SavedPlan & plan, const moveit::core::RobotState & measured,
   const planning_scene::PlanningScenePtr & scene, moveit_msgs::msg::RobotTrajectory & output,

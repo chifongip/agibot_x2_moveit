@@ -37,6 +37,49 @@ struct Fixture
     step.trajectory.joint_trajectory.points = {a, b};
   }
 };
+TEST(SavedPlan, TableDetectionUsesCapturedLimitsWithLegacyFallback)
+{
+  PickPlaceConfig config;
+  config.table_tag_id = 9;
+  config.closed_chain_contact_position_error = 0.02;
+  config.closed_chain_contact_orientation_error = 0.1;
+  const auto reference = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d actual(reference);
+  std::string error;
+  actual.translation().x() = 0.03;
+  EXPECT_FALSE(validate_table_detection(actual, reference, config, error));
+  config.detection_position_tolerance = 0.04;
+  config.detection_orientation_tolerance = 0.2;
+  const auto captured = config;
+  config.detection_position_tolerance = 0.01;
+  EXPECT_TRUE(validate_table_detection(actual, reference, captured, error));
+  EXPECT_FALSE(validate_table_detection(actual, reference, config, error));
+  for (const double x : {0.039, 0.04, 0.041}) {
+    actual = reference; actual.translation().x() = x;
+    EXPECT_EQ(validate_table_detection(actual, reference, captured, error), x <= 0.04) << error;
+  }
+  EXPECT_NE(error.find("tag:9"), std::string::npos);
+  EXPECT_NE(error.find("limit=0.040000"), std::string::npos);
+  for (const double angle : {0.199, 0.2, 0.201}) {
+    actual = reference;
+    actual.linear() = Eigen::AngleAxisd(angle, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    EXPECT_EQ(validate_table_detection(actual, reference, captured, error), angle <= 0.2) << error;
+  }
+  EXPECT_NE(error.find("orientation_error="), std::string::npos);
+  EXPECT_NE(error.find("limit=0.200000"), std::string::npos);
+  auto independent = captured;
+  independent.grasp_position_tolerance = 0.001;
+  independent.grasp_orientation_tolerance = 0.001;
+  independent.execution_position_tolerance = 0.001;
+  independent.execution_orientation_tolerance = 0.001;
+  actual = reference; actual.translation().x() = 0.03;
+  EXPECT_TRUE(validate_table_detection(actual, reference, independent, error));
+  independent.detection_orientation_tolerance.reset();
+  actual = reference;
+  actual.linear() = Eigen::AngleAxisd(0.12, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  EXPECT_FALSE(validate_table_detection(actual, reference, independent, error));
+}
+
 TEST(SavedPlan, ClaimIsSingleUseAndInvalidatesOtherPlans)
 {
   SavedPlanStore store;

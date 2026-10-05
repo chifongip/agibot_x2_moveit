@@ -4,6 +4,7 @@
 #include <rclcpp/executors/single_threaded_executor.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <thread>
 
@@ -144,6 +145,34 @@ TEST_F(BoxPoseTrackerTest, RejectsMovementOrProfileChangesAfterReacquisition)
       }, &moved));
   EXPECT_FALSE(moved);
   EXPECT_NE(error.find("profile changed"), std::string::npos);
+}
+
+TEST_F(BoxPoseTrackerTest, MovementThresholdsIncludeBoundaryAndReportLimits)
+{
+  const auto reference = pose("target");
+  std::string error;
+  for (const double x : {0.019, 0.02, 0.021}) {
+    tracker_->clear();
+    bool moved = false;
+    const bool accepted = tracker_->waitForUnchangedPoses({reference}, 1.0,
+      []() {return false;}, error, [&]() {publish({pose("target", x)});}, &moved);
+    EXPECT_EQ(accepted, x <= 0.02) << error;
+    EXPECT_EQ(moved, x > 0.02);
+  }
+  EXPECT_NE(error.find("target"), std::string::npos);
+  EXPECT_NE(error.find("limit=0.020000"), std::string::npos);
+  for (const double angle : {0.099, 0.1, 0.101}) {
+    tracker_->clear();
+    bool moved = false;
+    auto observed = pose("target");
+    observed.pose.pose.pose.orientation.w = std::cos(angle / 2);
+    observed.pose.pose.pose.orientation.z = std::sin(angle / 2);
+    const bool accepted = tracker_->waitForUnchangedPoses({reference}, 1.0,
+      []() {return false;}, error, [&]() {publish({observed});}, &moved);
+    EXPECT_EQ(accepted, angle <= 0.1) << error;
+    EXPECT_EQ(moved, angle > 0.1);
+  }
+  EXPECT_NE(error.find("limit=0.100000"), std::string::npos);
 }
 
 TEST_F(BoxPoseTrackerTest, TimesOutOnceForTheEntireSnapshotAndHonorsCancellation)
