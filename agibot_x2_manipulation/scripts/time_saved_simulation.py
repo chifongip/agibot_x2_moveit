@@ -226,7 +226,7 @@ def run_simulations(arguments):
     from agibot_x2_manipulation_msgs.msg import BoxStateArray
     from sensor_msgs.msg import JointState
     from visualization_msgs.msg import MarkerArray
-    from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene, GetPositionFK
+    from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene, GetPositionFK, GetStateValidity
     from moveit_msgs.msg import CollisionObject
     from shape_msgs.msg import SolidPrimitive
     from agibot_x2_manipulation_msgs.action import Pick, Place, PickPlace, MoveCarryPose
@@ -279,6 +279,7 @@ def run_simulations(arguments):
     node.create_subscription(ManipulationTaskStatus, "/manipulation_task_status", task_states.append, 10)
     apply_scene = node.create_client(ApplyPlanningScene, "/apply_planning_scene")
     fk_client = node.create_client(GetPositionFK, "/compute_fk")
+    validity_client = node.create_client(GetStateValidity, "/check_state_validity")
     continue_client = node.create_client(ContinueManipulation, "/continue_manipulation")
     scene_client = node.create_client(GetPlanningScene, "/get_planning_scene")
     recover = node.create_client(
@@ -330,7 +331,11 @@ def run_simulations(arguments):
             and expected_success and not pause_exercised
             and (not arguments.exercise_carry_no_detections or topic == "/move_carry_pose")
         )
-        if pause_probe:
+        carry_cleanup_probe = (
+            arguments.exercise_carry_no_detections and topic == "/move_carry_pose"
+            and not goal.plan_only and expected_success
+        )
+        if pause_probe or carry_cleanup_probe:
             assert apply_scene.wait_for_service(timeout_sec=5) and fk_client.wait_for_service(timeout_sec=5)
             req = GetPositionFK.Request()
             req.header.frame_id = "base_link"
@@ -348,7 +353,16 @@ def run_simulations(arguments):
             obstacle.primitive_poses = [future.result().pose_stamped[0].pose]
             req = ApplyPlanningScene.Request()
             req.scene.is_diff = True
-            req.scene.world.collision_objects = [obstacle]
+            objects = [obstacle] if pause_probe else []
+            if carry_cleanup_probe:
+                import copy
+                stale_again = copy.deepcopy(obstacle)
+                stale_again.id = table_id
+                stale_box_again = copy.deepcopy(obstacle)
+                stale_box_again.id = box_prefix + "_carry_execution_probe"
+                stale_box_again.primitive_poses[0].position.x = -3.0
+                objects.extend([stale_again, stale_box_again])
+            req.scene.world.collision_objects = objects
             future = apply_scene.call_async(req)
             assert spin_until(future.done, 5) and future.result().success, "obstacle injection failed"
         timeout = arguments.action_timeout
@@ -390,6 +404,11 @@ def run_simulations(arguments):
                 status = task_states[-1]
                 record["pause_validation"] = {"task_id": status.task_id, "pause_id": status.pause_id, "phase": status.phase, "failure": status.failure}
                 assert "collision" in status.failure, status.failure
+                if carry_cleanup_probe:
+                    record["scene_while_paused"] = scene()
+                    assert table_id not in record["scene_while_paused"]["world"], "saved carry retained stale table"
+                    assert stale_box_again.id not in record["scene_while_paused"]["world"], "saved carry retained stale box"
+                    assert obstacle.id in record["scene_while_paused"]["world"], "carry removed blocking external obstacle"
                 obstacle.operation = CollisionObject.REMOVE
                 req = ApplyPlanningScene.Request()
                 req.scene.is_diff = True
@@ -446,6 +465,15 @@ def run_simulations(arguments):
             record.update(
                 success=False, message="result unavailable after cancellation"
             )
+        if carry_cleanup_probe and record.get("success"):
+            record["scene_after_carry_execution"] = scene()
+            assert table_id not in record["scene_after_carry_execution"]["world"]
+            assert stale_box_again.id not in record["scene_after_carry_execution"]["world"]
+            assert record["scene_after_carry_execution"]["attached"], "carry detached object"
+        if ("carry_without_detections" in case and topic == "/place_box"
+                and expected_success and record.get("success")):
+            record["scene_after_place_action"] = scene()
+            assert table_id in record["scene_after_place_action"]["world"], "Place did not restore fresh table"
         save()
         client.destroy()
         assert not record.get("timed_out"), record["message"]
@@ -591,6 +619,7 @@ def run_simulations(arguments):
                                 req = GetParameters.Request(names=[
                                     "maximum_box_pose_age", "maximum_table_tag_pose_age",
                                     "box_states_topic", "table_tag_detections_topic",
+                                    "box_id", "table_collision_id", "planning_group",
                                 ])
                                 future = parameter_client.call_async(req)
                                 assert spin_until(future.done, 5), "detection parameter timeout"
@@ -617,6 +646,49 @@ def run_simulations(arguments):
                                 ages = [now - stamp for stamp in latest_stamps]
                                 assert min(ages) > maximum_age, "detections have not expired"
                                 case["carry_without_detections"] = {"replay_pid": stopped_replay, "maximum_pose_age": maximum_age, "initial_detection_ages": ages}
+                                # Model the stale base-relative table overlapping a hand
+                                # after relocation; a separate external obstacle must survive.
+                                box_prefix = values[4].string_value
+                                table_id = values[5].string_value
+                                assert apply_scene.wait_for_service(timeout_sec=5)
+                                assert fk_client.wait_for_service(timeout_sec=5)
+                                req = GetPositionFK.Request()
+                                req.header.frame_id = "base_link"
+                                req.fk_link_names = ["left_hand_tcp_link"]
+                                req.robot_state.joint_state = joints[-1]
+                                future = fk_client.call_async(req)
+                                assert spin_until(future.done, 5) and future.result().error_code.val == 1
+                                stale_table = CollisionObject()
+                                stale_table.id = table_id
+                                stale_table.header.frame_id = "base_link"
+                                stale_table.operation = CollisionObject.ADD
+                                stale_table.primitives = [SolidPrimitive(
+                                    type=SolidPrimitive.BOX, dimensions=[0.04, 0.04, 0.04])]
+                                stale_table.primitive_poses = [future.result().pose_stamped[0].pose]
+                                import copy
+                                stale_box = copy.deepcopy(stale_table)
+                                stale_box.id = box_prefix + "_carry_stale_probe"
+                                stale_box.primitive_poses[0].position.x = -3.0
+                                external = copy.deepcopy(stale_box)
+                                external.id = "carry_retained_external_obstacle"
+                                external.primitive_poses[0].position.x = -4.0
+                                req = ApplyPlanningScene.Request()
+                                req.scene.is_diff = True
+                                req.scene.world.collision_objects = [stale_table, stale_box, external]
+                                future = apply_scene.call_async(req)
+                                assert spin_until(future.done, 5) and future.result().success
+                                assert validity_client.wait_for_service(timeout_sec=5)
+                                req = GetStateValidity.Request()
+                                req.group_name = values[6].string_value
+                                req.robot_state.joint_state = joints[-1]
+                                req.robot_state.is_diff = True
+                                future = validity_client.call_async(req)
+                                assert spin_until(future.done, 5), "stale-table collision check timeout"
+                                validity = future.result()
+                                pairs = [(c.contact_body_1, c.contact_body_2) for c in validity.contacts]
+                                assert not validity.valid and any(table_id in pair for pair in pairs), "synthetic table did not reproduce collision"
+                                case["stale_table_collision_pairs"] = pairs
+                                before_carry = scene()
                             carry_start = len(case["actions"])
                             for target in (MoveCarryPose.Goal.CARRY_A, MoveCarryPose.Goal.CARRY_B, MoveCarryPose.Goal.CARRY_A):
                                 if not arguments.saved_plan:
@@ -633,7 +705,14 @@ def run_simulations(arguments):
                                 )
                                 case["carry_scene"] = scene()
                                 assert case["carry_scene"]["attached"], "carry lost attachment"
-                                assert set(case["carry_scene"]["world"]) == set(case["picked_scene"]["world"]), "carry removed known obstacles"
+                                expected_world = {
+                                    name for name in before_carry["world"]
+                                    if name != table_id and name != box_prefix
+                                    and not name.startswith(box_prefix + "_")
+                                }
+                                assert set(case["carry_scene"]["world"]) == expected_world, "carry did not remove only perception obstacles"
+                                assert set(case["carry_scene"]["attached"]) == set(case["picked_scene"]["attached"]), "carry changed attachment IDs"
+                                assert external.id in case["carry_scene"]["world"], "carry removed external obstacle"
                                 os.kill(stopped_replay, signal.SIGCONT)
                                 stopped_replay = None
                                 assert spin_until(lambda: stamp_seconds(box_observations[-1]) > latest_stamps[0] and stamp_seconds(table_observations[-1]) > latest_stamps[1], 10), "detections did not resume before Place"

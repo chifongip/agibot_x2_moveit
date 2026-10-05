@@ -63,6 +63,7 @@ public:
 
   bool restoreSavedObjects(const moveit_msgs::msg::PlanningSceneWorld & world, bool held, std::string & error);
   bool synchronize(std::string & error);
+  bool clearCarryObstacles(std::string & error);
   planning_scene::PlanningScenePtr snapshot() const;
   planning_scene::PlanningScenePtr releasedBoxSnapshot(const Eigen::Isometry3d & pose) const;
   bool applyBox(const Eigen::Isometry3d & pose, std::string & error);

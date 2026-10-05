@@ -1181,5 +1181,50 @@ TEST_F(ReturnSearchTest, SharedDetectionUpdatePreservesAttachmentUnlessReleaseCo
   EXPECT_FALSE(updated->getWorld()->hasObject("placed_box"));
 }
 
+TEST_F(ReturnSearchTest, CarryCleanupRemovesOnlyUnheldPerceptionObstacles)
+{
+  auto scene = std::make_shared<planning_scene::PlanningScene>(model());
+  obstacle(scene, -0.5);
+  moveit_msgs::msg::CollisionObject object;
+  ASSERT_TRUE(scene->getCollisionObjectMsg(object, "work_table"));
+  object.operation = moveit_msgs::msg::CollisionObject::ADD;
+  object.id = "placed_box_other";
+  ASSERT_TRUE(scene->processCollisionObjectMsg(object));
+  object.id = "external_obstacle";
+  ASSERT_TRUE(scene->processCollisionObjectMsg(object));
+  scene->getCurrentStateNonConst().attachBody("placed_box", Eigen::Isometry3d::Identity(),
+    {std::make_shared<shapes::Sphere>(0.05)}, {Eigen::Isometry3d::Identity()},
+    std::set<std::string>{"hand"}, "hand");
+  scene->getAllowedCollisionMatrixNonConst().setEntry("placed_box", "hand", true);
+  moveit_msgs::msg::PlanningScene diff;
+  std::string error;
+  ASSERT_TRUE(buildDetectionSceneDiff(scene, "placed_box", "work_table", "base_link",
+      {}, {"placed_box"}, false, diff, error)) << error;
+  EXPECT_TRUE(diff.robot_state.attached_collision_objects.empty());
+  auto updated = planning_scene::PlanningScene::clone(scene);
+  updated->setPlanningSceneDiffMsg(diff);
+  EXPECT_FALSE(updated->getWorld()->hasObject("work_table"));
+  EXPECT_FALSE(updated->getWorld()->hasObject("placed_box_other"));
+  EXPECT_TRUE(updated->getWorld()->hasObject("external_obstacle"));
+  EXPECT_TRUE(updated->getCurrentState().hasAttachedBody("placed_box"));
+  EXPECT_EQ(updated->getCurrentState().getAttachedBody("placed_box")->getTouchLinks(),
+    scene->getCurrentState().getAttachedBody("placed_box")->getTouchLinks());
+  collision_detection::AllowedCollision::Type type;
+  ASSERT_TRUE(updated->getAllowedCollisionMatrix().getAllowedCollision("placed_box", "hand", type));
+  EXPECT_EQ(type, collision_detection::AllowedCollision::ALWAYS);
+  ASSERT_TRUE(buildDetectionSceneDiff(updated, "placed_box", "work_table", "base_link",
+      {}, {"placed_box"}, false, diff, error)) << error;
+  EXPECT_TRUE(diff.world.collision_objects.empty());
+  // An unheld world object using the target ID is also previous perception.
+  updated->getCurrentStateNonConst().clearAttachedBody("placed_box");
+  object.id = "placed_box";
+  ASSERT_TRUE(updated->processCollisionObjectMsg(object));
+  ASSERT_TRUE(buildDetectionSceneDiff(updated, "placed_box", "work_table", "base_link",
+      {}, {}, false, diff, error)) << error;
+  updated->setPlanningSceneDiffMsg(diff);
+  EXPECT_FALSE(updated->getWorld()->hasObject("placed_box"));
+  EXPECT_TRUE(updated->getWorld()->hasObject("external_obstacle"));
+}
+
 }  // namespace
 }  // namespace agibot_x2_manipulation

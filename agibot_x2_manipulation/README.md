@@ -245,9 +245,9 @@ as holding is refused rather than using different geometry.
 
 With `visible_boxes_as_obstacles:=true` (the default), every other fresh,
 configured instance is added to MoveIt as a collision obstacle for Pick,
-PickPlace, and Place. Carry transitions retain these known obstacles and check
-the current collision scene without requiring detections. For Pick/Place saved
-execution, the server rechecks the visible-box set before each segment and rejects
+PickPlace, and Place. Standalone carry transitions clear the previous table and
+unheld perception boxes, then check the remaining collision scene without
+detections. For Pick/Place saved execution, the server rechecks the visible-box set before each segment and rejects
 the motion if an obstacle appears, disappears, changes profile, or moves beyond the configured pose tolerance.
 Do not disable this on hardware when more than one box can be in the workspace.
 Each tag currently identifies one physical box; multiple tags on one box require
@@ -764,11 +764,15 @@ ros2 action send_goal /place_box agibot_x2_manipulation_msgs/action/Place \
 `HOLDING`; it retains the current attached-box contact transforms and plans an
 adaptive collision-checked transition from the measured box pose. Planning,
 ordinary execution, and saved-plan execution require no fresh box/table detections.
-They retain known collision geometry, synchronize external scene updates, and
-check settled robot feedback and the held object's contact constraints. Repositioning
-an obstacle requires updating its collision object in MoveIt; carry switching
-does not reacquire obstacle poses from tags. It first
-uses a previously selected endpoint for that carry pose (for example Carry A′
+Before collision validation, they remove the server-managed table and unheld
+perception boxes left by the previous task. This also applies to plan-only
+previews, no-motion requests, retries, and Continue; these previews update the
+shared scene even though they execute no trajectory. The held object stays
+attached, and self-collision checks, external obstacles, and their scene updates
+remain active. These transport actions no longer provide collision protection
+against the removed perception objects. Pick/Place reconstruct those objects
+from fresh detections at their next acquisition. Carry planning first uses a
+previously selected endpoint for that carry pose (for example Carry A′
 selected during Pick), then searches the configured local carry envelope around
 the nominal pose when that endpoint is unavailable. A successful executed move
 remembers its selected A′/B′ endpoint, so the reverse move returns to that same
@@ -843,7 +847,8 @@ attachment geometry, joint bounds, controller spline, and the applicable Cartesi
 or closed-chain constraints. Detection jitter does not replace the saved geometry;
 missing detections, newly detected obstacles, or movement beyond tolerance block
 Pick/Place execution. Standalone MoveCarryPose skips detection verification and
-checks the live collision scene without restoring old saved obstacle geometry.
+clears previous perception obstacles before checking the live collision scene,
+without restoring old saved obstacle geometry.
 A small measured-start discrepancy gets a checked, limit-compliant alignment
 prefix; every saved waypoint and derivative stays unchanged, with only
 a uniform timestamp offset. Feedback slightly outside joint limits may align
@@ -873,9 +878,11 @@ missing/consumed IDs; use `--mode closed_chain` to exercise that existing mode,
 add `--exercise-pause` to inject/remove an external obstacle and verify Continue,
 or omit `--saved-plan` to check ordinary execution. Add
 `--exercise-carry-no-detections --workflow sequence` to stop the snapshot replay,
-wait beyond configured detection freshness limits, and verify carry A/B/A previews
-and execution with expired detections. With `--exercise-pause`, this also tests
-collision rejection and Continue during carry while detections remain stopped.
+wait beyond configured detection freshness limits, inject a stale table overlapping
+a hand, and verify carry A/B/A previews and execution clear that table and unheld
+perception boxes while retaining attachment and an external obstacle. Stale
+objects are also reinserted between preview and execution to check both paths.
+With `--exercise-pause`, this also tests collision rejection and Continue during carry while detections remain stopped.
 See [carry without detection validation](test/carry_without_detection_validation.md).
 See [saved-plan validation](test/saved_plan_validation.md) for captured results
 and the remaining closed-chain standalone Place limitation.
@@ -1069,7 +1076,8 @@ retries planning against the refreshed snapshot. Pick updates its target and
 invalidates cached grasp trajectories; movement during approach requires a new
 pregrasp before approaching. Pick/Place carrying stages retain the attached
 object's geometry and refresh other obstacles. Standalone MoveCarryPose uses the
-existing scene without acquiring or verifying detections. Missing tags in
+remaining scene after clearing previous perception obstacles, without acquiring
+or verifying detections. Missing tags in
 Pick/Place wait for reacquisition, then pause for Continue if the retry budget is
 exhausted. Profile changes remain invalidations.
 

@@ -503,11 +503,14 @@ private:
   }
 
   bool refreshMotionState(std::string & error, const CancelFunction & canceled,
-    bool held)
+    bool held, bool clear_carry_obstacles = false)
   {
     if (!trajectory_executor_.waitUntilStopped(canceled, error)) {return false;}
     // Continue must validate against obstacle updates made while paused.
-    if (!planning_scene_.synchronize(error)) {return false;}
+    if (clear_carry_obstacles) {
+      if (!planning_scene_.clearCarryObstacles(error)) {return false;}
+      active_visible_boxes_.clear();
+    } else if (!planning_scene_.synchronize(error)) {return false;}
     if (held) {
       motion_planner_.updateHeldPoseFromRobot();
       if (!motion_planner_.validateHeldClosure(error)) {return false;}
@@ -1837,7 +1840,7 @@ private:
           const CancelFunction interrupted = [&, deadline]() {
               return canceled() || std::chrono::steady_clock::now() >= deadline;
             };
-          if (!refreshMotionState(failure, interrupted, step.held)) {return false;}
+          if (!refreshMotionState(failure, interrupted, step.held, carry_only)) {return false;}
           if (!carry_only && !validateSavedDetections(
               *plan, step.held, released, failure, interrupted)) {return false;}
           if (!scene_restored) {
@@ -1961,9 +1964,9 @@ private:
     std::string error;
     if (!runPhase("scene", plan_only, feedback, 0.05F, held_pose_, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
-          // Use encoder/attachment feedback and existing collision geometry.
+          // Clear previous task obstacles, retaining encoder/attachment feedback.
           // Switching carry poses must not acquire or require box/table detections.
-          return refreshMotionState(failure, planning_canceled, true);
+          return refreshMotionState(failure, planning_canceled, true, true);
         }))
     {
       return outcome(false, kSafetyAbort, error, held_pose_);
@@ -2011,7 +2014,7 @@ private:
     if (!runPhase("carry_" + std::string(carryPoseName(target)), plan_only, feedback,
         0.50F, held_pose_, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
-          if (!refreshMotionState(failure, planning_canceled, true)) {return false;}
+          if (!refreshMotionState(failure, planning_canceled, true, true)) {return false;}
           auto current = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!current) {failure = "carry state unavailable"; return false;}
           saved_start = current;

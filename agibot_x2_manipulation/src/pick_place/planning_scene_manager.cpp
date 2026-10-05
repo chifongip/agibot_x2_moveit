@@ -381,6 +381,32 @@ bool PlanningSceneManager::synchronize(std::string & error)
   }
 }
 
+bool PlanningSceneManager::clearCarryObstacles(std::string & error)
+{
+  if (!synchronize(error)) {return false;}
+  const auto current = snapshot();
+  std::vector<std::string> removed;
+  for (const auto & id : current->getWorld()->getObjectIds()) {
+    if ((isManagedBoxId(id) || id == config_.table_collision_id) &&
+      !current->getCurrentState().hasAttachedBody(id))
+    {
+      removed.push_back(id);
+    }
+  }
+  if (removed.empty()) {return true;}
+  const std::set<std::string> protected_ids =
+    current->getCurrentState().hasAttachedBody(config_.box_id) ?
+    std::set<std::string>{config_.box_id} : std::set<std::string>{};
+  if (!updateDetectionScene({}, protected_ids, false, error)) {return false;}
+  for (const auto & id : removed) {
+    RCLCPP_INFO(node_->get_logger(), "Carry scene removed previous perception obstacle: %s",
+      id.c_str());
+  }
+  RCLCPP_INFO(node_->get_logger(),
+    "Carry scene retains attached objects and external obstacles; no detections required");
+  return true;
+}
+
 bool PlanningSceneManager::applyBox(const Eigen::Isometry3d & pose, std::string & error)
 {
   try {
