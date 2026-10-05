@@ -1,4 +1,5 @@
 #include "pick_place/planning_scene_manager.hpp"
+#include "agibot_x2_manipulation/detection_marker.hpp"
 
 #include <moveit/collision_detection/collision_matrix.h>
 #include <moveit/collision_detection/collision_common.h>
@@ -7,6 +8,7 @@
 #include <tf2_eigen/tf2_eigen.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <cmath>
 #include <sstream>
@@ -338,6 +340,9 @@ PlanningSceneManager::PlanningSceneManager(
     });
   table_marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
     "/table_markers", rclcpp::QoS(1).transient_local());
+  table_marker_timer_ = node_->create_wall_timer(
+    std::chrono::milliseconds(100), [this]() {expireTableMarker();});
+  clearTableMarker();
 }
 
 void PlanningSceneManager::auditCollisionObject(
@@ -393,11 +398,12 @@ bool PlanningSceneManager::clearCarryObstacles(std::string & error)
       removed.push_back(id);
     }
   }
-  if (removed.empty()) {return true;}
+  if (removed.empty()) {clearTableMarker(); return true;}
   const std::set<std::string> protected_ids =
     current->getCurrentState().hasAttachedBody(config_.box_id) ?
     std::set<std::string>{config_.box_id} : std::set<std::string>{};
   if (!updateDetectionScene({}, protected_ids, false, error)) {return false;}
+  clearTableMarker();
   for (const auto & id : removed) {
     RCLCPP_INFO(node_->get_logger(), "Carry scene removed previous perception obstacle: %s",
       id.c_str());
@@ -462,13 +468,19 @@ bool PlanningSceneManager::applyTable(const Eigen::Isometry3d & pose, std::strin
 void PlanningSceneManager::publishTableMarker(
   const Eigen::Isometry3d & pose, const builtin_interfaces::msg::Time & stamp)
 {
+  const auto observed_at = rclcpp::Time(stamp, node_->get_clock()->get_clock_type());
+  const auto lifetime = detectionMarkerLifetime(
+    node_->now(), observed_at, config_.maximum_table_tag_pose_age);
+  if (!lifetime) {return;}
+  std::lock_guard<std::mutex> lock(table_marker_mutex_);
   visualization_msgs::msg::Marker marker;
   marker.header.frame_id = config_.planning_frame;
   marker.header.stamp = stamp;
-  marker.ns = "collision_table";
+  marker.ns = "detected_table";
   marker.id = 0;
   marker.type = visualization_msgs::msg::Marker::CUBE;
   marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.lifetime = *lifetime;
   marker.pose = toPoseMsg(pose);
   marker.scale.x = config_.table_dimensions.length;
   marker.scale.y = config_.table_dimensions.width;
@@ -480,7 +492,42 @@ void PlanningSceneManager::publishTableMarker(
 
   visualization_msgs::msg::MarkerArray markers;
   markers.markers.push_back(marker);
+  auto legacy = marker;
+  legacy.ns = "collision_table";
+  legacy.action = visualization_msgs::msg::Marker::DELETE;
+  markers.markers.push_back(legacy);
+  table_marker_expiry_ = observed_at + rclcpp::Duration::from_seconds(
+    config_.maximum_table_tag_pose_age);
   table_marker_pub_->publish(markers);
+}
+
+void PlanningSceneManager::clearTableMarker()
+{
+  std::lock_guard<std::mutex> lock(table_marker_mutex_);
+  deleteTableMarkerLocked();
+}
+
+void PlanningSceneManager::deleteTableMarkerLocked()
+{
+  visualization_msgs::msg::MarkerArray markers;
+  for (const auto * ns : {"detected_table", "collision_table"}) {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = config_.planning_frame;
+    marker.ns = ns;
+    marker.id = 0;
+    marker.action = visualization_msgs::msg::Marker::DELETE;
+    markers.markers.push_back(marker);
+  }
+  table_marker_expiry_.reset();
+  table_marker_pub_->publish(markers);
+}
+
+void PlanningSceneManager::expireTableMarker()
+{
+  std::lock_guard<std::mutex> lock(table_marker_mutex_);
+  if (!table_marker_expiry_ || node_->now() < *table_marker_expiry_) {return;}
+  // Replace the transient-local ADD so a late subscriber cannot revive it.
+  deleteTableMarkerLocked();
 }
 
 bool PlanningSceneManager::removeOwnedBox(const std::string & id, std::string & error)

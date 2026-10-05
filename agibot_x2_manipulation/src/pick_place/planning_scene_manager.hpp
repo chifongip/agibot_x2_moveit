@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <mutex>
 
 #include "agibot_x2_manipulation/box_geometry.hpp"
 #include "pick_place/pick_place_config.hpp"
@@ -108,6 +109,9 @@ private:
     const Eigen::Isometry3d & pose) const;
   bool removeOwnedBox(const std::string & id, std::string & error);
   bool isManagedBoxId(const std::string & id) const;
+  void clearTableMarker();
+  void expireTableMarker();
+  void deleteTableMarkerLocked();
   void auditCollisionObject(
     const moveit_msgs::msg::CollisionObject & object, const char * topic) const;
 
@@ -121,6 +125,9 @@ private:
   rclcpp::Subscription<moveit_msgs::msg::PlanningScene>::SharedPtr scene_audit_sub_;
   rclcpp::Subscription<moveit_msgs::msg::PlanningSceneWorld>::SharedPtr world_audit_sub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr table_marker_pub_;
+  std::mutex table_marker_mutex_;
+  std::optional<rclcpp::Time> table_marker_expiry_;
+  rclcpp::TimerBase::SharedPtr table_marker_timer_;
 };
 
 }  // namespace agibot_x2_manipulation

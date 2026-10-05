@@ -266,6 +266,7 @@ def run_simulations(arguments):
     pause_exercised = False
     states = []
     tables = []
+    box_markers = []
     node.create_subscription(
         JointState, "/joint_states", joints.append, qos_profile_sensor_data
     )
@@ -276,6 +277,7 @@ def run_simulations(arguments):
         QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
     )
     node.create_subscription(MarkerArray, "/table_markers", tables.append, 10)
+    node.create_subscription(MarkerArray, "/box_markers", box_markers.append, 10)
     node.create_subscription(ManipulationTaskStatus, "/manipulation_task_status", task_states.append, 10)
     apply_scene = node.create_client(ApplyPlanningScene, "/apply_planning_scene")
     fk_client = node.create_client(GetPositionFK, "/compute_fk")
@@ -509,6 +511,7 @@ def run_simulations(arguments):
             joints.clear()
             states.clear()
             tables.clear()
+            box_markers.clear()
             stopped_replay = None
             box_observations.clear()
             table_observations.clear()
@@ -645,6 +648,25 @@ def run_simulations(arguments):
                                 now = node.get_clock().now().nanoseconds * 1e-9
                                 ages = [now - stamp for stamp in latest_stamps]
                                 assert min(ages) > maximum_age, "detections have not expired"
+                                additions = [m for msg in box_markers + tables
+                                             for m in msg.markers if m.action == m.ADD]
+                                assert additions and all(
+                                    m.lifetime.sec + m.lifetime.nanosec * 1e-9 > 0
+                                    for m in additions), "observation markers have infinite lifetime"
+                                assert tables[-1].markers and all(
+                                    m.action == m.DELETE for m in tables[-1].markers
+                                ), "expired table marker was not deleted"
+                                late_tables = []
+                                late_subscription = node.create_subscription(
+                                    MarkerArray, "/table_markers", late_tables.append,
+                                    QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+                                )
+                                try:
+                                    assert spin_until(lambda: bool(late_tables), 5)
+                                    assert all(m.action == m.DELETE for m in late_tables[-1].markers), "late subscriber revived expired table"
+                                finally:
+                                    node.destroy_subscription(late_subscription)
+                                case["marker_expiration_verified"] = True
                                 case["carry_without_detections"] = {"replay_pid": stopped_replay, "maximum_pose_age": maximum_age, "initial_detection_ages": ages}
                                 # Model the stale base-relative table overlapping a hand
                                 # after relocation; a separate external obstacle must survive.

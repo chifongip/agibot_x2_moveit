@@ -1,4 +1,5 @@
 #include "agibot_x2_manipulation/box_geometry.hpp"
+#include "agibot_x2_manipulation/detection_marker.hpp"
 #include "agibot_x2_manipulation/box_profile_registry.hpp"
 
 #include <agibot_x2_manipulation_msgs/msg/box_state.hpp>
@@ -142,6 +143,7 @@ private:
         profiles_ = std::move(candidate);
         legacy_mode_ = false;
         samples_.clear();
+        last_sample_stamps_.clear();
         ++profile_version_;
       }
       response->success = true;
@@ -185,7 +187,7 @@ private:
       const auto transform = tf_buffer_.lookupTransform(
           planning_frame_, tagFrame(tag_id), tf2::TimePointZero);
       const rclcpp::Time transform_stamp(transform.header.stamp);
-      if ((now() - transform_stamp).seconds() > max_age_) {
+      if (!detectionMarkerLifetime(now(), transform_stamp, max_age_)) {
         return;
       }
       const Eigen::Isometry3d box_pose = boxPoseFromTag(
@@ -202,7 +204,17 @@ private:
         return;
       }
 
+      const auto previous = last_sample_stamps_.find(tag_id);
+      if (previous != last_sample_stamps_.end() &&
+          transform_stamp.nanoseconds() <= previous->second) {
+        return;
+      }
       auto &samples = samples_[tag_id];
+      if (previous != last_sample_stamps_.end() &&
+          (transform_stamp.nanoseconds() - previous->second) * 1e-9 > max_age_) {
+        samples.clear();
+      }
+      last_sample_stamps_[tag_id] = transform_stamp.nanoseconds();
       samples.push_back(box_pose);
       while (samples.size() > stable_count_) {
         samples.pop_front();
@@ -219,6 +231,8 @@ private:
   void publishIfStable(int tag_id, const BoxProfile &profile,
                        const std::deque<Eigen::Isometry3d> &samples,
                        const builtin_interfaces::msg::Time &stamp) {
+    const auto lifetime = detectionMarkerLifetime(now(), rclcpp::Time(stamp), max_age_);
+    if (!lifetime) {return;}
     Eigen::Vector3d mean_position = Eigen::Vector3d::Zero();
     Eigen::Vector4d quaternion_sum = Eigen::Vector4d::Zero();
     const Eigen::Quaterniond reference(samples.front().linear());
@@ -284,6 +298,7 @@ private:
     marker.id = tag_id;
     marker.type = visualization_msgs::msg::Marker::CUBE;
     marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.lifetime = *lifetime;
     marker.pose = state.pose.pose;
     marker.scale.x = profile.dimensions.length;
     marker.scale.y = profile.dimensions.width;
@@ -311,6 +326,7 @@ private:
   double minimum_margin_{0.0};
   uint64_t profile_version_{0};
   std::map<int, std::deque<Eigen::Isometry3d>> samples_;
+  std::map<int, int64_t> last_sample_stamps_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr

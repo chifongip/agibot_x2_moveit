@@ -486,8 +486,16 @@ Each fresh stable Tag 9 measurement also publishes a translucent cube on the
 latched `/table_markers` `visualization_msgs/MarkerArray` topic. This updates
 continuously while the detector is running, independently of task acceptance;
 it does not change the MoveIt collision scene until a task begins planning.
-Add a MarkerArray display for that topic in RViz to inspect the same pose and
-dimensions used for collision checking.
+Add a MarkerArray display for that topic in RViz. Its `detected_table` namespace
+visualizes accepted detections independently of the collision scene; the previous
+`collision_table` namespace is explicitly deleted. Box and table marker lifetimes
+use the observation's remaining validity, bounded by `maximum_pose_age` and
+`maximum_table_tag_pose_age` respectively (currently 2.5 seconds). Repeated TF
+observation timestamps do not refresh markers or count as new stability samples.
+Expired table markers also publish DELETE and replace the latched ADD so late
+subscribers cannot revive them. Carry preparation clears the table visualization;
+new fresh detections can display it again without rebuilding collision geometry.
+The attached box remains visible through MoveIt's robot model while carrying.
 The bundled dummy/replay launches disable this model because they publish only
 the pickup tag; supply a simulated Tag 9 stream before enabling it there.
 `box_pick_place.launch.py` starts the front-center tag9 pipeline at 1 Hz by

@@ -1,4 +1,5 @@
 #include "pick_place/box_pose_tracker.hpp"
+#include "agibot_x2_manipulation/detection_marker.hpp"
 
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -29,6 +30,18 @@ Eigen::Isometry3d poseAtX(double x)
 rclcpp::Time timeAt(int seconds)
 {
   return rclcpp::Time(seconds, 0, RCL_ROS_TIME);
+}
+
+TEST(DetectionMarkerLifetime, UsesOnlyRemainingObservationValidity)
+{
+  const auto lifetime = detectionMarkerLifetime(timeAt(10), timeAt(8), 2.5);
+  ASSERT_TRUE(lifetime);
+  EXPECT_EQ(lifetime->nanoseconds(), 500000000);
+  EXPECT_FALSE(detectionMarkerLifetime(timeAt(10), timeAt(8), 2.0));
+  EXPECT_FALSE(detectionMarkerLifetime(timeAt(10), timeAt(7), 2.5));
+  EXPECT_FALSE(detectionMarkerLifetime(timeAt(10), timeAt(11), 2.5));
+  EXPECT_FALSE(detectionMarkerLifetime(timeAt(10), timeAt(0), 2.5));
+  EXPECT_FALSE(detectionMarkerLifetime(timeAt(10), timeAt(9), 0.0));
 }
 
 TEST(TableTagPoseStabilityFilter, RequiresThreeNewSamplesAfterAnOutage)
@@ -343,6 +356,14 @@ TEST_F(TableTagPoseTrackerTest, CallsCallbackForEveryFreshStablePose)
   EXPECT_EQ(stable_poses.front().header.frame_id, "base_link");
   EXPECT_NEAR(stable_poses.front().pose.position.x, 0.25, 1e-6);
   EXPECT_NEAR(stable_poses.back().pose.position.x, 0.25, 1e-6);
+  const auto generation = tracker_->generation();
+  // New detection callbacks referencing the same cached TF are not new samples.
+  for (int repeat = 0; repeat < 3; ++repeat) {
+    publishDetection(node_->now());
+    spinFor(std::chrono::milliseconds(20));
+  }
+  EXPECT_EQ(stable_poses.size(), 2U);
+  EXPECT_EQ(tracker_->generation(), generation);
 }
 
 }  // namespace

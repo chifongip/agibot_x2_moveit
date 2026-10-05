@@ -443,7 +443,7 @@ def test_tag9_derives_the_default_table_place_pose():
     assert config["table_tag_maximum_sample_gap"] == 2.5
 
 
-def test_table_collision_is_published_as_a_latched_visualization_marker():
+def test_table_detection_is_published_as_a_latched_visualization_marker():
     source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
     server_source = (
         Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
@@ -451,7 +451,7 @@ def test_table_collision_is_published_as_a_latched_visualization_marker():
 
     assert '"/table_markers", rclcpp::QoS(1).transient_local()' in source
     assert "void PlanningSceneManager::publishTableMarker" in source
-    assert 'marker.ns = "collision_table"' in source
+    assert 'marker.ns = "detected_table"' in source
     assert "marker.type = visualization_msgs::msg::Marker::CUBE" in source
     assert "marker.pose = toPoseMsg(pose)" in source
     assert "marker.scale.x = config_.table_dimensions.length" in source
