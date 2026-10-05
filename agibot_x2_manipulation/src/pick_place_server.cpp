@@ -1667,7 +1667,7 @@ private:
     plan.profile_version = profile_version_;
     plan.instance_id = active_box_instance_id_;
     plan.profile_id = active_profile_id_;
-    plan.boxes = detection_boxes_;
+    plan.boxes = plan.action == "move_carry_pose" ? active_visible_boxes_ : detection_boxes_;
     plan.table_tag = detection_table_pose_;
     plan.box_to_left = held_box_to_left_contact_;
     plan.box_to_right = held_box_to_right_contact_;
@@ -1821,9 +1821,11 @@ private:
     detection_boxes_ = plan->boxes;
     detection_table_pose_ = plan->table_tag;
     detection_scene_captured_ = true;
-    active_visible_boxes_ = plan->boxes;
+    const bool carry_only = action == "move_carry_pose";
+    if (!carry_only) {active_visible_boxes_ = plan->boxes;}
     const auto searches = motion_planner_.searchCalls();
-    bool scene_restored = false;
+    // Carry validates the live scene without reapplying old detection geometry.
+    bool scene_restored = carry_only;
     bool released = false;
     std::string error;
     for (size_t index = 0; index < plan->steps.size(); ++index) {
@@ -1835,8 +1837,9 @@ private:
           const CancelFunction interrupted = [&, deadline]() {
               return canceled() || std::chrono::steady_clock::now() >= deadline;
             };
-          if (!refreshMotionState(failure, interrupted, step.held) ||
-            !validateSavedDetections(*plan, step.held, released, failure, interrupted)) {return false;}
+          if (!refreshMotionState(failure, interrupted, step.held)) {return false;}
+          if (!carry_only && !validateSavedDetections(
+              *plan, step.held, released, failure, interrupted)) {return false;}
           if (!scene_restored) {
             if (!planning_scene_.restoreSavedObjects(plan->world, step.held, failure)) {return false;}
             scene_restored = true;
@@ -1945,7 +1948,6 @@ private:
     uint8_t target, bool plan_only, const FeedbackFunction & feedback,
     const CancelFunction & canceled)
   {
-    auto detection_scope = freezeDetectionScene();
     if (canceled()) {
       return outcome(false, kSafetyAbort, "carry transition canceled before validation", held_pose_);
     }
@@ -1959,13 +1961,9 @@ private:
     std::string error;
     if (!runPhase("scene", plan_only, feedback, 0.05F, held_pose_, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
-          if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, failure,
-              planning_canceled)) {return false;}
-          std::vector<TrackedBoxPose> visible;
-          if (!updateVisibleBoxScene(active_box_instance_id_, false, false, visible,
-              failure, planning_canceled)) {return false;}
-          active_visible_boxes_ = visible;
-          return motion_planner_.validateHeldClosure(failure);
+          // Use encoder/attachment feedback and existing collision geometry.
+          // Switching carry poses must not acquire or require box/table detections.
+          return refreshMotionState(failure, planning_canceled, true);
         }))
     {
       return outcome(false, kSafetyAbort, error, held_pose_);
@@ -2005,13 +2003,6 @@ private:
         true, kSuccess, "box is already at carry pose " + std::string(carryPoseName(target)),
         target_message);
     }
-    if (!runPhase("perception", plan_only, feedback, 0.10F, held_pose_, canceled, error,
-        [&](const CancelFunction & planning_canceled, std::string & failure) {
-          return perception_.refresh(failure) && synchronizeTableCollisionScene(failure, planning_canceled);
-        }))
-    {
-      return outcome(false, kSafetyAbort, error, held_pose_);
-    }
     if (canceled()) {
       return outcome(false, kSafetyAbort, "carry transition canceled before planning", held_pose_);
     }
@@ -2020,10 +2011,7 @@ private:
     if (!runPhase("carry_" + std::string(carryPoseName(target)), plan_only, feedback,
         0.50F, held_pose_, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
-          if (!plan_only && !refreshMotionState(failure, planning_canceled, true)) {return false;}
-          if (!validateVisibleBoxScene(active_visible_boxes_, active_box_instance_id_, failure,
-              planning_canceled) || !synchronizeTableCollisionScene(failure, planning_canceled))
-          {return false;}
+          if (!refreshMotionState(failure, planning_canceled, true)) {return false;}
           auto current = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!current) {failure = "carry state unavailable"; return false;}
           saved_start = current;

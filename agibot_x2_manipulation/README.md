@@ -245,9 +245,10 @@ as holding is refused rather than using different geometry.
 
 With `visible_boxes_as_obstacles:=true` (the default), every other fresh,
 configured instance is added to MoveIt as a collision obstacle for Pick,
-PickPlace, Place, and carry transitions. The server rechecks the visible-box
-set before each execution segment and rejects the motion if an obstacle appears,
-disappears, changes profile, or moves beyond the configured pose tolerance.
+PickPlace, and Place. Carry transitions retain these known obstacles and check
+the current collision scene without requiring detections. For Pick/Place saved
+execution, the server rechecks the visible-box set before each segment and rejects
+the motion if an obstacle appears, disappears, changes profile, or moves beyond the configured pose tolerance.
 Do not disable this on hardware when more than one box can be in the workspace.
 Each tag currently identifies one physical box; multiple tags on one box require
 an explicit tag-fusion configuration before they can be treated as one instance.
@@ -761,7 +762,12 @@ ros2 action send_goal /place_box agibot_x2_manipulation_msgs/action/Place \
 `/move_carry_pose` uses `MoveCarryPose`: `target_pose: 0` is Carry A and
 `target_pose: 1` is Carry B. It is accepted only while the server is
 `HOLDING`; it retains the current attached-box contact transforms and plans an
-adaptive collision-checked transition from the measured box pose. It first
+adaptive collision-checked transition from the measured box pose. Planning,
+ordinary execution, and saved-plan execution require no fresh box/table detections.
+They retain known collision geometry, synchronize external scene updates, and
+check settled robot feedback and the held object's contact constraints. Repositioning
+an obstacle requires updating its collision object in MoveIt; carry switching
+does not reacquire obstacle poses from tags. It first
 uses a previously selected endpoint for that carry pose (for example Carry A′
 selected during Pick), then searches the configured local carry envelope around
 the nominal pose when that endpoint is unavailable. A successful executed move
@@ -836,8 +842,10 @@ it waits for settled feedback and checks the complete robot start, current scene
 attachment geometry, joint bounds, controller spline, and the applicable Cartesian
 or closed-chain constraints. Detection jitter does not replace the saved geometry;
 missing detections, newly detected obstacles, or movement beyond tolerance block
-execution. A small measured-start discrepancy gets a checked, limit-compliant
-alignment prefix; every saved waypoint and derivative stays unchanged, with only
+Pick/Place execution. Standalone MoveCarryPose skips detection verification and
+checks the live collision scene without restoring old saved obstacle geometry.
+A small measured-start discrepancy gets a checked, limit-compliant alignment
+prefix; every saved waypoint and derivative stays unchanged, with only
 a uniform timestamp offset. Feedback slightly outside joint limits may align
 inward within the existing `place_start_state_bounds_tolerance`, never farther
 outside the limit. No limits or tuned parameters are changed.
@@ -863,7 +871,12 @@ ros2 run agibot_x2_manipulation time_saved_simulation \
 The output directory must be new. The harness checks saved execution and rejects
 missing/consumed IDs; use `--mode closed_chain` to exercise that existing mode,
 add `--exercise-pause` to inject/remove an external obstacle and verify Continue,
-or omit `--saved-plan` to check ordinary execution.
+or omit `--saved-plan` to check ordinary execution. Add
+`--exercise-carry-no-detections --workflow sequence` to stop the snapshot replay,
+wait beyond configured detection freshness limits, and verify carry A/B/A previews
+and execution with expired detections. With `--exercise-pause`, this also tests
+collision rejection and Continue during carry while detections remain stopped.
+See [carry without detection validation](test/carry_without_detection_validation.md).
 See [saved-plan validation](test/saved_plan_validation.md) for captured results
 and the remaining closed-chain standalone Place limitation.
 The versioned [simulation task helper](scripts/send_simulation_task.sh) also
@@ -1037,14 +1050,14 @@ box profile so hardware calibration does not determine their feasibility.
 
 ### Waiting for tag detections
 
-Pick, Place, MoveCarryPose, and plan-only PickPlace accept an action-scoped
+Pick, Place, and plan-only PickPlace accept an action-scoped
 box/table detection snapshot. Normal planning retries and Continue retain it:
 small detection fluctuations do not update collision geometry between motions.
 Place derives its tag-based target and collision table from the same accepted
 observation. Executed PickPlace captures a new snapshot for its Place portion;
 its initial target check does not freeze a tag-derived target before Pick.
-Detection tracking and table visualization remain live. A new action acquires
-fresh observations; cancellation and exceptions discard the local snapshot.
+Detection tracking and table visualization remain live. A new Pick/Place action
+acquires fresh observations; cancellation and exceptions discard the local snapshot.
 The snapshot is expressed in `planning_frame`; keep the robot base/posture and
 physical table stationary during an action. After repositioning, cancel/restart
 the action to acquire a new snapshot. External planning-scene/OctoMap updates
@@ -1054,13 +1067,15 @@ When a visible box moves beyond the planned-snapshot tolerance, the server
 reacquires the same instances, updates the collision scene, and automatically
 retries planning against the refreshed snapshot. Pick updates its target and
 invalidates cached grasp trajectories; movement during approach requires a new
-pregrasp before approaching. Carry and Place retain the attached object's geometry
-and refresh other obstacles. Missing tags wait for reacquisition, then pause for
-Continue if the retry budget is exhausted. Profile changes remain invalidations.
+pregrasp before approaching. Pick/Place carrying stages retain the attached
+object's geometry and refresh other obstacles. Standalone MoveCarryPose uses the
+existing scene without acquiring or verifying detections. Missing tags in
+Pick/Place wait for reacquisition, then pause for Continue if the retry budget is
+exhausted. Profile changes remain invalidations.
 
 `tag_reacquisition_timeout: 10.0` seconds is the shared wait limit for fresh box
 selection, planned visible-box checks, and stable table-tag acquisition in Pick,
-Place, PickPlace, and MoveCarryPose. Actions publish `waiting_for_detection`
+Place, and PickPlace. These actions publish `waiting_for_detection`
 feedback while waiting before the next motion, retain the current held-object
 state, and respond to cancellation/reset requests. All boxes in a planned
 snapshot share one deadline. The held box is excluded from visible-box checks;

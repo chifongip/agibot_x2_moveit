@@ -88,3 +88,25 @@ def test_profiles_are_discovered_without_hardcoded_names(tmp_path):
     (tmp_path / "new_object.yaml").write_text("capture:\n  task_kind: pick\n")
     cases = MODULE.simulation_cases(tmp_path, "both")
     assert [name for name, path in cases] == ["new_object", "new_object_combined"]
+
+
+def test_carry_without_detections_enables_carry_sequence():
+    args = MODULE.parse_arguments([
+        "--capture-dir", "/tmp/captures", "--output-dir", "/tmp/results",
+        "--exercise-carry-no-detections",
+    ])
+    assert args.exercise_carry
+    with pytest.raises(SystemExit):
+        MODULE.parse_arguments([
+            "--capture-dir", "/tmp/captures", "--output-dir", "/tmp/results",
+            "--exercise-carry-no-detections", "--workflow", "combined",
+        ])
+
+
+def test_replay_pid_is_specific_and_unambiguous():
+    replay = "[INFO] [capture_task_snapshot-1]: process started with pid [12345]"
+    other = "[INFO] [pick_place_server-12]: process started with pid [12346]"
+    assert MODULE.replay_process_id(replay + "\n" + other) == 12345
+    for log in (other, replay + "\n" + replay):
+        with pytest.raises(ValueError):
+            MODULE.replay_process_id(log)

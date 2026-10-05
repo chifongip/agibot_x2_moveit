@@ -154,6 +154,17 @@ def simulation_cases(directory, workflow):
     return cases
 
 
+def replay_process_id(log_text):
+    """Identify only the snapshot replay child, refusing ambiguous launch logs."""
+    matches = re.findall(
+        r"\[capture_task_snapshot-\d+\]: process started with pid \[(\d+)\]",
+        log_text,
+    )
+    if len(matches) != 1:
+        raise ValueError("expected exactly one snapshot replay process")
+    return int(matches[0])
+
+
 def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
@@ -184,6 +195,10 @@ def parse_arguments(argv=None):
     )
     parser.add_argument("--exercise-pause", action="store_true", help="Inject an external obstacle, then remove it and Continue the same saved segment.")
     parser.add_argument("--exercise-carry", action="store_true", help="Exercise saved carry A/B actions between pick and place.")
+    parser.add_argument(
+        "--exercise-carry-no-detections", action="store_true",
+        help="Stop snapshot detections, expire their data, and exercise carry A/B/A.",
+    )
     parser.add_argument("--saved-plan", action="store_true", help="Plan each action once, then execute its returned plan ID.")
     parser.add_argument("--mode", choices=("pose_to_pose", "closed_chain"), default="pose_to_pose")
     parser.add_argument("--port-base", type=int, default=19261)
@@ -193,6 +208,10 @@ def parse_arguments(argv=None):
         parser.error("invalid domain ID or port base")
     if not math.isfinite(args.action_timeout) or args.action_timeout <= 0:
         parser.error("action timeout must be finite and positive")
+    if args.exercise_carry_no_detections:
+        args.exercise_carry = True
+        if args.workflow == "combined":
+            parser.error("carry without detections requires a sequence workflow")
     return args
 
 
@@ -202,6 +221,9 @@ def run_simulations(arguments):
     from rclpy.action import ActionClient
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy
+    from rcl_interfaces.srv import GetParameters
+    from apriltag_msgs.msg import AprilTagDetectionArray
+    from agibot_x2_manipulation_msgs.msg import BoxStateArray
     from sensor_msgs.msg import JointState
     from visualization_msgs.msg import MarkerArray
     from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene, GetPositionFK
@@ -235,6 +257,10 @@ def run_simulations(arguments):
     }
     rclpy.init(domain_id=arguments.domain_id)
     node = Node("saved_objects_full_simulation_test")
+    box_observations = []
+    table_observations = []
+    detection_subscriptions = []
+    parameter_client = node.create_client(GetParameters, "/pick_place_server/get_parameters")
     joints = []
     task_states = []
     pause_exercised = False
@@ -299,7 +325,11 @@ def run_simulations(arguments):
             invalid = copy.deepcopy(goal)
             invalid.plan_id = "missing-" + goal.plan_id
             action(action_type, topic, invalid, case, expected_success=False)
-        pause_probe = arguments.exercise_pause and arguments.saved_plan and not goal.plan_only and expected_success and not pause_exercised
+        pause_probe = (
+            arguments.exercise_pause and arguments.saved_plan and not goal.plan_only
+            and expected_success and not pause_exercised
+            and (not arguments.exercise_carry_no_detections or topic == "/move_carry_pose")
+        )
         if pause_probe:
             assert apply_scene.wait_for_service(timeout_sec=5) and fk_client.wait_for_service(timeout_sec=5)
             req = GetPositionFK.Request()
@@ -451,6 +481,9 @@ def run_simulations(arguments):
             joints.clear()
             states.clear()
             tables.clear()
+            stopped_replay = None
+            box_observations.clear()
+            table_observations.clear()
             port = arguments.port_base + index
             cmd = [
                 "ros2",
@@ -553,8 +586,60 @@ def run_simulations(arguments):
                             "attached"
                         ], "Pick attachment absent"
                         if arguments.exercise_carry:
+                            if arguments.exercise_carry_no_detections:
+                                assert parameter_client.wait_for_service(timeout_sec=5)
+                                req = GetParameters.Request(names=[
+                                    "maximum_box_pose_age", "maximum_table_tag_pose_age",
+                                    "box_states_topic", "table_tag_detections_topic",
+                                ])
+                                future = parameter_client.call_async(req)
+                                assert spin_until(future.done, 5), "detection parameter timeout"
+                                values = future.result().values
+                                maximum_age = max(v.double_value for v in values[:2])
+                                assert math.isfinite(maximum_age) and maximum_age > 0
+                                detection_subscriptions.extend([
+                                    node.create_subscription(BoxStateArray, values[2].string_value,
+                                                             box_observations.append, 10),
+                                    node.create_subscription(AprilTagDetectionArray, values[3].string_value,
+                                                             table_observations.append, qos_profile_sensor_data),
+                                ])
+                                assert spin_until(lambda: bool(box_observations) and bool(table_observations), 10), "live detections unavailable before stop"
+                                replay_pid = replay_process_id((output_dir / (name + ".log")).read_text())
+                                assert os.getpgid(replay_pid) == proc.pid, "replay is outside this test's launch group"
+                                os.kill(replay_pid, signal.SIGSTOP)
+                                stopped_replay = replay_pid
+                                stopped_at = time.monotonic()
+                                assert spin_until(lambda: time.monotonic() - stopped_at > maximum_age + 1.0, maximum_age + 5.0)
+                                def stamp_seconds(message):
+                                    return message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+                                latest_stamps = (stamp_seconds(box_observations[-1]), stamp_seconds(table_observations[-1]))
+                                now = node.get_clock().now().nanoseconds * 1e-9
+                                ages = [now - stamp for stamp in latest_stamps]
+                                assert min(ages) > maximum_age, "detections have not expired"
+                                case["carry_without_detections"] = {"replay_pid": stopped_replay, "maximum_pose_age": maximum_age, "initial_detection_ages": ages}
+                            carry_start = len(case["actions"])
                             for target in (MoveCarryPose.Goal.CARRY_A, MoveCarryPose.Goal.CARRY_B, MoveCarryPose.Goal.CARRY_A):
+                                if not arguments.saved_plan:
+                                    action(MoveCarryPose, "/move_carry_pose", MoveCarryPose.Goal(target_pose=target, plan_only=True), case)
                                 action(MoveCarryPose, "/move_carry_pose", MoveCarryPose.Goal(target_pose=target, plan_only=False), case)
+                            if arguments.exercise_carry_no_detections:
+                                assert (stamp_seconds(box_observations[-1]), stamp_seconds(table_observations[-1])) == latest_stamps, "new detections arrived during carry"
+                                for record in case["actions"][carry_start:]:
+                                    assert not any("detection" in item["stage"] or "perception" in item["stage"] for item in record["feedback"]), "carry entered detection checks"
+                                now = node.get_clock().now().nanoseconds * 1e-9
+                                case["carry_without_detections"].update(
+                                    verified_no_new_detections=True,
+                                    final_detection_ages=[now - stamp for stamp in latest_stamps],
+                                )
+                                case["carry_scene"] = scene()
+                                assert case["carry_scene"]["attached"], "carry lost attachment"
+                                assert set(case["carry_scene"]["world"]) == set(case["picked_scene"]["world"]), "carry removed known obstacles"
+                                os.kill(stopped_replay, signal.SIGCONT)
+                                stopped_replay = None
+                                assert spin_until(lambda: stamp_seconds(box_observations[-1]) > latest_stamps[0] and stamp_seconds(table_observations[-1]) > latest_stamps[1], 10), "detections did not resume before Place"
+                                for subscription in detection_subscriptions:
+                                    node.destroy_subscription(subscription)
+                                detection_subscriptions.clear()
                         action(Place, "/place_box", Place.Goal(plan_only=False), case)
                 assert spin_until(
                     lambda: states[-1].state == 1, 5
@@ -566,6 +651,14 @@ def run_simulations(arguments):
                 case["failure"] = str(error)
                 print("FAILED", name, str(error), flush=True)
             finally:
+                if stopped_replay is not None:
+                    try:
+                        os.kill(stopped_replay, signal.SIGCONT)
+                    except ProcessLookupError:
+                        pass
+                for subscription in detection_subscriptions:
+                    node.destroy_subscription(subscription)
+                detection_subscriptions.clear()
                 case["table_marker_count"] = len(tables)
                 shutdown_started = time.monotonic()
                 try:
