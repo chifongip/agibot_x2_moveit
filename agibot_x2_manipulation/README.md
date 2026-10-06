@@ -921,11 +921,16 @@ Alignment logs include measured-start deviation, connector duration, and
 `timing_scale` (1 for unchanged timing). Failed alignment diagnostics identify the
 joint, derivative peaks/limits, or the geometric validation failure.
 Attach/release checkpoint failures identify attachment-copy errors, joint-limit
-violations (joint, measured position, limits, excess, and the unchanged `1e-6`
-bounds tolerance), or colliding link/object pairs. Saved-step warnings include
+violations (joint, measured position, limits, excess, and configured
+`place_start_state_bounds_tolerance`), or colliding link/object pairs.
+Attach/release checkpoints use the same measured-state bounds allowance as
+held-object validation and start alignment (currently 0.02 rad). This accepts
+small feedback discrepancies without changing planned trajectory limits or
+`execution_joint_tolerance`, which checks deviation from the saved start.
+Saved-step warnings include
 the step name and index; failed action results also include the plan ID and step.
 Checkpoint start mismatches report measured/expected joint positions and the
-execution tolerance. These diagnostics do not change validation or retry behavior.
+execution tolerance. Collision checks and retry behavior remain active.
 
 The new action fields require rebuilding `agibot_x2_manipulation_msgs` and all
 clients that use these four actions. For captured simulation validation:

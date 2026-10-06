@@ -211,7 +211,7 @@ bool validateSavedCheckpointState(
     error = "saved checkpoint attachment copy failed: scene attachment link is absent from robot model";
     return false;
   }
-  constexpr double bounds_tolerance = 1e-6;
+  const double bounds_tolerance = config.place_start_state_bounds_tolerance;
   if (!checked.satisfiesBounds(group, bounds_tolerance)) {
     std::ostringstream details;
     details << std::setprecision(9) << "saved checkpoint joint limits violated";

@@ -37,25 +37,44 @@ struct Fixture
     step.trajectory.joint_trajectory.points = {a, b};
   }
 };
-TEST(SavedPlan, CheckpointReportsJointLimitsWithExistingTolerance)
+TEST(SavedPlan, CheckpointUsesConfiguredMeasuredBoundsTolerance)
 {
   Fixture f;
+  f.plan.config.place_start_state_bounds_tolerance = 0.02;
+  f.plan.config.execution_joint_tolerance = 0.1;
   std::string error;
   auto measured = *f.step.start;
   EXPECT_TRUE(validateSavedCheckpointState(measured, f.scene, f.plan.config, error));
   measured.setVariablePosition("j", 1.0000005);
   measured.update();
   EXPECT_TRUE(validateSavedCheckpointState(measured, f.scene, f.plan.config, error));
-  for (const double position : {-1.01, 1.01}) {
+  // The reported shoulder-roll excess (0.0175193443) is within the same
+  // measured-state allowance used by held validation and start alignment.
+  for (const double position : {-1.0175193443, 1.0175193443, -1.0199, 1.0199}) {
+    measured.setVariablePosition("j", position);
+    measured.update();
+    EXPECT_TRUE(validateSavedCheckpointState(measured, f.scene, f.plan.config, error)) << error;
+  }
+  for (const double position : {-1.0201, 1.0201}) {
     measured.setVariablePosition("j", position);
     measured.update();
     EXPECT_FALSE(validateSavedCheckpointState(measured, f.scene, f.plan.config, error));
     EXPECT_NE(error.find("joint=j"), std::string::npos) << error;
     EXPECT_NE(error.find("actual="), std::string::npos) << error;
     EXPECT_NE(error.find("limits=[-1, 1]"), std::string::npos) << error;
-    EXPECT_NE(error.find("excess=0.01"), std::string::npos) << error;
-    EXPECT_NE(error.find("bounds_tolerance=1e-06"), std::string::npos) << error;
+    EXPECT_NE(error.find("excess=0.0201"), std::string::npos) << error;
+    EXPECT_NE(error.find("bounds_tolerance=0.02"), std::string::npos) << error;
   }
+  measured.setVariablePosition("j", 1.0175193443);
+  measured.update();
+  f.plan.config.place_start_state_bounds_tolerance = 0.01;
+  EXPECT_FALSE(validateSavedCheckpointState(measured, f.scene, f.plan.config, error));
+  EXPECT_NE(error.find("bounds_tolerance=0.01"), std::string::npos) << error;
+  f.plan.config.place_start_state_bounds_tolerance = 0.0;
+  measured.setVariablePosition("j", 1.0000005);
+  measured.update();
+  EXPECT_FALSE(validateSavedCheckpointState(measured, f.scene, f.plan.config, error));
+  EXPECT_NE(error.find("bounds_tolerance=0"), std::string::npos) << error;
 }
 
 TEST(SavedPlan, CheckpointReportsCollisionPairs)
