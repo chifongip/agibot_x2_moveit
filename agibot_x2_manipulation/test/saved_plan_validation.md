@@ -22,8 +22,10 @@ attachment geometry, bounds, controller interpolation, and applicable path
 constraints. For a stationary saved start, a small feedback discrepancy adds a
 separate rest-to-rest alignment goal. After fresh settled feedback passes the
 existing start, scene, and attachment checks, the main trajectory executes with
-its original timestamps, velocities, and accelerations. A nonzero saved starting
-acceleration is retained in the main goal; alignment finishes with zero
+its original timing when enabled model motion limits permit it. If those limits
+require slowdown, only the main trajectory is uniformly retimed by its required
+factor and revalidated. A nonzero saved starting acceleration is retained in the
+main goal, subject to that timing scale; alignment finishes with zero
 acceleration. No jerk-continuity requirement is introduced between these
 stationary controller goals. Nonzero starting velocities retain the continuous
 connector, with uniform timing slowdown as the last fallback. Validation failures
@@ -32,6 +34,54 @@ require recovery rather than replay. IDs are single-use and invalidated when
 physical manipulation changes the context.
 
 ## Results
+
+### Pre-push speed review (2026-10-06)
+
+Review of the three unpushed commits found that separate alignment checked its
+own timing but could bypass enabled velocity/acceleration limits on the main
+saved trajectory. A regression reproduced the bypass; main-spline checks now
+run before separate alignment and during post-alignment verification. A
+stationary-start main trajectory exceeding enabled limits is uniformly retimed
+only by its required factor, separately from alignment. Post-alignment
+verification checks this actual execution trajectory, not the immutable stored
+original. Nonstationary starts retain the existing combined timing fallback.
+Explicitly disabled limits remain disabled for existing saved motion; the
+conservative defaults still apply to construction of new alignment motions.
+This distinction prevents artificial acceleration caps from reintroducing whole
+segment slowdown when the joint configuration has acceleration limits disabled.
+Two new tests cover enabled-limit enforcement and disabled-limit compatibility.
+The main README now documents separate alignment and staged Cartesian repair.
+
+The manipulation build, six focused CTest targets (including 22 saved-plan and
+12 Cartesian tests), and 11 simulation-harness Python tests passed. All six
+captured `pose_to_pose` workflows and the grey-box combined `closed_chain`
+workflow passed with injected start offsets: nine saved executions, zero new
+planner searches, and 18 correctly rejected invalid/consumed ID requests.
+Of 48 main-motion steps, 16 retained scale 1.0; the remaining steps received
+only their required motion-limit timing adjustment, at most 1.061548 (6.15%).
+None used the combined slowdown fallback. The grey-box Place main duration was
+2.525 seconds with scale 1.025722, rather than the roughly 15-second combined
+fallback observed while developing the correction. Whole-action timings also
+include validation and feedback waits; these simulations do not measure
+hardware tracking performance. Artifacts: `prepush_speed_review_03` and
+`prepush_speed_review_closed_chain_03`. No tuned parameters were changed.
+
+Focused verification commands (CTest from the workspace root, pytest from the
+MoveIt source repository, with `FASTRTPS_DEFAULT_PROFILES_FILE` unset):
+
+```bash
+ctest --test-dir build/agibot_x2_manipulation \
+  -R 'test_(saved_plan|cartesian_motion|post_place_planner|endpoint_reached|phase_retry_controller|execution_feedback)$' \
+  --output-on-failure
+env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q \
+  agibot_x2_manipulation/test/test_time_saved_simulation.py
+```
+
+Simulation used `time_saved_simulation.py --saved-plan --exercise-start-alignment`:
+all captures with `--workflow both --mode pose_to_pose --domain-id 165
+--port-base 24611`, and the unchanged grey-box Pick capture with `--workflow
+combined --mode closed_chain --domain-id 166 --port-base 24711`. Both used fake
+joint feedback and simulated attachment acknowledgements.
 
 ### Local Cartesian overshoot repair (2026-10-06)
 

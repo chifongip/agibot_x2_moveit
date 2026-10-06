@@ -1987,7 +1987,11 @@ private:
               const CancelFunction validation_interrupted = [&, validation_deadline]() {
                   return canceled() || std::chrono::steady_clock::now() >= validation_deadline;
                 };
-              if (!prepareSavedMotion(step, *plan, *current, planning_scene_.snapshot(), trajectory,
+              // Verify the actual main trajectory selected for this execution;
+              // uniform retiming preserves the stored plan's positions/ranges.
+              SavedStep execution_step = step;
+              execution_step.trajectory = trajectory;
+              if (!prepareSavedMotion(execution_step, *plan, *current, planning_scene_.snapshot(), trajectory,
                   alignment, failure, validation_interrupted, nullptr,
                   SavedMotionPreparation::VERIFY_START)) {return false;}
             }

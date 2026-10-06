@@ -884,10 +884,11 @@ invalidates other saved plans. Ordinary physical manipulation, posture changes,
 reset, recovery, and profile reload invalidate saved plans. Restarting the server
 also clears them. `plan_only: true` with a nonempty ID is invalid.
 
-Saved execution performs no IK or OMPL search. Start alignment may uniformly
-stretch execution timing while preserving the saved path. The scene monitor
-retains a parent scene so full MoveIt snapshots honor obstacle removals as well
-as additions when Continue refreshes the scene. Before every segment,
+Saved execution performs no IK or OMPL search. A separate stationary alignment
+normally preserves the main trajectory timing; uniform slowdown remains a
+fallback when configured motion limits cannot otherwise be satisfied. The scene
+monitor retains a parent scene so full MoveIt snapshots honor obstacle removals
+as well as additions when Continue refreshes the scene. Before every segment,
 it waits for settled feedback and checks the complete robot start, current scene,
 attachment geometry, joint bounds, controller spline, and the applicable Cartesian
 or closed-chain constraints. Detection jitter does not replace the saved geometry;
@@ -895,16 +896,26 @@ missing detections, newly detected obstacles, or movement beyond tolerance block
 Pick/Place execution. Standalone MoveCarryPose skips detection verification and
 clears previous perception obstacles before checking the live collision scene,
 without restoring old saved obstacle geometry.
-A small measured-start discrepancy gets a checked, limit-compliant alignment
-prefix. When the original timing passes, saved derivatives stay unchanged with
-only a timestamp offset. If alignment cannot meet the scaled velocity/acceleration
-limits or its spline is invalid, execution automatically tries four short
-connectors and uniformly slows the connector plus affected saved segment.
-Timestamps scale by the slowdown factor, velocities by its inverse, and
-accelerations by its inverse square. Saved waypoint positions and spline geometry
-remain unchanged; the stored plan is never modified and no IK/OMPL search is run.
-Candidates are ordered by duration before geometric validation; the first valid
-candidate is executed immediately, without checking slower alternatives or pausing.
+A small measured-start discrepancy normally gets a checked, rest-to-rest alignment
+motion followed by the saved trajectory with unchanged positions, timestamps,
+velocities, and accelerations. This requires a stationary saved starting velocity
+and a main trajectory whose controller spline respects the explicitly enabled,
+scaled model velocity/acceleration limits. Disabled model limits do not become
+new limits on the main trajectory; newly constructed alignment motions retain
+the existing conservative timing defaults for unspecified limits. A nonzero saved
+starting acceleration is retained in the main goal rather than imposed on the
+alignment endpoint. Fresh settled feedback and the scene are revalidated before
+dispatching the main trajectory;
+a residual position error within execution tolerance does not trigger another
+alignment. If enabled model limits require it, only the main trajectory is
+uniformly stretched by the necessary factor, while alignment stays separate.
+The adjusted main trajectory is revalidated before dispatch; waypoint positions
+and spline geometry remain unchanged. Nonzero starting velocities retain a
+continuous connector. If a separate alignment is unavailable, execution tries
+four short connectors and uniformly slows the combined connector and segment,
+preserving its saved spline geometry. The stored plan is never modified.
+Fallback candidates are ordered by duration before geometric validation; the
+first valid candidate is executed without checking slower alternatives.
 Joint bounds,
 collision, Cartesian, and carrying constraints remain active. Motion-limit checks
 allow only a relative `1e-9` numerical rounding margin.
@@ -1030,11 +1041,14 @@ cache reuse, for Cartesian and free-space routes that enforce bounds. Planned
 waypoints must still satisfy model bounds; collision checks, Cartesian geometry,
 minimum joint margins, and execution tolerances are unchanged. Changing the
 parameter requires restarting the manipulation server.
-Timing that exceeds this allowance is retried for Cartesian segments with
-zero velocity/acceleration at each Cartesian waypoint. Quintic intervals are
-lengthened to respect scaled velocity/acceleration limits, then rechecked for
-bounds, collisions, and Cartesian deviation. This fallback stops at waypoints
-and can make the motion slower; it preserves the planned joint positions.
+Cartesian timing that exceeds this allowance first receives local derivative
+repair at its original timestamps. Only affected joints' endpoint derivatives
+are reduced, with neighboring intervals rechecked. If necessary, local intervals
+receive rest-to-rest motion and additional time under the configured scaled
+velocity/acceleration limits. Complete Cartesian, collision, bounds, and minimum
+margin checks remain active. The final fallback stops at every waypoint and can
+slow the full segment. All repairs preserve planned waypoint positions. Logs
+report the strategy, original/final duration, and affected joints and intervals.
 Segment timing is preserved across route concatenation to avoid smoothing away the
 Cartesian path. Pick lift is replanned from measured feedback instead of rebasing
 and retiming a cached whole carry route; free-space segment reuse remains active.

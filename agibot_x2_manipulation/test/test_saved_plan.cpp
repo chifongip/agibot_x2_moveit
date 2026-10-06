@@ -168,6 +168,11 @@ TEST(SavedPlan, ExactStartPreservesEverySample)
   Fixture f; moveit_msgs::msg::RobotTrajectory output; double seconds; std::string error;
   ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, *f.step.start, f.scene, output, seconds, error, []{return false;})) << error;
   EXPECT_EQ(output, f.step.trajectory); EXPECT_DOUBLE_EQ(seconds, 0);
+  SavedAlignmentInfo info;
+  ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, *f.step.start, f.scene, output, seconds, error,
+      []{return false;}, &info, SavedMotionPreparation::SEPARATE)) << error;
+  EXPECT_EQ(output, f.step.trajectory); EXPECT_FALSE(info.alignment);
+  EXPECT_DOUBLE_EQ(info.timing_scale, 1.0);
 }
 TEST(SavedPlan, SmallErrorPrependsAlignmentWithoutChangingSuffix)
 {
@@ -255,6 +260,79 @@ TEST(SavedPlan, SeparateStartChecksRejectCollisionAndCartesianDeviation)
       []{return false;}, &info, SavedMotionPreparation::VERIFY_START));
   EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error,
       []{return true;}, &info, SavedMotionPreparation::SEPARATE));
+}
+
+TEST(SavedPlan, SeparateAlignmentChecksMainTrajectoryMotionLimits)
+{
+  for (const bool invalid_acceleration : {true, false}) {
+    Fixture f;
+    if (invalid_acceleration) {
+      auto bounds = f.model->getVariableBounds("j");
+      bounds.acceleration_bounded_ = true;
+      bounds.min_acceleration_ = -1.0; bounds.max_acceleration_ = 1.0;
+      f.model->getJointModel("j")->setVariableBounds("j", bounds);
+      f.step.trajectory.joint_trajectory.points.front().accelerations = {0.12};
+    } else {
+      f.step.trajectory.joint_trajectory.points.back().velocities = {0.12};
+    }
+    const auto original = f.step.trajectory;
+    auto current = *f.step.start;
+    current.setVariablePosition("j", 0.01); current.update();
+    moveit_msgs::msg::RobotTrajectory output;
+    double seconds; std::string error; SavedAlignmentInfo info;
+    ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error,
+        []{return false;}, &info, SavedMotionPreparation::SEPARATE)) << error;
+    ASSERT_TRUE(info.alignment);
+    EXPECT_EQ(info.strategy, "separate_retimed_main");
+    EXPECT_GT(info.timing_scale, 1.0); EXPECT_LT(info.timing_scale, 1.5);
+    EXPECT_EQ(f.step.trajectory, original);
+    EXPECT_NE(info.fallback_reason.find("saved main trajectory exceeds motion limits"), std::string::npos);
+    joint_trajectory_controller::Trajectory controller;
+    const auto & points = output.joint_trajectory.points;
+    for (std::size_t i = 1; i < points.size(); ++i) {
+      const rclcpp::Time begin(rclcpp::Duration(points[i - 1].time_from_start).nanoseconds(), RCL_ROS_TIME);
+      const rclcpp::Time end(rclcpp::Duration(points[i].time_from_start).nanoseconds(), RCL_ROS_TIME);
+      for (int sample = 0; sample <= 1000; ++sample) {
+        trajectory_msgs::msg::JointTrajectoryPoint point;
+        controller.interpolate_between_points(begin, points[i - 1], end, points[i],
+          begin + rclcpp::Duration::from_seconds((end - begin).seconds() * sample / 1000.0), point);
+        ASSERT_LE(std::abs(point.velocities[0]), 0.1 + 1e-9);
+        ASSERT_LE(std::abs(point.accelerations[0]), 0.1 + 1e-9);
+      }
+    }
+    SavedStep execution_step = f.step;
+    execution_step.trajectory = output;
+    moveit_msgs::msg::RobotTrajectory verified;
+    ASSERT_TRUE(prepareSavedMotion(execution_step, f.plan, current, f.scene, verified, seconds, error,
+        []{return false;}, nullptr, SavedMotionPreparation::VERIFY_START)) << error;
+    EXPECT_EQ(verified, execution_step.trajectory);
+    EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error,
+        []{return false;}, nullptr, SavedMotionPreparation::VERIFY_START));
+    EXPECT_NE(error.find("saved main trajectory exceeds motion limits"), std::string::npos);
+    ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, *f.step.start, f.scene, output, seconds, error,
+        []{return false;}, &info, SavedMotionPreparation::SEPARATE)) << error;
+    EXPECT_FALSE(info.alignment);
+    EXPECT_EQ(info.strategy, "retimed_main"); EXPECT_GT(info.timing_scale, 1.0);
+    EXPECT_DOUBLE_EQ(seconds, 0.0);
+  }
+}
+
+TEST(SavedPlan, SeparateAlignmentHonorsDisabledMainAccelerationLimits)
+{
+  Fixture f;
+  ASSERT_FALSE(f.model->getVariableBounds("j").acceleration_bounded_);
+  f.step.trajectory.joint_trajectory.points.front().accelerations = {0.12};
+  auto current = *f.step.start;
+  current.setVariablePosition("j", 0.01); current.update();
+  moveit_msgs::msg::RobotTrajectory output;
+  double seconds; std::string error; SavedAlignmentInfo info;
+  ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error,
+      []{return false;}, &info, SavedMotionPreparation::SEPARATE)) << error;
+  ASSERT_TRUE(info.alignment); EXPECT_DOUBLE_EQ(info.timing_scale, 1.0);
+  EXPECT_EQ(output, f.step.trajectory);
+  ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, current, f.scene, output, seconds, error,
+      []{return false;}, nullptr, SavedMotionPreparation::VERIFY_START)) << error;
+  EXPECT_EQ(output, f.step.trajectory);
 }
 
 TEST(SavedPlan, SeparateAlignmentRetainsNonstationaryFallback)

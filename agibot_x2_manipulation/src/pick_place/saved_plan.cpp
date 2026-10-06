@@ -53,7 +53,7 @@ bool motionLimits(const moveit::core::RobotModel & model, const std::string & jo
 
 bool trajectoryTimingScale(const moveit_msgs::msg::RobotTrajectory & message,
   const moveit::core::RobotModel & model, const PickPlaceConfig & config, double & scale,
-  std::string & details, const CancelFunction & canceled)
+  std::string & details, const CancelFunction & canceled, bool configured_limits_only = false)
 {
   scale = 1.0;
   const auto & joints = message.joint_trajectory;
@@ -69,6 +69,13 @@ bool trajectoryTimingScale(const moveit_msgs::msg::RobotTrajectory & message,
     for (size_t joint = 0; joint < joints.joint_names.size(); ++joint) {
       double vmax, amax;
       if (!motionLimits(model, joints.joint_names[joint], config, vmax, amax, details)) {return false;}
+      if (configured_limits_only) {
+        const auto & bounds = model.getVariableBounds(joints.joint_names[joint]);
+        // Conservative defaults are for newly constructed connectors. Saved
+        // planning output follows the model's explicitly enabled limits.
+        if (!bounds.velocity_bounded_) {vmax = std::numeric_limits<double>::infinity();}
+        if (!bounds.acceleration_bounded_) {amax = std::numeric_limits<double>::infinity();}
+      }
       const auto velocity = derivative(positionPolynomial(a, b, joint, duration));
       const auto acceleration = derivative(velocity);
       const double vpeak = polynomialPeak(velocity) / duration;
@@ -252,32 +259,70 @@ bool prepareSavedMotion(
   const auto valid = [&](const moveit::core::RobotState & state, std::string & failure) {
       return closure_valid(state, failure, false);
     };
-  robot_trajectory::RobotTrajectory suffix(current.getRobotModel(), config.planning_group);
-  suffix.setRobotTrajectoryMsg(current, step.trajectory);
-  if (!validateTimedReturnTrajectory(suffix, validation_scene, config.return_validation_joint_step,
-      error, canceled, true, step.held ? config.minimum_carry_joint_margin : 0.0,
-      valid, nullptr, config.controller_spline_bounds_tolerance)) {return false;}
-  for (const auto & range : step.cartesian) {
-    if (range.last >= suffix.getWayPointCount() || range.first > range.last)
-    {error = "saved Cartesian range is invalid"; return false;}
-    robot_trajectory::RobotTrajectory path(current.getRobotModel(), config.planning_group);
-    for (size_t i = range.first; i <= range.last; ++i) {
-      path.addSuffixWayPoint(suffix.getWayPoint(i), i == range.first ? 0.0 : suffix.getWayPointDurationFromPrevious(i));
-    }
-    if (!validateCartesianTrajectory(path, validation_scene, config, range.from, range.to,
-        error, canceled, step.held ? config.minimum_carry_joint_margin : 0.0)) {
-      error = "planning saved Cartesian path: " + error; return false;
-    }
-  }
-  if (step.retreat && scene->isStateColliding(suffix.getLastWayPoint(), config.planning_group))
-  {error = "saved retreat endpoint is still in contact"; return false;}
+  const auto validate_saved_path = [&](const moveit_msgs::msg::RobotTrajectory & message,
+    std::string & failure) {
+      robot_trajectory::RobotTrajectory suffix(current.getRobotModel(), config.planning_group);
+      suffix.setRobotTrajectoryMsg(current, message);
+      if (!validateTimedReturnTrajectory(suffix, validation_scene, config.return_validation_joint_step,
+          failure, canceled, true, step.held ? config.minimum_carry_joint_margin : 0.0,
+          valid, nullptr, config.controller_spline_bounds_tolerance)) {return false;}
+      for (const auto & range : step.cartesian) {
+        if (range.last >= suffix.getWayPointCount() || range.first > range.last)
+        {failure = "saved Cartesian range is invalid"; return false;}
+        robot_trajectory::RobotTrajectory path(current.getRobotModel(), config.planning_group);
+        for (size_t i = range.first; i <= range.last; ++i) {
+          path.addSuffixWayPoint(suffix.getWayPoint(i), i == range.first ? 0.0 : suffix.getWayPointDurationFromPrevious(i));
+        }
+        if (!validateCartesianTrajectory(path, validation_scene, config, range.from, range.to,
+            failure, canceled, step.held ? config.minimum_carry_joint_margin : 0.0)) {
+          failure = "planning saved Cartesian path: " + failure; return false;
+        }
+      }
+      if (step.retreat && scene->isStateColliding(suffix.getLastWayPoint(), config.planning_group))
+      {failure = "saved retreat endpoint is still in contact"; return false;}
+      return true;
+    };
+  if (!validate_saved_path(step.trajectory, error)) {return false;}
   output = step.trajectory;
   double distance = 0.0;
   for (size_t i = 0; i < joints.joint_names.size(); ++i) {
     distance = std::max(distance, std::abs(current.getVariablePosition(joints.joint_names[i]) - joints.points[0].positions[i]));
   }
   if (alignment_info) {alignment_info->start_difference = distance;}
-  if (distance <= 1e-6 && preparation != SavedMotionPreparation::VERIFY_START) {return true;}
+  bool main_timing_valid = true;
+  double main_scale = 1.0;
+  if (preparation != SavedMotionPreparation::CONTINUOUS) {
+    std::string main_failure;
+    if (!trajectoryTimingScale(step.trajectory, *current.getRobotModel(), config,
+        main_scale, main_failure, canceled, true)) {error = main_failure; return false;}
+    main_timing_valid = main_scale <= 1.0;
+    if (!main_timing_valid) {
+      main_failure = "saved main trajectory exceeds motion limits: " + main_failure;
+      if (preparation == SavedMotionPreparation::VERIFY_START) {error = main_failure; return false;}
+      if (alignment_info) {alignment_info->fallback_reason = main_failure;}
+    }
+  }
+  const auto retime_main = [&](moveit_msgs::msg::RobotTrajectory & message,
+    double & scale, std::string & failure) {
+      scale = 1.0;
+      if (main_timing_valid) {return true;}
+      scale = main_scale * (1.0 + 1e-6);
+      double remaining_scale;
+      if (!stretchTiming(message, scale, failure) ||
+        !trajectoryTimingScale(message, *current.getRobotModel(), config,
+          remaining_scale, failure, canceled, true)) {return false;}
+      if (remaining_scale > 1.0) {failure = "retimed main trajectory exceeds motion limits"; return false;}
+      return validate_saved_path(message, failure);
+    };
+  if (distance <= 1e-6 && preparation != SavedMotionPreparation::VERIFY_START) {
+    double scale;
+    if (!retime_main(output, scale, error)) {return false;}
+    if (alignment_info && scale > 1.0) {
+      alignment_info->timing_scale = scale;
+      alignment_info->strategy = "retimed_main";
+    }
+    return true;
+  }
   for (const auto & name : joints.joint_names) {
     double velocity, acceleration;
     if (!motionLimits(*current.getRobotModel(), name, config, velocity, acceleration, error)) {return false;}
@@ -330,9 +375,17 @@ bool prepareSavedMotion(
     error.clear();
     return true;
   }
-  if (preparation == SavedMotionPreparation::SEPARATE && alignment_info &&
-    std::all_of(joints.points.front().velocities.begin(), joints.points.front().velocities.end(),
-      [](double velocity) {return std::abs(velocity) <= 1e-9;}))
+  const bool stationary_start = std::all_of(joints.points.front().velocities.begin(),
+    joints.points.front().velocities.end(), [](double velocity) {return std::abs(velocity) <= 1e-9;});
+  auto separate_main = step.trajectory;
+  double separate_scale = 1.0;
+  bool separate_main_valid = main_timing_valid;
+  if (preparation == SavedMotionPreparation::SEPARATE && alignment_info && stationary_start && !main_timing_valid) {
+    std::string failure;
+    if (retime_main(separate_main, separate_scale, failure)) {separate_main_valid = true;}
+    else {alignment_info->fallback_reason += "; " + failure;}
+  }
+  if (preparation == SavedMotionPreparation::SEPARATE && alignment_info && separate_main_valid && stationary_start)
   {
     auto target = joints.points.front();
     std::fill(target.velocities.begin(), target.velocities.end(), 0.0);
@@ -362,14 +415,17 @@ bool prepareSavedMotion(
         config.controller_spline_bounds_tolerance))
     {
       alignment_info->alignment = std::move(connector);
-      alignment_info->strategy = "separate";
+      alignment_info->strategy = separate_scale > 1.0 ? "separate_retimed_main" : "separate";
+      alignment_info->timing_scale = separate_scale;
+      output = std::move(separate_main);
       alignment_seconds = rclcpp::Duration(target.time_from_start).seconds();
       error.clear();
       return true;
     }
     alignment_info->fallback_reason = failure.empty() ? "separate alignment exceeds motion limits" : failure;
-  } else if (preparation == SavedMotionPreparation::SEPARATE && alignment_info) {
-    alignment_info->fallback_reason = "saved trajectory starts with nonzero velocity";
+  } else if (preparation == SavedMotionPreparation::SEPARATE && alignment_info && !stationary_start) {
+    if (!alignment_info->fallback_reason.empty()) {alignment_info->fallback_reason += "; ";}
+    alignment_info->fallback_reason += "saved trajectory starts with nonzero velocity";
   }
   std::string timing_failure;
   // Exact polynomial derivative bounds for a stationary-to-saved-start
