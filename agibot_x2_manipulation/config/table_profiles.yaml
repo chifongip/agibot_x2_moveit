@@ -1,0 +1,17 @@
+pick_place_server:
+  ros__parameters:
+    # The reserved default profile retains the table_* calibration in
+    # box_manipulation.yaml. Add only measured physical tables here.
+    # Omit the empty names list: ROS parameter YAML cannot infer its array type.
+    # table_profile_names: [second_table]
+    default_table_profile: default
+    # table_profiles:
+    #   second_table:
+    #     tag_id: 10
+    #     tag_frame: tag10
+    #     tabletop_center: [0.0, -0.55, 0.15]
+    #     dimensions: [0.6, 0.4, 0.6]
+    #     place_offset: [0.0, 0.05]
+    #     place_yaw: 0.0
+    #     collision_id: second_work_table
+    # Example geometry is illustrative; replace it with measured calibration.

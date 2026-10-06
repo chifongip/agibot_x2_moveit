@@ -3,6 +3,8 @@ geometry_msgs/PoseStamped place_pose
 bool plan_only
 # Empty preserves normal execution; otherwise execute this saved plan.
 string plan_id
+# Empty selects the configured default table. Saved execution retains its table.
+string table_profile_id
 ---
 uint16 SUCCESS=0
 uint16 BUSY=1
@@ -19,7 +21,9 @@ string planning_mode
 uint16 error_code
 string message
 geometry_msgs/PoseStamped achieved_pose
+string table_profile_id
 ---
 string stage
 geometry_msgs/PoseStamped box_pose
 float32 progress
+string table_profile_id

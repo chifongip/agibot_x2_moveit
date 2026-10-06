@@ -36,6 +36,9 @@ struct SavedPlan
   std::string profile_id;
   std::vector<TrackedBoxPose> boxes;
   std::optional<Eigen::Isometry3d> table_tag;
+  std::string table_profile_id;
+  uint64_t table_profile_version{0};
+  std::map<std::string, Eigen::Isometry3d> table_tags;
   Eigen::Isometry3d box_to_left{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d box_to_right{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d pick_pose{Eigen::Isometry3d::Identity()};

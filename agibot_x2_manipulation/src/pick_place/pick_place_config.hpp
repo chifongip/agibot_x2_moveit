@@ -108,6 +108,7 @@ struct PickPlaceConfig
   double table_tag_to_box_yaw{0.0};
   bool table_collision_enabled{false};
   std::string table_collision_id;
+  std::vector<std::string> managed_table_ids;
   BoxDimensions table_dimensions;
   double maximum_table_tag_pose_age{0.0};
   std::string table_tag_detections_topic;

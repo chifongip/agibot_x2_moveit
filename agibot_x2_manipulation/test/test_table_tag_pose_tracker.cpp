@@ -125,12 +125,12 @@ protected:
       0.005, 0.0523598776, 2.5, std::move(stable_pose_callback));
   }
 
-  void publishTransform(double x, const rclcpp::Time & stamp)
+  void publishTransform(double x, const rclcpp::Time & stamp, const std::string & frame = "tag9")
   {
     geometry_msgs::msg::TransformStamped transform;
     transform.header.stamp = stamp;
     transform.header.frame_id = "base_link";
-    transform.child_frame_id = "tag9";
+    transform.child_frame_id = frame;
     transform.transform.translation.x = x;
     transform.transform.rotation.w = 1.0;
     transform_broadcaster_->sendTransform(transform);
@@ -245,7 +245,7 @@ TEST_F(BoxPoseTrackerTest, RetainsMultipleVisibleBoxesAndRejectsProfileChanges)
   EXPECT_EQ(error, "box profile changed before approach");
 }
 
-TEST_F(TableTagPoseTrackerTest, UsesLatestTransformWhenDetectionTfArrivesLater)
+TEST_F(TableTagPoseTrackerTest, WaitsForDetectionTimeTransformWhenTfArrivesLater)
 {
   const auto now = node_->now();
   const std::array transforms{
@@ -254,14 +254,13 @@ TEST_F(TableTagPoseTrackerTest, UsesLatestTransformWhenDetectionTfArrivesLater)
     now - rclcpp::Duration::from_seconds(0.10),
   };
 
-  // Every detection is slightly newer than its latest available tag TF, which
-  // models delivery on separate DDS topics. The robot is stationary, so the
-  // latest transform remains the correct table-tag pose for each detection.
-  for (const auto & transform_stamp : transforms) {
-    publishTransform(0.25, transform_stamp);
-    spinFor(std::chrono::milliseconds(10));
-    publishDetection(transform_stamp + rclcpp::Duration::from_seconds(0.01));
+  // A detection arrives before its matching transform. It must remain pending,
+  // rather than being accepted using the previous sample's latest TF.
+  for (const auto & stamp : transforms) {
+    publishDetection(stamp);
     spinFor(std::chrono::milliseconds(20));
+    publishTransform(0.25, stamp);
+    spinFor(std::chrono::milliseconds(40));
   }
 
   geometry_msgs::msg::PoseStamped stable_pose;
@@ -269,6 +268,7 @@ TEST_F(TableTagPoseTrackerTest, UsesLatestTransformWhenDetectionTfArrivesLater)
   ASSERT_TRUE(tracker_->waitForStablePose(
       0.1, []() {return false;}, stable_pose, error)) << error;
   EXPECT_NEAR(stable_pose.pose.position.x, 0.25, 1e-6);
+  EXPECT_EQ(rclcpp::Time(stable_pose.header.stamp), transforms.back());
 }
 
 TEST_F(TableTagPoseTrackerTest, RequiresNewStableObservationAndAcceptsUnchangedPose)
@@ -348,7 +348,7 @@ TEST_F(TableTagPoseTrackerTest, CallsCallbackForEveryFreshStablePose)
   for (const auto & transform_stamp : transforms) {
     publishTransform(0.25, transform_stamp);
     spinFor(std::chrono::milliseconds(10));
-    publishDetection(transform_stamp + rclcpp::Duration::from_seconds(0.01));
+    publishDetection(transform_stamp);
     spinFor(std::chrono::milliseconds(20));
   }
 
@@ -364,6 +364,44 @@ TEST_F(TableTagPoseTrackerTest, CallsCallbackForEveryFreshStablePose)
   }
   EXPECT_EQ(stable_poses.size(), 2U);
   EXPECT_EQ(tracker_->generation(), generation);
+}
+
+TEST_F(TableTagPoseTrackerTest, TracksSimultaneousTablesIndependently)
+{
+  auto second = std::make_unique<TableTagPoseTracker>(node_, "base_link", "tag10",
+    "/table_tag_test/detections", 10, 20.0, 3, 5.0, 0.005, 0.0523598776, 2.5);
+  for (int index = 0; index < 3; ++index) {
+    const auto stamp = node_->now();
+    publishTransform(0.25, stamp);
+    publishTransform(0.75, stamp, "tag10");
+    spinFor(std::chrono::milliseconds(10));
+    apriltag_msgs::msg::AprilTagDetectionArray detections;
+    detections.header.stamp = stamp;
+    for (int id : {9, 10}) {
+      apriltag_msgs::msg::AprilTagDetection tag;
+      tag.id = id; tag.decision_margin = 30.0F;
+      detections.detections.push_back(tag);
+    }
+    detections_publisher_->publish(detections);
+    spinFor(std::chrono::milliseconds(30));
+  }
+  geometry_msgs::msg::PoseStamped first_pose, second_pose;
+  std::string error;
+  ASSERT_TRUE(tracker_->waitForStablePose(0.0, []() {return false;}, first_pose, error));
+  ASSERT_TRUE(second->waitForStablePose(0.0, []() {return false;}, second_pose, error));
+  EXPECT_NEAR(first_pose.pose.position.x, 0.25, 1e-6);
+  EXPECT_NEAR(second_pose.pose.position.x, 0.75, 1e-6);
+}
+
+TEST_F(TableTagPoseTrackerTest, RejectsFutureZeroAndStaleDetections)
+{
+  for (int index = 0; index < 3; ++index) {
+    publishDetection(node_->now() + rclcpp::Duration::from_seconds(1.0));
+    publishDetection(rclcpp::Time(0, 0, RCL_ROS_TIME));
+    publishDetection(node_->now() - rclcpp::Duration::from_seconds(10.0));
+    spinFor(std::chrono::milliseconds(20));
+  }
+  EXPECT_EQ(tracker_->generation(), 0U);
 }
 
 }  // namespace

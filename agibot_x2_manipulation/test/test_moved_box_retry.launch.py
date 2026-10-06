@@ -25,7 +25,7 @@ def generate_test_description():
     return make_test_description()
 
 
-def make_test_description(box_profiles_file=None, publish_table=True):
+def make_test_description(box_profiles_file=None, publish_table=True, table_profiles_file=None):
     share = get_package_share_directory("agibot_x2_manipulation")
     port = 20000 + os.getpid() % 10000
     stack = IncludeLaunchDescription(
@@ -44,6 +44,7 @@ def make_test_description(box_profiles_file=None, publish_table=True):
             "box_profiles_file": str(box_profiles_file or
                                      Path(__file__).parent / "config" / "box_profiles_simulation.yaml"),
             "manipulation_state_file": f"/tmp/x2_moved_box_retry_{os.getpid()}",
+            **({"table_profiles_file": str(table_profiles_file)} if table_profiles_file else {}),
         }.items(),
     )
     fake = Node(

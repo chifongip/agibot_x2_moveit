@@ -5,6 +5,7 @@
 #include "agibot_x2_manipulation/phase_retry_controller.hpp"
 #include "pick_place/attachment_controller.hpp"
 #include "pick_place/saved_plan.hpp"
+#include "pick_place/table_profiles.hpp"
 #include "pick_place/box_pose_tracker.hpp"
 #include "pick_place/dual_arm_motion_planner.hpp"
 #include "pick_place/endpoint_reached.hpp"
@@ -106,6 +107,7 @@ struct TaskOutcome
   std::string message;
   std::string plan_id;
   std::string planning_mode;
+  std::string table_profile_id;
   bool object_held{false};
   geometry_msgs::msg::PoseStamped achieved_pose;
 };
@@ -175,6 +177,7 @@ public:
   explicit PickPlaceServer(const rclcpp::Node::SharedPtr & node)
   : node_(node), config_(loadPickPlaceConfig(node)),
     posture_controller_(node, config_), profiles_(BoxProfileRegistry::fromParameters(*node)),
+    table_profiles_(*node, config_),
     state_store_(config_.state_file),
     box_pose_tracker_(
       node, config_.planning_frame, config_.box_pose_topic, config_.box_states_topic,
@@ -191,18 +194,24 @@ public:
     box_id_prefix_ = config_.box_id;
     active_carry_pose_a_ = config_.carry_pose;
     active_carry_pose_b_ = config_.carry_pose_b;
-    if (config_.use_tag_derived_place_pose || config_.table_collision_enabled) {
-      table_tag_pose_tracker_ = std::make_unique<TableTagPoseTracker>(
-        node_, config_.planning_frame, config_.table_tag_frame,
-        config_.table_tag_detections_topic, config_.table_tag_id,
-        config_.table_tag_minimum_decision_margin,
-        static_cast<std::size_t>(config_.table_tag_stable_sample_count),
-        config_.maximum_table_tag_pose_age, config_.table_tag_maximum_position_spread,
-        config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap,
-        [this](const geometry_msgs::msg::PoseStamped & tag_pose) {
-          publishTrackedTableMarker(tag_pose);
-        });
+    for (const auto & entry : table_profiles_.profiles()) {
+      const auto profile = entry.second;
+      config_.managed_table_ids.push_back(profile.collision_id);
+      if (config_.use_tag_derived_place_pose || config_.table_collision_enabled) {
+        table_trackers_.emplace(profile.id, std::make_unique<TableTagPoseTracker>(
+          node_, config_.planning_frame, profile.tag_frame,
+          config_.table_tag_detections_topic, profile.tag_id,
+          config_.table_tag_minimum_decision_margin,
+          static_cast<std::size_t>(config_.table_tag_stable_sample_count),
+          config_.maximum_table_tag_pose_age, config_.table_tag_maximum_position_spread,
+          config_.table_tag_maximum_angular_spread, config_.table_tag_maximum_sample_gap,
+          [this, profile](const geometry_msgs::msg::PoseStamped & tag_pose) {
+            publishTrackedTableMarker(profile, tag_pose);
+          }));
+      }
     }
+    std::string table_error;
+    activateTableProfile("", table_error);
     move_group_.setPoseReferenceFrame(config_.planning_frame);
     move_group_.setMaxVelocityScalingFactor(config_.velocity_scaling);
     move_group_.setMaxAccelerationScalingFactor(config_.acceleration_scaling);
@@ -520,16 +529,19 @@ private:
 
   ScopeExit freezeDetectionScene(bool table_required = true)
   {
+    if (detection_snapshot_active_) {return ScopeExit([]() {});}
     detection_snapshot_active_ = true;
     detection_table_required_ = table_required;
     detection_scene_captured_ = false;
     detection_table_pose_.reset();
+    detection_table_poses_.clear();
     detection_boxes_.clear();
     return ScopeExit([this]() {
       detection_snapshot_active_ = false;
       detection_table_required_ = true;
       detection_scene_captured_ = false;
       detection_table_pose_.reset();
+      detection_table_poses_.clear();
       detection_boxes_.clear();
     });
   }
@@ -834,7 +846,53 @@ private:
     return true;
   }
 
+  bool activateTableProfile(const std::string & requested, std::string & error)
+  {
+    const auto * profile = table_profiles_.find(requested);
+    if (!profile) {
+      error = "unknown table profile: " + requested;
+      return false;
+    }
+    profile->apply(config_);
+    active_table_profile_id_ = profile->id;
+    const auto tracker = table_trackers_.find(profile->id);
+    table_tag_pose_tracker_ = tracker == table_trackers_.end() ? nullptr : tracker->second.get();
+    return true;
+  }
+
   bool collectFreshTable(DetectionSceneSnapshot & observations, std::string & error,
+    const CancelFunction & canceled = []() {return false;})
+  {
+    if (!collectSelectedTable(observations, error, canceled)) {return false;}
+    if (!config_.table_collision_enabled) {return true;}
+    if (observations.table && detection_snapshot_active_ && detection_table_pose_) {
+      detection_table_poses_[active_table_profile_id_] = *detection_table_pose_;
+    }
+    for (const auto & entry : table_trackers_) {
+      if (entry.first == active_table_profile_id_) {continue;}
+      Eigen::Isometry3d pose;
+      const auto cached = detection_table_poses_.find(entry.first);
+      if (detection_snapshot_active_ && cached != detection_table_poses_.end()) {
+        // Box movement may invalidate the box snapshot without invalidating
+        // the accepted table geometry for this action.
+        pose = cached->second;
+      } else if (detection_snapshot_active_ && detection_scene_captured_) {
+        continue;
+      } else {
+        geometry_msgs::msg::PoseStamped observed;
+        std::string ignored;
+        if (!entry.second->waitForStablePose(0.0, canceled, observed, ignored)) {continue;}
+        pose = toEigen(observed.pose);
+        if (detection_snapshot_active_) {detection_table_poses_[entry.first] = pose;}
+      }
+      const auto & profile = *table_profiles_.find(entry.first);
+      observations.tables.push_back(SceneBox{profile.collision_id, profile.dimensions,
+        tablePoseFromVerticalTag(pose, profile.dimensions, profile.tabletop_center)});
+    }
+    return true;
+  }
+
+  bool collectSelectedTable(DetectionSceneSnapshot & observations, std::string & error,
     const CancelFunction & canceled = []() {return false;})
   {
     if (config_.table_collision_enabled && table_tag_pose_tracker_) {
@@ -1051,14 +1109,14 @@ private:
     return updateVisibleBoxScene(active_box_instance_id_, false, false, visible_boxes, error, canceled);
   }
 
-  void publishTrackedTableMarker(const geometry_msgs::msg::PoseStamped & tag_pose)
+  void publishTrackedTableMarker(
+    const TableProfile & profile, const geometry_msgs::msg::PoseStamped & tag_pose)
   {
     try {
       planning_scene_.publishTableMarker(
         tablePoseFromVerticalTag(
-          toEigen(tag_pose.pose), config_.table_dimensions,
-          config_.table_tag_to_tabletop_center),
-        tag_pose.header.stamp);
+          toEigen(tag_pose.pose), profile.dimensions, profile.tabletop_center),
+        tag_pose.header.stamp, profile.id, &profile.dimensions);
     } catch (const std::exception & exception) {
       RCLCPP_WARN_THROTTLE(
         node_->get_logger(), *node_->get_clock(), 2000,
@@ -1663,6 +1721,7 @@ private:
   void finishSavedRequest(TaskOutcome & task, bool plan_only)
   {
     task.planning_mode = motionPlanningModeName(config_.motion_planning_mode);
+    task.table_profile_id = task.code == kInvalidGoal ? "" : active_table_profile_id_;
     if (plan_only && task.success && building_plan_) {
       task.plan_id = building_plan_->id;
       saved_plans_.put(building_plan_);
@@ -1682,12 +1741,17 @@ private:
     plan.profile_id = active_profile_id_;
     plan.boxes = plan.action == "move_carry_pose" ? active_visible_boxes_ : detection_boxes_;
     plan.table_tag = detection_table_pose_;
+    plan.table_profile_id = active_table_profile_id_;
+    plan.table_profile_version = table_profiles_.version();
+    plan.table_tags = detection_table_poses_;
+    if (plan.table_tag) {plan.table_tags[plan.table_profile_id] = *plan.table_tag;}
     plan.box_to_left = held_box_to_left_contact_;
     plan.box_to_right = held_box_to_right_contact_;
     moveit_msgs::msg::PlanningScene message;
     planning_scene_.snapshot()->getPlanningSceneMsg(message);
     plan.world.collision_objects.clear();
     std::set<std::string> ids{config_.box_id, config_.table_collision_id};
+    ids.insert(config_.managed_table_ids.begin(), config_.managed_table_ids.end());
     for (const auto & box : plan.boxes) {ids.insert(collisionObjectId(box.instance_id));}
     for (const auto & object : message.world.collision_objects) {
       if (ids.count(object.id)) {plan.world.collision_objects.push_back(object);}
@@ -1801,30 +1865,49 @@ private:
           return box.instance_id == entry.first;
         })) {error = "new detected obstacle invalidates saved plan: " + entry.first; return false;}
     }
-    if (plan.table_tag) {
+    for (const auto & entry : plan.table_tags) {
       geometry_msgs::msg::PoseStamped observed;
-      const bool required = plan.action != "pick";
+      const bool required = entry.first == plan.table_profile_id && plan.action != "pick";
       std::string observation_error;
-      if (!table_tag_pose_tracker_ || !table_tag_pose_tracker_->waitForStablePose(
+      const auto tracker = table_trackers_.find(entry.first);
+      if (tracker == table_trackers_.end() || !tracker->second->waitForStablePose(
           required ? config_.tag_reacquisition_timeout : 0.0, canceled,
           observed, observation_error))
       {
-        if (!required && !canceled()) {return true;}
+        if (!required && !canceled()) {continue;}
         error = observation_error.empty() ? "table-tag tracking is not configured" : observation_error;
         return false;
       }
-      const auto actual = toEigen(observed.pose);
-      if (!validate_table_detection(actual, *plan.table_tag, plan.config, error)) {return false;}
+      if (!validate_table_detection(toEigen(observed.pose), entry.second, plan.config, error)) {
+        error = entry.first + ": " + error;
+        return false;
+      }
+    }
+    if (config_.table_collision_enabled) {
+      for (const auto & entry : table_trackers_) {
+        if (plan.table_tags.count(entry.first)) {continue;}
+        geometry_msgs::msg::PoseStamped observed;
+        std::string ignored;
+        if (entry.second->waitForStablePose(0.0, canceled, observed, ignored)) {
+          error = "new detected table invalidates saved plan: " + entry.first;
+          return false;
+        }
+      }
     }
     return true;
   }
 
   TaskOutcome executeSavedPlan(const std::string & action, const std::string & id,
-    bool plan_only, const FeedbackFunction & feedback, const CancelFunction & canceled)
+    bool plan_only, const FeedbackFunction & feedback, const CancelFunction & canceled,
+    const std::string & requested_table = "")
   {
     if (plan_only) {return outcome(false, kInvalidGoal, "plan_only cannot use plan_id");}
     auto plan = saved_plans_.claim(id, action);
     if (!plan) {return outcome(false, kInvalidGoal, "saved plan is absent, replaced, consumed, or belongs to another action");}
+    if (plan->table_profile_version != table_profiles_.version() ||
+      (!requested_table.empty() && requested_table != plan->table_profile_id) ||
+      !table_profiles_.find(plan->table_profile_id))
+    {return outcome(false, kInvalidGoal, "saved plan table profile mismatch");}
     if (plan->profile_version != profile_version_ ||
       plan->config.motion_planning_mode != config_.motion_planning_mode)
     {return outcome(false, kInvalidGoal, "saved plan profile version or planning mode changed");}
@@ -1832,6 +1915,10 @@ private:
     if (state_.load() != (needs_held ? ManipulationState::HOLDING : ManipulationState::EMPTY) ||
       (needs_held && active_box_instance_id_ != plan->instance_id))
     {return outcome(false, kInvalidState, "saved plan manipulation state or held object mismatch");}
+    std::string table_error;
+    if (!activateTableProfile(plan->table_profile_id, table_error)) {
+      return outcome(false, kInvalidGoal, table_error);
+    }
     config_ = plan->config;
     active_box_instance_id_ = plan->instance_id;
     active_profile_id_ = plan->profile_id;
@@ -1841,6 +1928,7 @@ private:
     auto detection_scope = freezeDetectionScene();
     detection_boxes_ = plan->boxes;
     detection_table_pose_ = plan->table_tag;
+    detection_table_poses_ = plan->table_tags;
     detection_scene_captured_ = true;
     const bool carry_only = action == "move_carry_pose";
     if (!carry_only) {active_visible_boxes_ = plan->boxes;}
@@ -3011,6 +3099,9 @@ private:
   {
     result->plan_id = task.plan_id;
     result->planning_mode = task.planning_mode;
+    if constexpr (!std::is_same_v<ResultT, MoveCarryPose::Result>) {
+      result->table_profile_id = task.table_profile_id;
+    }
     result->success = task.success;
     result->error_code = task.code;
     result->message = task.message;
@@ -3208,12 +3299,13 @@ private:
     if (!goal->get_goal()->plan_only && goal->get_goal()->plan_id.empty()) {saved_plans_.clear();}
     beginTask(goal, "pick");
     ScopeExit release([this]() {releaseOperation();});
-    const FeedbackFunction feedback = detectionAwareFeedback([goal](
+    const FeedbackFunction feedback = detectionAwareFeedback([this, goal](
       const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
         auto message = std::make_shared<Pick::Feedback>();
         message->stage = stage;
         message->progress = progress;
         message->box_pose = pose;
+        message->table_profile_id = active_table_profile_id_;
         goal->publish_feedback(message);
       });
     auto saved_scope = beginSavedRequest("pick", goal->get_goal()->plan_only);
@@ -3221,9 +3313,13 @@ private:
     try {
       const CancelFunction canceled = [this, goal]() {return goal->is_canceling() ||
         reset_coordinator_.resetRequested() || shutting_down_.load() || !rclcpp::ok();};
-      if (!goal->get_goal()->plan_id.empty()) {
+      std::string table_error;
+      if (goal->get_goal()->plan_id.empty() &&
+        !activateTableProfile(goal->get_goal()->table_profile_id, table_error))
+      {task = outcome(false, kInvalidGoal, table_error);}
+      else if (!goal->get_goal()->plan_id.empty()) {
         task = executeSavedPlan("pick", goal->get_goal()->plan_id,
-          goal->get_goal()->plan_only, feedback, canceled);
+          goal->get_goal()->plan_only, feedback, canceled, goal->get_goal()->table_profile_id);
       } else {
         task = runPick(
           goal->get_goal()->plan_only, goal->get_goal()->instance_id, feedback,
@@ -3241,7 +3337,7 @@ private:
         false, goal->get_goal()->plan_only ? kSafetyAbort : kRecoveryRequired,
         "Pick failed with exception: " + std::string(exception.what()));
     }
-    clearSceneAfterEmptyOperation(task);
+    if (task.code != kInvalidGoal) {clearSceneAfterEmptyOperation(task);}
     finishSavedRequest(task, goal->get_goal()->plan_only);
     phase_controller_.finish(task.success ? "completed" : goal->is_canceling() ? "canceled" : "failed",
       task.success ? "" : task.message);
@@ -3256,12 +3352,13 @@ private:
     if (!goal->get_goal()->plan_only && goal->get_goal()->plan_id.empty()) {saved_plans_.clear();}
     beginTask(goal, "place");
     ScopeExit release([this]() {releaseOperation();});
-    const FeedbackFunction feedback = detectionAwareFeedback([goal](
+    const FeedbackFunction feedback = detectionAwareFeedback([this, goal](
       const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
         auto message = std::make_shared<Place::Feedback>();
         message->stage = stage;
         message->progress = progress;
         message->box_pose = pose;
+        message->table_profile_id = active_table_profile_id_;
         goal->publish_feedback(message);
       });
     auto saved_scope = beginSavedRequest("place", goal->get_goal()->plan_only);
@@ -3269,9 +3366,13 @@ private:
     try {
       const CancelFunction canceled = [this, goal]() {return goal->is_canceling() ||
         reset_coordinator_.resetRequested() || shutting_down_.load() || !rclcpp::ok();};
-      if (!goal->get_goal()->plan_id.empty()) {
+      std::string table_error;
+      if (goal->get_goal()->plan_id.empty() &&
+        !activateTableProfile(goal->get_goal()->table_profile_id, table_error))
+      {task = outcome(false, kInvalidGoal, table_error);}
+      else if (!goal->get_goal()->plan_id.empty()) {
         task = executeSavedPlan("place", goal->get_goal()->plan_id,
-          goal->get_goal()->plan_only, feedback, canceled);
+          goal->get_goal()->plan_only, feedback, canceled, goal->get_goal()->table_profile_id);
       } else {
         task = runPlace(
           goal->get_goal()->place_pose, goal->get_goal()->plan_only, feedback,
@@ -3285,7 +3386,7 @@ private:
         false, kRecoveryRequired, "Place failed with exception: " + std::string(exception.what()),
         held_pose_);
     }
-    clearSceneAfterEmptyOperation(task);
+    if (task.code != kInvalidGoal) {clearSceneAfterEmptyOperation(task);}
     finishSavedRequest(task, goal->get_goal()->plan_only);
     phase_controller_.finish(task.success ? "completed" : goal->is_canceling() ? "canceled" : "failed",
       task.success ? "" : task.message);
@@ -3345,24 +3446,29 @@ private:
     if (!goal->get_goal()->plan_only && goal->get_goal()->plan_id.empty()) {saved_plans_.clear();}
     beginTask(goal, "pick_place");
     ScopeExit release([this]() {releaseOperation();});
-    const auto feedback = detectionAwareFeedback([goal](
+    const auto feedback = detectionAwareFeedback([this, goal](
         const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
         auto message = std::make_shared<PickPlace::Feedback>();
         message->stage = stage;
         message->progress = progress;
         message->box_pose = pose;
+        message->table_profile_id = active_table_profile_id_;
         goal->publish_feedback(message);
       });
-    feedback("checking_detections", 0.0F, geometry_msgs::msg::PoseStamped());
+    auto table_snapshot_scope = freezeDetectionScene();
     auto saved_scope = beginSavedRequest("pick_place", goal->get_goal()->plan_only);
     TaskOutcome task;
     const CancelFunction canceled =
       [this, goal]() {return goal->is_canceling() || reset_coordinator_.resetRequested() ||
           shutting_down_.load() || !rclcpp::ok();};
     try {
-      if (!goal->get_goal()->plan_id.empty()) {
+      std::string table_error;
+      if (goal->get_goal()->plan_id.empty() &&
+        !activateTableProfile(goal->get_goal()->table_profile_id, table_error))
+      {task = outcome(false, kInvalidGoal, table_error);}
+      else if (!goal->get_goal()->plan_id.empty()) {
         task = executeSavedPlan("pick_place", goal->get_goal()->plan_id,
-          goal->get_goal()->plan_only, feedback, canceled);
+          goal->get_goal()->plan_only, feedback, canceled, goal->get_goal()->table_profile_id);
       } else {
         geometry_msgs::msg::PoseStamped place_pose;
         std::string place_error;
@@ -3385,23 +3491,25 @@ private:
               return task.success;
             });
         } else {
-          const FeedbackFunction pick_feedback = detectionAwareFeedback([goal](
+          const FeedbackFunction pick_feedback = detectionAwareFeedback([this, goal](
             const std::string & stage, float progress, const geometry_msgs::msg::PoseStamped & pose) {
               auto message = std::make_shared<PickPlace::Feedback>();
               message->stage = "pick/" + stage;
               message->progress = progress * 0.5F;
               message->box_pose = pose;
+              message->table_profile_id = active_table_profile_id_;
               goal->publish_feedback(message);
             });
           task = runPick(false, goal->get_goal()->instance_id, pick_feedback, canceled);
           if (task.success) {
-            const FeedbackFunction place_feedback = detectionAwareFeedback([goal](
+            const FeedbackFunction place_feedback = detectionAwareFeedback([this, goal](
               const std::string & stage, float progress,
               const geometry_msgs::msg::PoseStamped & pose) {
                 auto message = std::make_shared<PickPlace::Feedback>();
                 message->stage = "place/" + stage;
                 message->progress = 0.5F + progress * 0.5F;
                 message->box_pose = pose;
+                message->table_profile_id = active_table_profile_id_;
                 goal->publish_feedback(message);
               });
             task = runPlace(goal->get_goal()->place_pose, false, place_feedback, canceled);
@@ -3422,7 +3530,8 @@ private:
         false, goal->get_goal()->plan_only ? kSafetyAbort : kRecoveryRequired,
         "PickPlace failed with exception: " + std::string(exception.what()), held_pose_);
     }
-    clearSceneAfterEmptyOperation(task);
+    table_snapshot_scope.run();
+    if (task.code != kInvalidGoal) {clearSceneAfterEmptyOperation(task);}
     finishSavedRequest(task, goal->get_goal()->plan_only);
     phase_controller_.finish(task.success ? "completed" : goal->is_canceling() ? "canceled" : "failed",
       task.success ? "" : task.message);
@@ -3439,6 +3548,7 @@ private:
   uint64_t saved_plan_serial_{0};
   LocomanipulationPostureController posture_controller_;
   BoxProfileRegistry profiles_;
+  TableProfileRegistry table_profiles_;
   std::string box_id_prefix_;
   std::string active_box_instance_id_;
   std::string active_profile_id_;
@@ -3451,7 +3561,10 @@ private:
   // releasing the reservation so the next action cannot receive old feedback.
   std::function<void()> detection_wait_feedback_;
   std::function<void()> detection_resume_feedback_;
-  std::unique_ptr<TableTagPoseTracker> table_tag_pose_tracker_;
+  TableTagPoseTracker * table_tag_pose_tracker_{nullptr};
+  std::map<std::string, std::unique_ptr<TableTagPoseTracker>> table_trackers_;
+  std::string active_table_profile_id_;
+  std::map<std::string, Eigen::Isometry3d> detection_table_poses_;
   Eigen::Isometry3d held_box_to_left_contact_{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d held_box_to_right_contact_{Eigen::Isometry3d::Identity()};
   bool held_geometry_valid_{false};

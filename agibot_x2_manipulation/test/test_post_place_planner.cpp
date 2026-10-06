@@ -1103,6 +1103,45 @@ TEST_F(ReturnSearchTest, ResetSceneClearsManagedDetectionsAndPreservesExternalOb
   EXPECT_TRUE(scene->getCurrentState().hasAttachedBody("placed_box_tag_0"));
 }
 
+TEST_F(ReturnSearchTest, MultipleTablesAreRetainedAndClearedWithoutRemovingExternalObjects)
+{
+  auto scene = std::make_shared<planning_scene::PlanningScene>(model());
+  obstacle(scene, -0.5);
+  moveit_msgs::msg::CollisionObject external;
+  ASSERT_TRUE(scene->getCollisionObjectMsg(external, "work_table"));
+  external.id = "external_obstacle";
+  external.operation = moveit_msgs::msg::CollisionObject::ADD;
+  ASSERT_TRUE(scene->processCollisionObjectMsg(external));
+  DetectionSceneSnapshot observations;
+  observations.table = SceneBox{"work_table", {0.6, 0.4, 0.6}, Eigen::Isometry3d::Identity()};
+  auto second_pose = Eigen::Isometry3d::Identity();
+  second_pose.translation().x() = 1.0;
+  observations.tables.push_back({"second_work_table", {0.8, 0.5, 0.7}, second_pose});
+  const std::vector<std::string> table_ids{"work_table", "second_work_table"};
+  moveit_msgs::msg::PlanningScene diff;
+  std::string error;
+  ASSERT_TRUE(buildDetectionSceneDiff(scene, "placed_box", "work_table", "base_link",
+    observations, {}, false, diff, error, table_ids)) << error;
+  scene->setPlanningSceneDiffMsg(diff);
+  EXPECT_TRUE(scene->getWorld()->hasObject("work_table"));
+  EXPECT_TRUE(scene->getWorld()->hasObject("second_work_table"));
+  EXPECT_TRUE(scene->getWorld()->hasObject("external_obstacle"));
+  // Switching the selected table must still remove all absent catalog tables.
+  ASSERT_TRUE(buildDetectionSceneDiff(scene, "placed_box", "second_work_table", "base_link",
+    {}, {}, false, diff, error, table_ids)) << error;
+  scene->setPlanningSceneDiffMsg(diff);
+  EXPECT_FALSE(scene->getWorld()->hasObject("work_table"));
+  EXPECT_FALSE(scene->getWorld()->hasObject("second_work_table"));
+  EXPECT_TRUE(scene->getWorld()->hasObject("external_obstacle"));
+  ASSERT_TRUE(buildDetectionSceneDiff(scene, "placed_box", "work_table", "base_link",
+    observations, {}, false, diff, error, table_ids)) << error;
+  scene->setPlanningSceneDiffMsg(diff);
+  ASSERT_TRUE(buildResetSceneDiff(scene, "placed_box", "work_table", diff, error, table_ids));
+  scene->setPlanningSceneDiffMsg(diff);
+  EXPECT_FALSE(scene->getWorld()->hasObject("second_work_table"));
+  EXPECT_TRUE(scene->getWorld()->hasObject("external_obstacle"));
+}
+
 TEST_F(ReturnSearchTest, SharedDetectionUpdateProtectsTaskAndRetainsFreshObstacles)
 {
   auto scene = std::make_shared<planning_scene::PlanningScene>(model());

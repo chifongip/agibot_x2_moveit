@@ -131,6 +131,7 @@ def generate_launch_description():
     planning_log_file = LaunchConfiguration("planning_log_file")
     planning_log_directory = LaunchConfiguration("planning_log_directory")
     box_profiles_file = LaunchConfiguration("box_profiles_file")
+    table_profiles_file = LaunchConfiguration("table_profiles_file")
 
     config_share = get_package_share_directory("agibot_x2_moveit_config")
     manipulation_share = get_package_share_directory("agibot_x2_manipulation")
@@ -165,6 +166,11 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "table_profiles_file",
+                default_value=os.path.join(manipulation_share, "config", "table_profiles.yaml"),
+                description="Immutable physical table calibration catalog",
+            ),
             DeclareLaunchArgument(
                 "box_profiles_file",
                 default_value=default_box_profiles_file,
@@ -523,6 +529,7 @@ def generate_launch_description():
                     # the same ROS parameter scope and take precedence.
                     server_params,
                     box_profiles_file,
+                    table_profiles_file,
                     {
                         "perception_3d_source": perception_3d_source,
                         "allow_execution": ParameterValue(

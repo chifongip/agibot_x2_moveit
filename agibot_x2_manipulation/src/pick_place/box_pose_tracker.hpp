@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #include "agibot_x2_manipulation/box_geometry.hpp"
 
 #include <agibot_x2_manipulation_msgs/msg/box_state_array.hpp>
@@ -138,6 +140,7 @@ public:
 
 private:
   void onDetections(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message);
+  void processPendingDetections();
   void updateStablePose(
     const Eigen::Isometry3d & sample, const builtin_interfaces::msg::Time & stamp);
 
@@ -157,6 +160,14 @@ private:
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_sub_;
   StablePoseCallback stable_pose_callback_;
+  struct PendingDetection
+  {
+    builtin_interfaces::msg::Time stamp;
+    std::chrono::steady_clock::time_point deadline;
+  };
+  std::mutex pending_mutex_;
+  std::deque<PendingDetection> pending_detections_;
+  rclcpp::TimerBase::SharedPtr pending_timer_;
 };
 
 }  // namespace agibot_x2_manipulation

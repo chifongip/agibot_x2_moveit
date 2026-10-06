@@ -437,6 +437,43 @@ analysis. It never overwrites an existing output path.
 
 ## Table-tag placement calibration
 
+Named physical tables are configured through `table_profiles_file` (default:
+`config/table_profiles.yaml`). The reserved `default` profile retains the
+existing `table_*` calibration in `box_manipulation.yaml`; no tuned values are
+moved or replaced. Declare additional names in `table_profile_names`, choose
+`default_table_profile`, and supply all seven fields under
+`table_profiles.<name>`: `tag_id`, `tag_frame`, `tabletop_center` (three coordinates in meters),
+`dimensions` (length/depth/height in meters), `place_offset` (tag X/Z meters),
+`place_yaw` (radians), and `collision_id`. See the commented example in the
+catalog; replace illustrative geometry with measured calibration.
+
+Names contain ASCII letters, digits, or underscores. Each table must have a
+unique tag-ID/frame pair and collision object ID; IDs cannot overlap the managed
+box namespace. Profiles are immutable at startup, including legacy calibration
+parameters. Restart after editing the catalog; restart invalidates saved plans.
+Perception thresholds, detection topic, and collision/placement enable switches
+remain shared. Configure every new tag's ID, frame, and measured marker size in
+the shared AprilTag detector; a table profile does not configure a detector.
+
+`Pick`, `Place`, and `PickPlace` accept `table_profile_id` and report the resolved
+name in feedback and results. Empty selection uses the configured default;
+unknown names return `INVALID_GOAL`. Empty selection with `plan_id` retains the
+saved table. Explicit saved-plan selection must match its stored profile and
+catalog version. Source box identity and held-box calibration remain independent
+of the destination table.
+
+Each table has independent perception stability. All freshly observed tables
+enter the action's collision snapshot with distinct IDs, even when another table
+is selected for placement. Snapshots and saved plans preserve those table
+observations; a newly detected table or changed observed table invalidates saved
+motion. An optional table observation in standalone Pick remains optional.
+Reset and carry cleanup remove all managed table objects while preserving
+external collision objects. `/table_markers` shows each table independently;
+the default retains its existing marker namespace.
+
+Validation commands, results, and the stock MoveIt shutdown limitation are
+documented in [table profile validation](test/table_profiles_validation.md).
+
 The default launch derives an empty action `place_pose` and a MoveIt table
 collision object from `tag9`. The tag is configured as a vertical table
 reference: +X points right, +Y points upward, and +Z points toward the robot,
@@ -449,21 +486,19 @@ tabletop_y + box_height / 2, tabletop_z + place_z]`. At zero yaw, box
 +X, +Y, and +Z align with tag -Z, -X, and +Y, preserving an upright placed box.
 
 Leave `place_pose` empty to use this stable tag-derived target. The server
-accepts only three strictly increasing tag-9 detections from
-`/front_center_rectify/detections`, each paired with the latest fresh `tag9`
-transform. This requires the robot, including every joint in the camera-to-base
-TF chain, and the table/tag to remain stationary during measurement.
-Consecutive samples must be no more than
-`table_tag_maximum_sample_gap` apart (2.5 seconds by default), and their
-derived placement poses must be within 5 mm and 3 degrees of their mean. A
-long detector outage therefore requires three new samples before placement can
-resume. Once accepted, that `base_link` target is frozen for the complete
-PickPlace operation. Set
-`table_tag_place_offset: [x, z]` to move the target from the calibrated table
-center in the table plane, and
-keep an explicit action `place_pose` when a caller must override the calibrated
-target. The server waits up to `table_tag_stability_timeout` (6 seconds by
-default) for a fresh stable table-tag pose before rejecting the goal.
+accepts strictly increasing detections for the selected table tag from
+`/front_center_rectify/detections`, paired with TF at the detection timestamp.
+A bounded queue retries delayed TF for up to 0.5 seconds (64 pending samples);
+zero, future, and stale detection timestamps are rejected. The checked-in YAML
+requires two stable samples; the code fallback is three. Consecutive samples
+must be no more than `table_tag_maximum_sample_gap` apart (2.5 seconds), with
+5 mm / 3 degree maximum spread. An outage resets the stability window.
+Once accepted, placement and collision geometry are frozen through the action,
+including the complete PickPlace operation and Continue/retries.
+`table_tag_place_offset: [x, z]` moves the target within the tabletop plane.
+An explicit action `place_pose` overrides placement while retaining table
+collision geometry. The checked-in stability timeout is 10 seconds (the code
+fallback is 6 seconds); `tag_reacquisition_timeout` controls action waits.
 The table-tag transform is independent of the pickup tag calibration. It
 always targets the physical box center, using the active profile's height and
 the table geometry. Therefore changing a pickup tag from top-mounted to
@@ -1538,11 +1573,6 @@ merely to pass an approach or reset.
 
 ## To do
 
-- Replace the current stationary-table `TimePointZero` lookup with a bounded
-  retry queue for the exact detection timestamp before supporting table-tag
-  measurements while the base or head moves. The retry must retain the source
-  timestamp, wait briefly for its matching TF, and reject it on timeout rather
-  than falling back to a transform from another image.
 - Extend Place beyond its current local X/Y/Z/yaw correction window with a
   runtime placement-region search. Given a detected support surface and an
   allowed placement region, it should sample and rank collision-free,

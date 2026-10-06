@@ -340,61 +340,56 @@ TableTagPoseTracker::TableTagPoseTracker(
   detections_sub_ = node_->create_subscription<apriltag_msgs::msg::AprilTagDetectionArray>(
     std::move(detections_topic), rclcpp::SensorDataQoS(),
     std::bind(&TableTagPoseTracker::onDetections, this, std::placeholders::_1));
+  pending_timer_ = node_->create_wall_timer(std::chrono::milliseconds(20),
+    std::bind(&TableTagPoseTracker::processPendingDetections, this));
 }
 
 void TableTagPoseTracker::onDetections(
   const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message)
 {
-  const auto detection = std::find_if(
-    message->detections.begin(), message->detections.end(),
+  const auto detection = std::find_if(message->detections.begin(), message->detections.end(),
     [this](const auto & item) {
-      return item.id == tag_id_ && item.decision_margin >= minimum_decision_margin_;
+      return item.id == tag_id_ && std::isfinite(item.decision_margin) &&
+             item.decision_margin >= minimum_decision_margin_;
     });
-  if (detection == message->detections.end()) {
-    return;
+  if (detection == message->detections.end()) {return;}
+  const rclcpp::Time stamp(message->header.stamp);
+  const double age = (node_->now() - stamp).seconds();
+  if (stamp.nanoseconds() == 0 || age < 0.0 || age > maximum_age_) {return;}
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    if (pending_detections_.size() >= 64) {pending_detections_.pop_front();}
+    pending_detections_.push_back({message->header.stamp,
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(500)});
   }
+  processPendingDetections();
+}
 
-  try {
-    const rclcpp::Time detection_stamp(message->header.stamp);
-    if (detection_stamp.nanoseconds() == 0) {
-      RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "Table tag detection rejected because its timestamp is zero");
-      return;
+void TableTagPoseTracker::processPendingDetections()
+{
+  std::lock_guard<std::mutex> lock(pending_mutex_);
+  while (!pending_detections_.empty()) {
+    const auto pending = pending_detections_.front();
+    const rclcpp::Time stamp(pending.stamp);
+    const double age = (node_->now() - stamp).seconds();
+    if (age < 0.0 || age > maximum_age_ ||
+      std::chrono::steady_clock::now() >= pending.deadline)
+    {
+      pending_detections_.pop_front();
+      continue;
     }
-    if ((node_->now() - detection_stamp).seconds() > maximum_age_) {
-      RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "Table tag detection rejected because it is older than %.3f s", maximum_age_);
+    try {
+      const auto transform = tf_buffer_.lookupTransform(planning_frame_, tag_frame_, stamp);
+      updateStablePose(tf2::transformToEigen(transform), pending.stamp);
+      pending_detections_.pop_front();
+    } catch (const tf2::TransformException &) {
+      // Preserve sample order while waiting for detection-time TF on another topic.
       return;
+    } catch (const std::exception & error) {
+      pending_detections_.pop_front();
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+        "Table tag pose rejected: %s", error.what());
     }
-    // Tag detections and their TF are separate topics. During table-tag
-    // measurement the robot and table are stationary, so the latest fresh tag
-    // transform is equivalent to the detection-time transform.
-    const auto transform = tf_buffer_.lookupTransform(
-      planning_frame_, tag_frame_, tf2::TimePointZero);
-    const rclcpp::Time transform_stamp(transform.header.stamp);
-    if (transform_stamp.nanoseconds() == 0) {
-      RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "Table tag TF rejected because its timestamp is zero");
-      return;
-    }
-    if ((node_->now() - transform_stamp).seconds() > maximum_age_) {
-      RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "Table tag TF rejected because it is older than %.3f s", maximum_age_);
-      return;
-    }
-    updateStablePose(tf2::transformToEigen(transform), transform.header.stamp);
-  } catch (const tf2::TransformException & error) {
-    RCLCPP_WARN_THROTTLE(
-      node_->get_logger(), *node_->get_clock(), 2000,
-      "Table tag TF unavailable: %s", error.what());
-  } catch (const std::exception & error) {
-    RCLCPP_WARN_THROTTLE(
-      node_->get_logger(), *node_->get_clock(), 2000,
-      "Table tag pose rejected: %s", error.what());
   }
 }
 
@@ -460,6 +455,7 @@ bool TableTagPoseTracker::waitForStablePoseAfter(
       return false;
     }
     if (have_stable_pose_ && stable_generation_ > minimum_generation &&
+      (node_->now() - stable_pose_.header.stamp).seconds() >= 0.0 &&
       (node_->now() - stable_pose_.header.stamp).seconds() <= maximum_age_)
     {
       output = stable_pose_;

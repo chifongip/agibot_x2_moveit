@@ -31,7 +31,8 @@ workflow = load_fixture("snapshot_workflow_fixture", "test_dummy_workflow.launch
 
 @pytest.mark.launch_test
 def generate_test_description():
-    return moved.make_test_description(publish_table=False)
+    return moved.make_test_description(publish_table=False, table_profiles_file=
+        Path(__file__).parent / "config" / "table_profiles_simulation.yaml")
 
 
 class TestDetectionSnapshot(workflow.TestDummyWorkflow):
@@ -67,31 +68,32 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
                 transform = TransformStamped()
                 transform.header.frame_id = "base_link"
                 transform.header.stamp = stamp
-                transform.child_frame_id = "tag9"
-                transform.transform.translation.x = state["table_x"]
-                transform.transform.rotation.w = 1.0
-                broadcaster.sendTransform(transform)
-                detection = AprilTagDetection()
-                detection.id = 9
-                detection.family = "tag36h11"
-                detection.decision_margin = 100.0
                 array = AprilTagDetectionArray()
                 array.header.frame_id = "base_link"
                 array.header.stamp = stamp
-                array.detections = [detection]
+                for tag_id, x in [(9, state["table_x"]), (10, state["table_x"] + 2.0)]:
+                    transform.child_frame_id = f"tag{tag_id}"
+                    transform.transform.translation.x = x
+                    transform.transform.rotation.w = 1.0
+                    broadcaster.sendTransform(transform)
+                    detection = AprilTagDetection()
+                    detection.id = tag_id
+                    detection.family = "tag36h11"
+                    detection.decision_margin = 100.0
+                    array.detections.append(detection)
                 tags.publish(array)
 
         def status(message):
             if message.status != "running":
                 return
-            # These shifts pass freshness/movement checks. They must not rewrite
-            # the collision scene at later planning or execution checkpoints.
+            # A moved box starts a new box snapshot, while both tables retain
+            # their accepted geometry. Table jitter alone must not rewrite it.
             key = (message.action, message.phase)
             if key == ("pick", "prepare") and key not in shifted:
-                state.update(table_x=10.002, obstacle_x=2.004, target_x=0.332)
+                state.update(table_x=10.002, obstacle_x=2.2, target_x=0.332)
                 shifted.add(key)
             elif key == ("place", "perception") and key not in shifted:
-                state.update(table_x=10.004, obstacle_x=2.008)
+                state.update(table_x=10.004, obstacle_x=2.204)
                 shifted.add(key)
             if key in [("pick", "carry"), ("place", "to_prepare")] and key not in samples:
                 request = GetPlanningScene.Request()
@@ -128,8 +130,8 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
             self.send_goal(Place, "/place_box", place, 120.0)
             self.assertEqual(len(shifted), 2)
             for key, table_x, obstacle_x in [
-                    (("pick", "carry"), 10.0, 2.0),
-                    (("place", "to_prepare"), 10.002, 2.004)]:
+                    (("pick", "carry"), 10.0, 2.2),
+                    (("place", "to_prepare"), 10.002, 2.2)]:
                 self.assertIn(key, samples)
                 future = samples[key]
                 rclpy.spin_until_future_complete(self.node, future, timeout_sec=5.0)
@@ -139,6 +141,8 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
                 # transform in CollisionObject.pose and a local primitive pose.
                 self.assertAlmostEqual(
                     objects["work_table"].pose.position.x, table_x, places=6)
+                self.assertAlmostEqual(
+                    objects["second_work_table"].pose.position.x, table_x + 2.1, places=6)
                 self.assertAlmostEqual(
                     objects["grasp_box_tag_1"].pose.position.x, obstacle_x, places=6)
         finally:

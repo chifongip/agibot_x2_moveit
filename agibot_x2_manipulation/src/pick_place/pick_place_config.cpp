@@ -17,10 +17,19 @@ namespace
 template<typename T>
 T parameter(const rclcpp::Node::SharedPtr & node, const std::string & name, const T & default_value)
 {
+  rcl_interfaces::msg::ParameterDescriptor descriptor;
+  descriptor.read_only = name == "table_tag_id" || name == "table_tag_frame" ||
+    name == "table_tag_to_tabletop_center" || name == "table_dimensions" ||
+    name == "table_tag_place_offset" || name == "table_tag_to_box_yaw" ||
+    name == "table_collision_id";
   if (node->has_parameter(name)) {
-    return node->get_parameter(name).get_value<T>();
+    const auto value = node->get_parameter(name).get_value<T>();
+    const auto existing = node->describe_parameter(name);
+    if (!descriptor.read_only || existing.read_only || !existing.dynamic_typing) {return value;}
+    node->undeclare_parameter(name);
+    return node->declare_parameter<T>(name, value, descriptor);
   }
-  return node->declare_parameter<T>(name, default_value);
+  return node->declare_parameter<T>(name, default_value, descriptor);
 }
 
 std::optional<double> optional_pose_tolerance(
