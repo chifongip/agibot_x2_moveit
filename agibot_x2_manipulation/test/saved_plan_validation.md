@@ -33,6 +33,37 @@ physical manipulation changes the context.
 
 ## Results
 
+### Local Cartesian overshoot repair (2026-10-06)
+
+Cartesian planning retains its normal timing when validation succeeds. When
+controller interpolation violates position bounds, repair first reduces only
+affected endpoint derivatives at the original timestamps. Four bounded passes
+use original-derivative factors 0.75, 0.5, 0.25, and zero, rechecking neighboring
+intervals and exact controller position/velocity/acceleration extrema.
+If necessary, a further four passes introduce rest-to-rest motion and additional
+time only in affected intervals. Untouched relative durations are retained
+through serialization. The original all-waypoint stopping repair remains the
+last fallback, constructed from an untouched copy of the planned trajectory.
+Every candidate retains IK positions and must pass complete scene, Cartesian,
+and minimum-margin validation before replacing the path. Cancellation and the
+existing deadline apply throughout. Logs report strategy, duration change,
+affected joints/intervals, and the original/fallback failure reasons.
+
+Synthetic tests explicitly exercise original-timing repair, local extension,
+full stopping for Cartesian accuracy, collision rejection, minimum margins,
+cancellation, and unchanged input after failed repair. Saved-plan controller
+polynomial analysis uses the same extracted helper without changing alignment
+behavior. No parameters, joint limits, geometry, or modes were changed.
+
+Validation passed: 12 Cartesian tests, all 20 saved-plan tests, the five focused
+CTest targets, and 11 simulation-harness Python tests. The six captured
+`pose_to_pose` workflows and grey-box combined `closed_chain` workflow passed
+with injected saved-start offsets. All 48 main-motion steps retained saved
+timing scale 1.0 and performed zero new planner searches. These captures did
+not trigger Cartesian overshoot repair; synthetic regressions explicitly cover
+that behavior. Artifacts: `cartesian_local_repair_01` and
+`cartesian_local_repair_closed_chain_01`.
+
 ### Separate stationary alignment (2026-10-06)
 
 All six captured `pose_to_pose` workflows passed with `--saved-plan` and

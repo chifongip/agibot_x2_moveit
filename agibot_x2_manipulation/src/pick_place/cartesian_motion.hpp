@@ -26,7 +26,26 @@ bool validateCartesianTrajectory(
 // Quintic segments with zero endpoint velocity/acceleration stay between joint
 // waypoint positions. Used only when normal timing overshoots position bounds.
 bool retimeCartesianWithoutOvershoot(
-  robot_trajectory::RobotTrajectory & path, const PickPlaceConfig & config, std::string & error);
+  robot_trajectory::RobotTrajectory & path, const PickPlaceConfig & config, std::string & error,
+  const CancelFunction & interrupted = {});
+
+struct CartesianRepairInfo
+{
+  std::string strategy;
+  std::string fallback_reason;
+  std::vector<std::string> joints;
+  std::vector<std::size_t> intervals;
+  double original_duration{0.0};
+  double final_duration{0.0};
+};
+
+// Transactional repair: preserve positions and try original timing first.
+bool repairCartesianTrajectory(
+  robot_trajectory::RobotTrajectory & path,
+  const planning_scene::PlanningSceneConstPtr & scene, const PickPlaceConfig & config,
+  const HandPosePair & from, const HandPosePair & to, std::string & error,
+  const CancelFunction & interrupted, double minimum_joint_margin = 0.0,
+  CartesianRepairInfo * info = nullptr);
 
 bool planCartesianMotion(
   const moveit::core::RobotState & start, const HandPosePair & target,

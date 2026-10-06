@@ -98,6 +98,7 @@ target_include_directories(reset_coordinator PUBLIC
 add_library(pick_place_core
   src/pick_place/attachment_controller.cpp
   src/pick_place/box_pose_tracker.cpp
+  src/pick_place/controller_spline.cpp
   src/pick_place/cartesian_motion.cpp
   src/pick_place/saved_plan.cpp
   src/pick_place/dual_arm_motion_planner.cpp
