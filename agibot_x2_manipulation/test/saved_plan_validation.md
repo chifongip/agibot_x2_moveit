@@ -19,21 +19,57 @@ existing unlock and confirmation controls.
 The saved detection geometry remains fixed. Execution checks fresh observations
 against that snapshot, measured joint feedback, current external obstacles,
 attachment geometry, bounds, controller interpolation, and applicable path
-constraints. For a stationary saved start, a small feedback discrepancy adds a
-separate rest-to-rest alignment goal. After fresh settled feedback passes the
-existing start, scene, and attachment checks, the main trajectory executes with
-its original timing when enabled model motion limits permit it. If those limits
-require slowdown, only the main trajectory is uniformly retimed by its required
-factor and revalidated. A nonzero saved starting acceleration is retained in the
-main goal, subject to that timing scale; alignment finishes with zero
-acceleration. No jerk-continuity requirement is introduced between these
-stationary controller goals. Nonzero starting velocities retain the continuous
-connector, with uniform timing slowdown as the last fallback. Validation failures
-pause; Continue revalidates the unfinished segment. Physical dispatch failures
-require recovery rather than replay. IDs are single-use and invalidated when
-physical manipulation changes the context.
+constraints. Saved execution accepts start discrepancies within
+`execution_joint_tolerance` without alignment, waypoint modification, or
+additional transition validation. This accepts the configured initial command
+error per joint. Beyond-tolerance discrepancies pause before dispatch. Existing
+current-state collision, bounds, Cartesian/closed-chain, attachment, and strict
+saved-path validation remain active. Original timing and derivatives are
+preserved unless enabled model motion limits require uniform retiming of the
+main trajectory, followed by revalidation. Validation failures pause; Continue
+revalidates the unfinished segment. Physical dispatch failures require recovery
+rather than replay. IDs are single-use and invalidated when physical
+manipulation changes the context.
 
 ## Results
+
+### Direct acceptance of configured start tolerance (2026-10-06)
+
+Saved execution uses `execution_joint_tolerance` directly to accept measured
+start discrepancies. Accepted motion keeps every saved waypoint, including its
+first point and starting derivatives. It adds no alignment, modifies no first
+interval, and runs no additional transition checks. Motion-limit retiming is
+independent of start mismatch and remains active. The immutable stored plan,
+ordinary execution modes, numeric calculation thresholds, measured-state
+bounds allowance, and configured parameter values are preserved.
+
+Regression coverage verifies configurable tolerance boundaries, complete saved
+message preservation, no-motion and position-only trajectories, nonstationary
+saved derivatives, existing execution pose checks, strict saved-path checks,
+current collision rejection, enabled motion limits, and disabled-limit
+compatibility. A short first interval that would fail if rebased still executes
+the unchanged saved trajectory when the measured error is accepted.
+
+The manipulation build and all six focused CTest targets passed, including
+28 saved-plan tests and 12 Cartesian tests; 11 simulation-harness Python tests
+also passed. All six captured `pose_to_pose` workflows and the grey-box combined
+`closed_chain` workflow passed with injected start offsets. Nine saved
+executions completed, 18 invalid/consumed ID requests correctly rejected, and
+all 48 main-motion steps reported zero alignment time and zero planner searches.
+Only `within_tolerance` and necessary `retimed_main` strategies were used.
+Artifacts: `accepted_saved_start_01`, `accepted_saved_start_closed_chain_01`,
+and `accepted_saved_start_place_retry_01`. The initial grey-box Place launch
+failed because a concurrent build temporarily removed the executable; its
+isolated rerun after the build completed passed. No tuned parameters changed.
+
+Built with `colcon build --symlink-install --packages-select
+agibot_x2_manipulation --event-handlers console_direct+`; test commands match
+the focused verification below. Simulation uses
+`time_saved_simulation.py --saved-plan --exercise-start-alignment` with all
+captures and `--workflow both --mode pose_to_pose --domain-id 169 --port-base
+25011`, and an unchanged grey-box Pick capture with `--workflow combined
+--mode closed_chain --domain-id 170 --port-base 25111`. The standalone grey-box
+Place rerun used domain 171 and port base 25211 with the same saved-plan flags.
 
 ### Pre-push speed review (2026-10-06)
 

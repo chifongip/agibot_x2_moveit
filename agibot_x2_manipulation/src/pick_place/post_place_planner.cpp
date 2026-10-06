@@ -429,21 +429,19 @@ static bool validateReusableTrajectory(
   }
   robot_trajectory::RobotTrajectory trajectory(current.getRobotModel(), config.planning_group);
   trajectory.setRobotTrajectoryMsg(current, message);
-  const bool rebase = std::any_of(names.begin(), names.end(), [&](const std::string & name) {
-      return std::abs(current.getVariablePosition(name) -
-             trajectory.getFirstWayPoint().getVariablePosition(name)) > 1e-6;
-    });
-  if (rebase) {
-    // Do not execute a spline starting at the old planned positions. Replace
-    // its start with measured feedback and regenerate timing before validating
-    // the full controller interpolation, bounds, and collisions.
-    *trajectory.getFirstWayPointPtr() = current;
-    trajectory_processing::TimeOptimalTrajectoryGeneration timing(config.return_path_tolerance);
-    if (!timing.computeTimeStamps(trajectory, config.velocity_scaling, config.acceleration_scaling)) {
-      error = "cached Pick trajectory retiming failed";
-      return false;
-    }
+  if (!current.satisfiesBounds(group, config.place_start_state_bounds_tolerance)) {
+    error = "measured cached trajectory start exceeds configured bounds tolerance";
+    return false;
   }
+  if (carry && config.minimum_carry_joint_margin > 0.0 &&
+    current.getMinDistanceToPositionBounds(group).first + 1e-12 < config.minimum_carry_joint_margin)
+  {
+    error = "measured cached carry start violates minimum joint margin";
+    return false;
+  }
+  // Feedback already passed execution_joint_tolerance. Keep the validated
+  // planned spline and timing, just as saved-plan execution does. Numerical
+  // differences in encoder feedback must not force whole-path retiming.
   const auto contact = carry ? graspContactScene(scene, config) : retreatContactScene(scene, config);
   if (!validateTimedReturnTrajectory(trajectory, contact, config.return_validation_joint_step,
       error, interrupted, true, carry ? config.minimum_carry_joint_margin : 0.0,
@@ -469,7 +467,6 @@ static bool validateReusableTrajectory(
       return false;
     }
   }
-  if (rebase) {trajectory.getRobotTrajectoryMsg(message);}
   error.clear();
   return true;
 }

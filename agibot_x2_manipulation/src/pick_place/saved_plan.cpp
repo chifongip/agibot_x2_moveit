@@ -314,31 +314,10 @@ bool prepareSavedMotion(
       if (remaining_scale > 1.0) {failure = "retimed main trajectory exceeds motion limits"; return false;}
       return validate_saved_path(message, failure);
     };
-  if (distance <= 1e-6 && preparation != SavedMotionPreparation::VERIFY_START) {
-    double scale;
-    if (!retime_main(output, scale, error)) {return false;}
-    if (alignment_info && scale > 1.0) {
-      alignment_info->timing_scale = scale;
-      alignment_info->strategy = "retimed_main";
-    }
+  // Keep the legacy connector helper's numerical equality shortcut.
+  if (preparation == SavedMotionPreparation::CONTINUOUS && distance <= 1e-6) {
     return true;
   }
-  for (const auto & name : joints.joint_names) {
-    double velocity, acceleration;
-    if (!motionLimits(*current.getRobotModel(), name, config, velocity, acceleration, error)) {return false;}
-  }
-  if (joints.points.front().velocities.size() != names.size() ||
-    joints.points.front().accelerations.size() != names.size())
-  {error = "alignment requires saved start velocity and acceleration"; return false;}
-  if (rclcpp::Duration(joints.points.front().time_from_start).nanoseconds() != 0)
-  {error = "alignment requires a zero-time saved start"; return false;}
-  auto prefix = joints.points.front();
-  for (size_t i = 0; i < joints.joint_names.size(); ++i) {
-    prefix.positions[i] = current.getVariablePosition(joints.joint_names[i]);
-  }
-  std::fill(prefix.velocities.begin(), prefix.velocities.end(), 0.0);
-  std::fill(prefix.accelerations.begin(), prefix.accelerations.end(), 0.0);
-  prefix.time_from_start = rclcpp::Duration::from_seconds(0.0);
   if (!current.satisfiesBounds(group, config.place_start_state_bounds_tolerance)) {
     error = "measured alignment start exceeds configured bounds tolerance"; return false;
   }
@@ -364,69 +343,44 @@ bool prepareSavedMotion(
       }
       return true;
     };
-  if (preparation == SavedMotionPreparation::VERIFY_START) {
+  if (preparation != SavedMotionPreparation::CONTINUOUS) {
     if (distance > config.execution_joint_tolerance) {
-      error = "post-alignment start exceeds execution joint tolerance"; return false;
+      error = preparation == SavedMotionPreparation::VERIFY_START ?
+        "post-alignment start exceeds execution joint tolerance" :
+        "saved start exceeds execution joint tolerance";
+      return false;
     }
     if (!alignment_valid(current, error)) {return false;}
     if (validation_scene->isStateColliding(current, config.planning_group)) {
       error = "measured saved-motion start is in collision"; return false;
     }
+    // Accept the configured tracking error without changing any waypoint or
+    // constructing alignment. Slowdown depends only on saved motion limits.
+    double scale;
+    if (!retime_main(output, scale, error)) {return false;}
+    if (alignment_info) {
+      alignment_info->timing_scale = scale;
+      alignment_info->strategy = scale > 1.0 ? "retimed_main" : "within_tolerance";
+    }
     error.clear();
     return true;
   }
-  const bool stationary_start = std::all_of(joints.points.front().velocities.begin(),
-    joints.points.front().velocities.end(), [](double velocity) {return std::abs(velocity) <= 1e-9;});
-  auto separate_main = step.trajectory;
-  double separate_scale = 1.0;
-  bool separate_main_valid = main_timing_valid;
-  if (preparation == SavedMotionPreparation::SEPARATE && alignment_info && stationary_start && !main_timing_valid) {
-    std::string failure;
-    if (retime_main(separate_main, separate_scale, failure)) {separate_main_valid = true;}
-    else {alignment_info->fallback_reason += "; " + failure;}
+  for (const auto & name : joints.joint_names) {
+    double velocity, acceleration;
+    if (!motionLimits(*current.getRobotModel(), name, config, velocity, acceleration, error)) {return false;}
   }
-  if (preparation == SavedMotionPreparation::SEPARATE && alignment_info && separate_main_valid && stationary_start)
-  {
-    auto target = joints.points.front();
-    std::fill(target.velocities.begin(), target.velocities.end(), 0.0);
-    std::fill(target.accelerations.begin(), target.accelerations.end(), 0.0);
-    double seconds = 1e-3;
-    for (size_t i = 0; i < joints.joint_names.size(); ++i) {
-      double velocity, acceleration;
-      if (!motionLimits(*current.getRobotModel(), joints.joint_names[i], config,
-          velocity, acceleration, error)) {return false;}
-      const double delta = std::abs(target.positions[i] - prefix.positions[i]);
-      seconds = std::max({seconds, 1.875 * delta / velocity,
-        std::sqrt((10.0 / std::sqrt(3.0)) * delta / acceleration)});
-    }
-    target.time_from_start = rclcpp::Duration::from_seconds(seconds * (1.0 + 1e-6));
-    auto connector = step.trajectory;
-    connector.joint_trajectory.points = {prefix, target};
-    double scale;
-    std::string failure;
-    if (!trajectoryTimingScale(connector, *current.getRobotModel(), config, scale, failure, canceled)) {
-      error = failure; return false;
-    }
-    robot_trajectory::RobotTrajectory alignment(current.getRobotModel(), config.planning_group);
-    alignment.setRobotTrajectoryMsg(current, connector);
-    if (scale <= 1.0 && validateTimedReturnTrajectory(alignment, validation_scene,
-        config.return_validation_joint_step, failure, canceled, false,
-        step.held ? config.minimum_carry_joint_margin : 0.0, alignment_valid, nullptr,
-        config.controller_spline_bounds_tolerance))
-    {
-      alignment_info->alignment = std::move(connector);
-      alignment_info->strategy = separate_scale > 1.0 ? "separate_retimed_main" : "separate";
-      alignment_info->timing_scale = separate_scale;
-      output = std::move(separate_main);
-      alignment_seconds = rclcpp::Duration(target.time_from_start).seconds();
-      error.clear();
-      return true;
-    }
-    alignment_info->fallback_reason = failure.empty() ? "separate alignment exceeds motion limits" : failure;
-  } else if (preparation == SavedMotionPreparation::SEPARATE && alignment_info && !stationary_start) {
-    if (!alignment_info->fallback_reason.empty()) {alignment_info->fallback_reason += "; ";}
-    alignment_info->fallback_reason += "saved trajectory starts with nonzero velocity";
+  if (joints.points.front().velocities.size() != names.size() ||
+    joints.points.front().accelerations.size() != names.size())
+  {error = "alignment requires saved start velocity and acceleration"; return false;}
+  if (rclcpp::Duration(joints.points.front().time_from_start).nanoseconds() != 0)
+  {error = "alignment requires a zero-time saved start"; return false;}
+  auto prefix = joints.points.front();
+  for (size_t i = 0; i < joints.joint_names.size(); ++i) {
+    prefix.positions[i] = current.getVariablePosition(joints.joint_names[i]);
   }
+  std::fill(prefix.velocities.begin(), prefix.velocities.end(), 0.0);
+  std::fill(prefix.accelerations.begin(), prefix.accelerations.end(), 0.0);
+  prefix.time_from_start = rclcpp::Duration::from_seconds(0.0);
   std::string timing_failure;
   // Exact polynomial derivative bounds for a stationary-to-saved-start
   // connector. Only prepend a new sample; retain every original sample verbatim.

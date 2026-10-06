@@ -2123,20 +2123,26 @@ private:
     const auto & preferred_target_pose = selectedCarryPose(target);
     const Eigen::Isometry3d & target_pose = preferred_target_pose ?
       *preferred_target_pose : nominal_target_pose;
-    const Eigen::Quaterniond from_rotation(from_pose.linear());
-    const Eigen::Quaterniond target_rotation(target_pose.linear());
-    const double angular_error = 2.0 * std::acos(
-      std::clamp(std::abs(from_rotation.dot(target_rotation)), 0.0, 1.0));
     const auto target_message = stampedPose(target_pose);
-    if ((from_pose.translation() - target_pose.translation()).norm() < 1e-4 &&
-      angular_error < 1e-3)
+    auto current = move_group_.getCurrentState(config_.reset_state_timeout);
+    if (!current) {return outcome(false, kPlanningFailed, "carry state unavailable");}
+    current->update();
+    // Virtual planning preserves small requested motions. Physical feedback
+    // uses the same accuracy as held-object and attachment verification, and
+    // both TCPs must have reached the requested carry pose.
+    const bool already_reached = plan_only ?
+      endpointReached(from_pose, from_pose, target_pose, target_pose) :
+      endpointReached(current->getGlobalLinkTransform(config_.left_tcp),
+        current->getGlobalLinkTransform(config_.right_tcp),
+        target_pose * held_box_to_left_contact_, target_pose * held_box_to_right_contact_,
+        config_.execution_position_limit(config_.closed_chain_contact_position_error),
+        config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error));
+    if (already_reached)
     {
       if (plan_only && building_plan_) {
         capturePlanContext();
         building_plan_->carry_pose = target_pose;
         building_plan_->carry_target = target;
-        auto current = move_group_.getCurrentState(config_.reset_state_timeout);
-        if (!current) {return outcome(false, kPlanningFailed, "carry state unavailable");}
         robot_trajectory::RobotTrajectory path(current->getRobotModel(), config_.planning_group);
         path.addSuffixWayPoint(*current, 0.0);
         moveit_msgs::msg::RobotTrajectory message;

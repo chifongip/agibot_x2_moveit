@@ -210,6 +210,7 @@ TEST(PostPlacePlanner, CachedCarryChecksActualAttachmentCollisionMarginAndAccura
   trajectory.addSuffixWayPoint(end, 1.0);
   moveit_msgs::msg::RobotTrajectory message;
   trajectory.getRobotTrajectoryMsg(message);
+  const auto original = message;
   const Eigen::Isometry3d contact = Eigen::Isometry3d::Identity();
   const Eigen::Isometry3d target = end.getGlobalLinkTransform("hand");
   std::string error;
@@ -222,7 +223,7 @@ TEST(PostPlacePlanner, CachedCarryChecksActualAttachmentCollisionMarginAndAccura
   measured.setVariablePosition("slide", -0.18);
   measured.update();
   ASSERT_TRUE(validate(measured, target)) << error;
-  EXPECT_NEAR(message.joint_trajectory.points.front().positions.front(), -0.18, 1e-9);
+  EXPECT_EQ(message, original);
   const auto saved = message;
   auto wrong_goal = target;
   wrong_goal.translation().x() += 0.02;
@@ -232,6 +233,14 @@ TEST(PostPlacePlanner, CachedCarryChecksActualAttachmentCollisionMarginAndAccura
   config.minimum_carry_joint_margin = 0.9;
   EXPECT_FALSE(validate(measured, target));
   EXPECT_NE(error.find("margin"), std::string::npos);
+  config.minimum_carry_joint_margin = 0.79;
+  auto near_limit = measured;
+  near_limit.setVariablePosition("slide", -0.24);
+  near_limit.update();
+  // A safe cached start cannot conceal a measured margin violation.
+  EXPECT_FALSE(validate(near_limit, target));
+  EXPECT_NE(error.find("measured cached carry start"), std::string::npos);
+  EXPECT_EQ(message, original);
   config.minimum_carry_joint_margin = 0.0;
   EXPECT_FALSE(validateReusableCarryTrajectory(message, planned, measured, scene, config,
       contact, contact, target, error, []() {return true;}));
@@ -380,7 +389,7 @@ TEST(PostPlacePlanner, CachedPickRequiresMatchingStartAndCompleteTrajectory)
   EXPECT_FALSE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
 }
 
-TEST(PostPlacePlanner, CachedPickRebasesMeasuredStartWithinExecutionTolerance)
+TEST(PostPlacePlanner, CachedPickPreservesTrajectoryWithinExecutionTolerance)
 {
   auto robot = model();
   auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
@@ -389,6 +398,7 @@ TEST(PostPlacePlanner, CachedPickRebasesMeasuredStartWithinExecutionTolerance)
   config.left_tcp = "hand";
   config.right_tcp = "hand";
   config.execution_joint_tolerance = 0.1;
+  config.place_start_state_bounds_tolerance = 0.02;
   config.velocity_scaling = 0.5;
   config.acceleration_scaling = 0.5;
   config.return_validation_joint_step = 0.01;
@@ -406,14 +416,18 @@ TEST(PostPlacePlanner, CachedPickRebasesMeasuredStartWithinExecutionTolerance)
   trajectory.addSuffixWayPoint(end, 1.0);
   moveit_msgs::msg::RobotTrajectory message;
   trajectory.getRobotTrajectoryMsg(message);
+  const auto original = message;
   std::string error;
   ASSERT_TRUE(validateReusablePickTrajectory(message, start, measured, scene, config,
       error, []() {return false;})) << error;
-  EXPECT_NEAR(message.joint_trajectory.points.front().positions.front(), -0.18, 1e-9);
-  EXPECT_NEAR(message.joint_trajectory.points.back().positions.front(), 0.2, 1e-9);
-  EXPECT_GT(message.joint_trajectory.points.back().time_from_start.sec +
-    message.joint_trajectory.points.back().time_from_start.nanosec * 1e-9, 0.0);
-  // Rebase must validate the updated controller path against new obstacles.
+  EXPECT_EQ(message, original);
+  // Even tiny feedback differences preserve all positions, derivatives and timing.
+  measured.setVariablePosition("slide", -0.2 + 2e-6);
+  measured.update();
+  ASSERT_TRUE(validateReusablePickTrajectory(message, start, measured, scene, config,
+      error, []() {return false;})) << error;
+  EXPECT_EQ(message, original);
+  // Reuse still validates the measured-to-planned edge against new obstacles.
   moveit_msgs::msg::CollisionObject obstacle;
   obstacle.id = "new_obstacle";
   obstacle.header.frame_id = "base_link";
@@ -440,12 +454,18 @@ TEST(PostPlacePlanner, CachedPickRebasesMeasuredStartWithinExecutionTolerance)
   EXPECT_FALSE(validateReusablePickTrajectory(message, start, measured, scene, config,
       error, []() {return false;}));
   EXPECT_EQ(message.joint_trajectory.points.front().positions, first);
-  // A rebased start outside position bounds must still fail validation.
+  // Encoder feedback uses the configured bounds allowance, not spline precision.
   config.execution_joint_tolerance = 2.0;
   measured.setVariablePosition("slide", -1.01);
   measured.update();
+  ASSERT_TRUE(validateReusablePickTrajectory(message, start, measured, scene, config,
+      error, []() {return false;})) << error;
+  EXPECT_EQ(message, original);
+  measured.setVariablePosition("slide", -1.021);
+  measured.update();
   EXPECT_FALSE(validateReusablePickTrajectory(message, start, measured, scene, config,
       error, []() {return false;}));
+  EXPECT_NE(error.find("configured bounds tolerance"), std::string::npos);
   EXPECT_EQ(message.joint_trajectory.points.front().positions, first);
 }
 

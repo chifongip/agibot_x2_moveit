@@ -57,7 +57,8 @@ bool validateSavedCheckpointState(
   const moveit::core::RobotState & measured, const planning_scene::PlanningScenePtr & scene,
   const PickPlaceConfig & config, std::string & error);
 
-// Separate alignment preserves the main trajectory. Verification never constructs motion.
+// Saved execution accepts configured start error without constructing motion.
+// CONTINUOUS retains legacy connectors; VERIFY_START never retimes the path.
 enum class SavedMotionPreparation {CONTINUOUS, SEPARATE, VERIFY_START};
 
 struct SavedAlignmentInfo

@@ -884,9 +884,9 @@ invalidates other saved plans. Ordinary physical manipulation, posture changes,
 reset, recovery, and profile reload invalidate saved plans. Restarting the server
 also clears them. `plan_only: true` with a nonempty ID is invalid.
 
-Saved execution performs no IK or OMPL search. A separate stationary alignment
-normally preserves the main trajectory timing; uniform slowdown remains a
-fallback when configured motion limits cannot otherwise be satisfied. The scene
+Saved execution performs no IK or OMPL search. It accepts measured start error
+within `execution_joint_tolerance` and preserves the saved trajectory; timing
+changes only when enabled model motion limits require slowdown. The scene
 monitor retains a parent scene so full MoveIt snapshots honor obstacle removals
 as well as additions when Continue refreshes the scene. Before every segment,
 it waits for settled feedback and checks the complete robot start, current scene,
@@ -896,46 +896,39 @@ missing detections, newly detected obstacles, or movement beyond tolerance block
 Pick/Place execution. Standalone MoveCarryPose skips detection verification and
 clears previous perception obstacles before checking the live collision scene,
 without restoring old saved obstacle geometry.
-A small measured-start discrepancy normally gets a checked, rest-to-rest alignment
-motion followed by the saved trajectory with unchanged positions, timestamps,
-velocities, and accelerations. This requires a stationary saved starting velocity
-and a main trajectory whose controller spline respects the explicitly enabled,
-scaled model velocity/acceleration limits. Disabled model limits do not become
-new limits on the main trajectory; newly constructed alignment motions retain
-the existing conservative timing defaults for unspecified limits. A nonzero saved
-starting acceleration is retained in the main goal rather than imposed on the
-alignment endpoint. Fresh settled feedback and the scene are revalidated before
-dispatching the main trajectory;
-a residual position error within execution tolerance does not trigger another
-alignment. If enabled model limits require it, only the main trajectory is
-uniformly stretched by the necessary factor, while alignment stays separate.
-The adjusted main trajectory is revalidated before dispatch; waypoint positions
-and spline geometry remain unchanged. Nonzero starting velocities retain a
-continuous connector. If a separate alignment is unavailable, execution tries
-four short connectors and uniformly slows the combined connector and segment,
-preserving its saved spline geometry. The stored plan is never modified.
-Fallback candidates are ordered by duration before geometric validation; the
-first valid candidate is executed without checking slower alternatives.
-Joint bounds,
-collision, Cartesian, and carrying constraints remain active. Motion-limit checks
-allow only a relative `1e-9` numerical rounding margin.
-Feedback slightly outside joint limits may align
-inward within the existing `place_start_state_bounds_tolerance`, never farther
-outside the limit. No limits or tuned parameters are changed.
+A measured-start discrepancy within `execution_joint_tolerance` executes the
+saved trajectory directly, keeping its first waypoint and derivatives unchanged.
+No alignment or additional measured-to-saved transition is constructed or
+validated. This explicitly accepts a small initial command discrepancy, bounded
+per joint by the configured tolerance. A start discrepancy beyond tolerance
+pauses before dispatch. Current scene, collision, measured joint bounds, and
+applicable execution Cartesian/closed-chain checks remain active. The original
+saved trajectory still passes its strict planning and controller-spline checks.
+A one-point no-motion step within tolerance needs no alignment.
+
+If enabled model velocity/acceleration limits require it, only the saved main
+trajectory is uniformly stretched by the necessary factor and revalidated;
+positions and spline geometry remain unchanged. Disabled model limits remain
+disabled for saved motion. Neither the accepted start discrepancy nor nonzero
+saved starting derivatives trigger alignment or timing slowdown. The stored
+plan is never modified. Motion-limit checks allow only a relative `1e-9`
+numerical rounding margin. Measured feedback slightly outside joint limits
+still uses `place_start_state_bounds_tolerance`; saved planned waypoints retain
+the existing model-bound requirements. No limits or tuned parameters change.
 
 A validation failure pauses immediately. Continue revalidates the same unfinished
 segment and never replans or repeats completed checkpoints. Failure after motion
 or attachment/release dispatch stops the sequence and requires recovery; it never
 replays a partly executed trajectory. Logs identify the plan, segment, alignment,
 and new planner-call count. Validate with fake feedback before hardware execution.
-Alignment logs include measured-start deviation, connector duration, and
-`timing_scale` (1 for unchanged timing). Failed alignment diagnostics identify the
-joint, derivative peaks/limits, or the geometric validation failure.
+Saved-motion logs include measured-start deviation, zero alignment duration,
+and `timing_scale` (1 for unchanged timing). Motion-limit diagnostics identify
+the joint and calculated derivative peaks/limits.
 Attach/release checkpoint failures identify attachment-copy errors, joint-limit
 violations (joint, measured position, limits, excess, and configured
 `place_start_state_bounds_tolerance`), or colliding link/object pairs.
 Attach/release checkpoints use the same measured-state bounds allowance as
-held-object validation and start alignment (currently 0.02 rad). This accepts
+held-object validation and saved-start verification (currently 0.02 rad). This accepts
 small feedback discrepancies without changing planned trajectory limits or
 `execution_joint_tolerance`, which checks deviation from the saved start.
 Saved-step warnings include
@@ -1009,8 +1002,8 @@ measured Cartesian starts/alignment, attachment/contact confirmation,
 held-object consistency, and HOLDING recovery. These settings do not add
 continuous TCP tracking or new endpoint checks to every motion segment.
 
-Saved Cartesian trajectories retain planning validation; only their measured
-alignment prefixes use execution tolerance. Collision, bounds, motion limits,
+Saved Cartesian trajectories retain planning validation; their measured
+starts use execution tolerance. Collision, bounds, motion limits,
 and the existing joint-feedback admission checks still apply. Both planning
 modes remain available, and closed-chain solver/planned contact limits remain
 unchanged. Grasp search ranges and box/table detection-movement thresholds are
@@ -1054,7 +1047,8 @@ Cartesian path. Pick lift is replanned from measured feedback instead of rebasin
 and retiming a cached whole carry route; free-space segment reuse remains active.
 Retries retain the original lift height and preserve measured XY/orientation,
 so a partially executed lift does not gain another full lift height on Continue.
-Approach cache reuse requires another Cartesian validation after rebasing.
+Approach cache reuse still validates the original Cartesian path and checks the
+measured start with execution tolerance.
 Retries and Continue use the same stage policy. Joint bounds, collision geometry,
 execution feedback, and recovery handling remain active. Validate with
 `plan_only: true` and fake-ZMQ simulation before enabling robot motion.
@@ -1114,7 +1108,7 @@ requirements; a mismatch causes planning or cache rejection followed by planning
 
 The shared pose-to-pose object-route planner skips intermediate waypoints already
 reached by both TCPs (within 0.0001 m and 0.001 rad), or matching validated joint
-targets within 0.000001 rad/m. The actual state must still
+targets within 0.000001 rad/m. The planning state must still
 pass joint bounds, minimum joint margin, and the usual collision checks. This
 avoids treating a no-motion MoveIt response as a failed route, particularly when
 the carry pose is already the placement approach pose. Other short planner
@@ -1128,9 +1122,11 @@ by an unexecuted returned waypoint.
 Pick also reuses its preflight pregrasp/approach trajectories when fresh stationary
 feedback matches robot variables within `execution_joint_tolerance`, and complete
 trajectory validation passes against the current scene, including controller
-spline interpolation and joint bounds. When the commanded start changes, reuse
-rebases the first waypoint to measured positions and regenerates trajectory timing
-before validation; validation failure falls back to replanning. Reuse preserves the box/wrist/hand contact
+spline interpolation and joint bounds. Feedback within the configured start
+tolerance preserves every planned waypoint, derivative, and timestamp; small
+encoder differences do not rebase or retime the path. The measured start uses
+`place_start_state_bounds_tolerance`, and the measured-to-planned edge is still
+checked for collisions. Validation failure falls back to replanning. Reuse preserves the box/wrist/hand contact
 policy without allowing environment contact. Execution failure consumes the cache;
 retries replan from measured positions. A mismatch or changed obstacle also triggers
 replanning. In pose-to-pose mode, Pick replans its lift from fresh stationary
@@ -1258,13 +1254,21 @@ Before execution, measured start agreement and the latest collision scene are
 checked again. At most two replans are permitted for changed feedback or scenes,
 each with a fresh bounded search budget.
 
-Pose-to-pose return and prepare segments whose measured joints already match the
-exact target within 0.000001 rad/m keep a no-motion checkpoint. Bounds, collision,
+Pose-to-pose return and prepare segments whose calculated planning start matches
+the exact target within 0.000001 rad/m keep a no-motion checkpoint. Bounds, collision,
 and measured-start checks still run, but OMPL and ExecuteTrajectory are skipped.
 Feedback outside joint limits still follows the existing recovery path. Execution
 plans the return after release and reuses its remaining segments with the existing
 measured-feedback validation; candidate feasibility does not trigger extra return
 searches during execution.
+
+Carry-pose switching accepts an already-reached physical target when both TCPs
+meet `execution_position_tolerance` and `execution_orientation_tolerance`, after
+the usual held-state bounds, closure and collision checks. Unset settings retain
+the contact-error limits as fallbacks. Plan-only previews and hypothetical route
+waypoints retain tight identity checks so small lift, retreat, or clearance motions
+are still planned. Numerical epsilons used for spline extrema, calculated waypoint
+bounds, pose-cache identity and rotation validity are not hardware accuracy limits.
 
 Planning traces include `post_place_return` events for geometric and processed
 validation, rejected candidates, selected clearance poses, seeds, and budget

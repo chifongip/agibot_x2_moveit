@@ -12,7 +12,10 @@
 namespace agibot_x2_manipulation
 {
 
-// Search-local, bounded FIFO. A hit still requires current-scene validation.
+// Search-local, bounded FIFO of hypothetical planning states, not encoder
+// feedback. Tight identity prevents joining different calculated paths; a hit
+// still requires current-scene validation. Live trajectory reuse separately
+// accepts execution_joint_tolerance in validateReusableTrajectory.
 class PoseSegmentCache
 {
 public:

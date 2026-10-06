@@ -451,13 +451,14 @@ def test_table_detection_is_published_as_a_latched_visualization_marker():
 
     assert '"/table_markers", rclcpp::QoS(1).transient_local()' in source
     assert "void PlanningSceneManager::publishTableMarker" in source
-    assert 'marker.ns = "detected_table"' in source
+    assert 'marker.ns = profile_id == "default" ? "detected_table"' in source
     assert "marker.type = visualization_msgs::msg::Marker::CUBE" in source
     assert "marker.pose = toPoseMsg(pose)" in source
-    assert "marker.scale.x = config_.table_dimensions.length" in source
-    assert "marker.scale.y = config_.table_dimensions.width" in source
-    assert "marker.scale.z = config_.table_dimensions.height" in source
-    assert "publishTrackedTableMarker(tag_pose);" in server_source
+    assert "dimensions ? *dimensions : config_.table_dimensions" in source
+    assert "marker.scale.x = size.length" in source
+    assert "marker.scale.y = size.width" in source
+    assert "marker.scale.z = size.height" in source
+    assert "publishTrackedTableMarker(profile, tag_pose);" in server_source
     assert "tablePoseFromVerticalTag(" in server_source
     assert "tag_pose.header.stamp" in server_source
 
