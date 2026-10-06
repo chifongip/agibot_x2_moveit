@@ -1960,10 +1960,13 @@ private:
           if (step.kind == SavedStepKind::MOTION) {
             moveit_msgs::msg::RobotTrajectory trajectory;
             double alignment = 0.0;
+            SavedAlignmentInfo alignment_info;
             if (!prepareSavedMotion(step, *plan, *current, planning_scene_.snapshot(), trajectory,
-                alignment, failure, interrupted)) {return false;}
-            RCLCPP_INFO(node_->get_logger(), "Saved plan %s %s start alignment %.6fs",
-              id.c_str(), step.name.c_str(), alignment);
+                alignment, failure, interrupted, &alignment_info)) {return false;}
+            RCLCPP_INFO(node_->get_logger(),
+              "Saved plan %s step %zu/%zu (%s) start alignment %.6fs; start_difference=%.9f timing_scale=%.9f",
+              id.c_str(), index + 1, plan->steps.size(), step.name.c_str(), alignment,
+              alignment_info.start_difference, alignment_info.timing_scale);
             if (trajectory.joint_trajectory.points.size() > 1) {
               dispatched = true;
               if (!trajectory_executor_.execute(trajectory, canceled)) {

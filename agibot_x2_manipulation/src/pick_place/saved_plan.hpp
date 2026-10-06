@@ -49,7 +49,7 @@ struct SavedPlan
   std::vector<SavedStep> steps;
 };
 
-// Pure validation/interpolation: never calls IK, OMPL, or trajectory retiming.
+// Validation/interpolation with optional uniform timing stretch; no IK or OMPL.
 bool validate_table_detection(
   const Eigen::Isometry3d & actual, const Eigen::Isometry3d & reference,
   const PickPlaceConfig & config, std::string & error);
@@ -58,10 +58,17 @@ bool validateSavedCheckpointState(
   const moveit::core::RobotState & measured, const planning_scene::PlanningScenePtr & scene,
   const PickPlaceConfig & config, std::string & error);
 
+struct SavedAlignmentInfo
+{
+  double start_difference{0.0};
+  double timing_scale{1.0};
+};
+
 bool prepareSavedMotion(
   const SavedStep & step, const SavedPlan & plan, const moveit::core::RobotState & measured,
   const planning_scene::PlanningScenePtr & scene, moveit_msgs::msg::RobotTrajectory & output,
-  double & alignment_seconds, std::string & error, const CancelFunction & canceled);
+  double & alignment_seconds, std::string & error, const CancelFunction & canceled,
+  SavedAlignmentInfo * alignment_info = nullptr);
 
 class SavedPlanStore
 {

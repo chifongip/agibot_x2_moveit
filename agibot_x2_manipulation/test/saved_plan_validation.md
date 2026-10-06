@@ -20,12 +20,55 @@ The saved detection geometry remains fixed. Execution checks fresh observations
 against that snapshot, measured joint feedback, current external obstacles,
 attachment geometry, bounds, controller interpolation, and applicable path
 constraints. A small feedback discrepancy may add an analytic alignment prefix;
-saved trajectory samples and derivatives remain unchanged. Validation failures
+saved waypoint positions remain unchanged. Derivatives and timestamps remain
+unchanged when the original connector works; the timing fallback uniformly
+slows the affected segment and preserves its spline geometry. Validation failures
 pause; Continue revalidates the unfinished segment. Physical dispatch failures
 require recovery rather than replay. IDs are single-use and invalidated when
 physical manipulation changes the context.
 
 ## Results
+
+### Automatic alignment timing fallback (2026-10-06)
+
+The six captured `pose_to_pose` workflows passed with `--saved-plan` and
+`--exercise-start-alignment`: separate Pick/Place and combined PickPlace for
+both grey-box and small-carton profiles, plus both held-object Place captures.
+All eight saved executions received a 0.001-rad fake-controller joint offset
+after preview, exercised timing fallback, and completed without a pause or
+new planner calls. A captured grey-box combined `closed_chain` workflow also
+passed with the injected offset and zero new planner calls.
+
+Artifacts: `alignment_timing_fallback_01` and
+`alignment_timing_closed_chain_01` under the simulation results directory below.
+Snapshots, profiles, limits, and tuned parameters were preserved.
+
+```bash
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+source /opt/ros/humble/setup.bash
+source /home/ubuntu/x2_ws/install/setup.bash
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /home/ubuntu/x2_ws/capture_task_snapshot/simulation_results/alignment_timing_fallback_01 \
+  --workflow both --saved-plan --exercise-start-alignment \
+  --domain-id 153 --port-base 23671
+```
+
+Build and focused saved-plan, Cartesian, endpoint, retry, and post-place tests
+passed. Saved-plan tests check limit-boundary derivatives, linear/cubic/quintic
+controller interpolation, uniform timing and geometry preservation, invalid
+limits, cancellation, and existing collision/path rejection. A saved-plan
+deadline regression reproduces unnecessary candidate validation
+exhausting a preparation budget. Timing candidates are now sorted before
+geometric checks, and validation stops at the first usable result. The deterministic
+work-budget unit test fails on the previous search and passes on this change.
+All 17 saved-plan tests passed after the correction. The captured grey-box
+Pick/Place sequence also passed with injected offsets and zero new planner
+calls; its artifacts are in `alignment_timing_budget_01`.
+The simulation harness's 11 Python tests passed. The broader configuration checks had 35 passes
+and one existing failure: the marker test expects a literal `detected_table`
+assignment, while the committed multi-table implementation selects a namespace
+by profile. This change does not modify that marker implementation or test.
 
 Artifacts are local validation outputs outside the source repositories, under
 `/home/ubuntu/x2_ws/capture_task_snapshot/simulation_results`. Each directory

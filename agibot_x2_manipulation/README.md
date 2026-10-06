@@ -884,7 +884,8 @@ invalidates other saved plans. Ordinary physical manipulation, posture changes,
 reset, recovery, and profile reload invalidate saved plans. Restarting the server
 also clears them. `plan_only: true` with a nonempty ID is invalid.
 
-Saved execution performs no IK, OMPL search, or retiming. The scene monitor
+Saved execution performs no IK or OMPL search. Start alignment may uniformly
+stretch execution timing while preserving the saved path. The scene monitor
 retains a parent scene so full MoveIt snapshots honor obstacle removals as well
 as additions when Continue refreshes the scene. Before every segment,
 it waits for settled feedback and checks the complete robot start, current scene,
@@ -895,8 +896,19 @@ Pick/Place execution. Standalone MoveCarryPose skips detection verification and
 clears previous perception obstacles before checking the live collision scene,
 without restoring old saved obstacle geometry.
 A small measured-start discrepancy gets a checked, limit-compliant alignment
-prefix; every saved waypoint and derivative stays unchanged, with only
-a uniform timestamp offset. Feedback slightly outside joint limits may align
+prefix. When the original timing passes, saved derivatives stay unchanged with
+only a timestamp offset. If alignment cannot meet the scaled velocity/acceleration
+limits or its spline is invalid, execution automatically tries four short
+connectors and uniformly slows the connector plus affected saved segment.
+Timestamps scale by the slowdown factor, velocities by its inverse, and
+accelerations by its inverse square. Saved waypoint positions and spline geometry
+remain unchanged; the stored plan is never modified and no IK/OMPL search is run.
+Candidates are ordered by duration before geometric validation; the first valid
+candidate is executed immediately, without checking slower alternatives or pausing.
+Joint bounds,
+collision, Cartesian, and carrying constraints remain active. Motion-limit checks
+allow only a relative `1e-9` numerical rounding margin.
+Feedback slightly outside joint limits may align
 inward within the existing `place_start_state_bounds_tolerance`, never farther
 outside the limit. No limits or tuned parameters are changed.
 
@@ -905,6 +917,9 @@ segment and never replans or repeats completed checkpoints. Failure after motion
 or attachment/release dispatch stops the sequence and requires recovery; it never
 replays a partly executed trajectory. Logs identify the plan, segment, alignment,
 and new planner-call count. Validate with fake feedback before hardware execution.
+Alignment logs include measured-start deviation, connector duration, and
+`timing_scale` (1 for unchanged timing). Failed alignment diagnostics identify the
+joint, derivative peaks/limits, or the geometric validation failure.
 Attach/release checkpoint failures identify attachment-copy errors, joint-limit
 violations (joint, measured position, limits, excess, and the unchanged `1e-6`
 bounds tolerance), or colliding link/object pairs. Saved-step warnings include
@@ -926,6 +941,8 @@ ros2 run agibot_x2_manipulation time_saved_simulation \
 
 The output directory must be new. The harness checks saved execution and rejects
 missing/consumed IDs; use `--mode closed_chain` to exercise that existing mode,
+add `--exercise-start-alignment --saved-plan` to inject a 0.001-rad joint offset
+after previews using the existing fake controller and verify automatic alignment,
 add `--exercise-pause` to inject/remove an external obstacle and verify Continue,
 or omit `--saved-plan` to check ordinary execution. Add
 `--exercise-carry-no-detections --workflow sequence` to stop the snapshot replay,

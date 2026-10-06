@@ -199,6 +199,10 @@ def parse_arguments(argv=None):
         "--exercise-carry-no-detections", action="store_true",
         help="Stop snapshot detections, expire their data, and exercise carry A/B/A.",
     )
+    parser.add_argument(
+        "--exercise-start-alignment", action="store_true",
+        help="Move one arm joint by 0.001 rad using the fake controller after each preview.",
+    )
     parser.add_argument("--saved-plan", action="store_true", help="Plan each action once, then execute its returned plan ID.")
     parser.add_argument("--mode", choices=("pose_to_pose", "closed_chain"), default="pose_to_pose")
     parser.add_argument("--port-base", type=int, default=19261)
@@ -208,6 +212,8 @@ def parse_arguments(argv=None):
         parser.error("invalid domain ID or port base")
     if not math.isfinite(args.action_timeout) or args.action_timeout <= 0:
         parser.error("action timeout must be finite and positive")
+    if args.exercise_start_alignment and not args.saved_plan:
+        parser.error("start alignment requires --saved-plan")
     if args.exercise_carry_no_detections:
         args.exercise_carry = True
         if args.workflow == "combined":
@@ -225,6 +231,9 @@ def run_simulations(arguments):
     from apriltag_msgs.msg import AprilTagDetectionArray
     from agibot_x2_manipulation_msgs.msg import BoxStateArray
     from sensor_msgs.msg import JointState
+    from control_msgs.action import FollowJointTrajectory
+    from trajectory_msgs.msg import JointTrajectoryPoint
+    from rclpy.duration import Duration
     from visualization_msgs.msg import MarkerArray
     from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene, GetPositionFK, GetStateValidity
     from moveit_msgs.msg import CollisionObject
@@ -312,6 +321,40 @@ def run_simulations(arguments):
             "world": [o.id for o in result.scene.world.collision_objects],
         }
 
+    def inject_start_offset():
+        # This harness launches only isolated fake feedback. Use its existing
+        # controller publisher instead of adding another ZMQ publisher.
+        actual = dict(zip(joints[-1].name, joints[-1].position))
+        names = sorted(name for name in actual if name.startswith((
+            "left_shoulder_", "right_shoulder_", "left_wrist_", "right_wrist_",
+            "left_elbow_", "right_elbow_")))
+        assert len(names) == 14, "unexpected dual-arm joint layout"
+        joint = "left_shoulder_pitch_joint"
+        target = actual[joint] + (-0.001 if actual[joint] > 0 else 0.001)
+        positions = [target if name == joint else actual[name] for name in names]
+        client = ActionClient(node, FollowJointTrajectory,
+                              "/dual_arm_controller/follow_joint_trajectory")
+        try:
+            assert client.wait_for_server(timeout_sec=5), "fake controller unavailable"
+            goal = FollowJointTrajectory.Goal()
+            goal.trajectory.joint_names = names
+            goal.trajectory.points = [JointTrajectoryPoint(
+                positions=positions, velocities=[0.0] * len(names),
+                accelerations=[0.0] * len(names), time_from_start=Duration(seconds=0.5).to_msg())]
+            future = client.send_goal_async(goal)
+            assert spin_until(future.done, 5), "offset dispatch timeout"
+            handle = future.result()
+            assert handle.accepted, "fake controller rejected offset"
+            future = handle.get_result_async()
+            assert spin_until(future.done, 10), "offset execution timeout"
+            assert future.result().status == GoalStatus.STATUS_SUCCEEDED, "offset failed"
+            assert spin_until(lambda: abs(dict(zip(joints[-1].name, joints[-1].position))[joint]
+                                          - target) < 1e-7, 5), "offset feedback unavailable"
+            spin_until(lambda: False, 0.3)
+            return {"joint": joint, "before": actual[joint], "after": target}
+        finally:
+            client.destroy()
+
     def action(action_type, topic, goal, case, expected_success=True):
         nonlocal pause_exercised
         if arguments.saved_plan and not goal.plan_only and not goal.plan_id and expected_success:
@@ -328,6 +371,9 @@ def run_simulations(arguments):
             invalid = copy.deepcopy(goal)
             invalid.plan_id = "missing-" + goal.plan_id
             action(action_type, topic, invalid, case, expected_success=False)
+        start_offset = None
+        if arguments.exercise_start_alignment and not goal.plan_only and expected_success:
+            start_offset = inject_start_offset()
         pause_probe = (
             arguments.exercise_pause and arguments.saved_plan and not goal.plan_only
             and expected_success and not pause_exercised
@@ -371,6 +417,8 @@ def run_simulations(arguments):
         client = ActionClient(node, action_type, topic)
         assert client.wait_for_server(timeout_sec=5), f"{topic} unavailable"
         record = {"action": topic, "plan_only": goal.plan_only, "expected_success": expected_success, "feedback": []}
+        if start_offset is not None:
+            record["injected_start_offset"] = start_offset
         case["actions"].append(record)
         started = time.monotonic()
 

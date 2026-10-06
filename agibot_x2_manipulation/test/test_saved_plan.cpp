@@ -190,6 +190,117 @@ TEST(SavedPlan, AlignmentMatchesNonzeroDerivativesAndControllerLimits)
     EXPECT_LE(std::abs(sample.accelerations[0]), 0.1 + 1e-8);
   }
 }
+TEST(SavedPlan, AlignmentFallbackSlowsTimingAndPreservesSplineGeometry)
+{
+  for (const int degree : {1, 3, 5}) {
+    for (const double acceleration : {0.1, 0.1 * (1.0 + 5e-10), 0.12}) {
+      Fixture f;
+      f.step.trajectory.joint_trajectory.points.front().velocities = {0.1};
+      f.step.trajectory.joint_trajectory.points.front().accelerations = {degree < 5 ? 0.12 : acceleration};
+      if (degree < 5) {f.step.trajectory.joint_trajectory.points.back().accelerations.clear();}
+      if (degree < 3) {f.step.trajectory.joint_trajectory.points.back().velocities.clear();}
+      const auto saved = f.step.trajectory;
+      auto current = *f.step.start;
+      current.setVariablePosition("j", 0.01);
+      current.update();
+      moveit_msgs::msg::RobotTrajectory output;
+      double seconds;
+      std::string error;
+      SavedAlignmentInfo info;
+      ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, current, f.scene, output,
+          seconds, error, []{return false;}, &info)) << error;
+      ASSERT_EQ(output.joint_trajectory.points.size(), 3U);
+      EXPECT_GT(info.timing_scale, 1.0);
+      EXPECT_DOUBLE_EQ(info.start_difference, 0.01);
+      EXPECT_EQ(f.step.trajectory, saved);
+      const auto & points = output.joint_trajectory.points;
+      for (size_t i = 0; i < saved.joint_trajectory.points.size(); ++i) {
+        EXPECT_EQ(points[i + 1].positions, saved.joint_trajectory.points[i].positions);
+        if (!saved.joint_trajectory.points[i].velocities.empty()) {
+          EXPECT_NEAR(points[i + 1].velocities[0],
+            saved.joint_trajectory.points[i].velocities[0] / info.timing_scale, 1e-12);
+        }
+        if (!saved.joint_trajectory.points[i].accelerations.empty()) {
+          EXPECT_NEAR(points[i + 1].accelerations[0],
+            saved.joint_trajectory.points[i].accelerations[0] /
+            (info.timing_scale * info.timing_scale), 1e-12);
+        }
+      }
+      joint_trajectory_controller::Trajectory controller;
+      for (size_t index = 1; index < points.size(); ++index) {
+        const rclcpp::Time begin(rclcpp::Duration(points[index - 1].time_from_start).nanoseconds(), RCL_ROS_TIME);
+        const rclcpp::Time end(rclcpp::Duration(points[index].time_from_start).nanoseconds(), RCL_ROS_TIME);
+        for (int sample_index = 0; sample_index <= 1000; ++sample_index) {
+          const double u = sample_index / 1000.0;
+          trajectory_msgs::msg::JointTrajectoryPoint sample;
+          controller.interpolate_between_points(begin, points[index - 1], end, points[index],
+            begin + rclcpp::Duration::from_seconds((end - begin).seconds() * u), sample);
+          EXPECT_LE(std::abs(sample.velocities[0]), 0.1 + 1e-9);
+          EXPECT_LE(std::abs(sample.accelerations[0]), 0.1 + 1e-9);
+          if (index == 2) {
+            trajectory_msgs::msg::JointTrajectoryPoint original;
+            const rclcpp::Time zero(0, 0, RCL_ROS_TIME);
+            const auto original_end = zero + rclcpp::Duration(saved.joint_trajectory.points.back().time_from_start);
+            controller.interpolate_between_points(zero, saved.joint_trajectory.points[0],
+              original_end, saved.joint_trajectory.points[1],
+              zero + rclcpp::Duration::from_seconds((original_end - zero).seconds() * u), original);
+            EXPECT_NEAR(sample.positions[0], original.positions[0], 1e-8);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(SavedPlan, AlignmentCompletesWithinBudgetAfterFindingValidFallback)
+{
+  Fixture f;
+  f.step.trajectory.joint_trajectory.points.front().velocities = {0.1};
+  f.step.trajectory.joint_trajectory.points.front().accelerations = {0.12};
+  auto current = *f.step.start;
+  current.setVariablePosition("j", 0.01);
+  current.update();
+  moveit_msgs::msg::RobotTrajectory output;
+  double seconds;
+  std::string error;
+  SavedAlignmentInfo info;
+  int work = 0;
+  // Model a preparation deadline with deterministic work units, avoiding wall
+  // clock timing. The budget permits candidate preparation and one full spline
+  // validation, but not repeated validation after a usable result is found.
+  constexpr int work_budget = 1000;
+  const auto deadline_expired = [&]() {
+      return info.start_difference > 0.0 && ++work > work_budget;
+    };
+  ASSERT_TRUE(prepareSavedMotion(f.step, f.plan, current, f.scene, output,
+      seconds, error, deadline_expired, &info)) << error;
+  EXPECT_LE(work, work_budget);
+  EXPECT_GT(info.timing_scale, 1.0);
+  EXPECT_GT(seconds, 0.0);
+  ASSERT_EQ(output.joint_trajectory.points.size(), 3U);
+  EXPECT_EQ(output.joint_trajectory.points.back().positions,
+    f.step.trajectory.joint_trajectory.points.back().positions);
+}
+
+TEST(SavedPlan, AlignmentRejectsInvalidMotionLimitsAndCancellation)
+{
+  Fixture f;
+  auto current = *f.step.start;
+  current.setVariablePosition("j", 0.01);
+  current.update();
+  moveit_msgs::msg::RobotTrajectory output;
+  double seconds;
+  std::string error;
+  f.plan.config.velocity_scaling = 0.0;
+  EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, current, f.scene, output,
+      seconds, error, []{return false;}));
+  EXPECT_NE(error.find("invalid saved alignment motion limits: joint=j"), std::string::npos) << error;
+  f.plan.config.velocity_scaling = 0.1;
+  EXPECT_FALSE(prepareSavedMotion(f.step, f.plan, current, f.scene, output,
+      seconds, error, []{return true;}));
+  EXPECT_NE(error.find("interrupt"), std::string::npos) << error;
+}
+
 TEST(SavedPlan, RejectsChangedSceneEvenWithUnchangedStart)
 {
   Fixture f;
