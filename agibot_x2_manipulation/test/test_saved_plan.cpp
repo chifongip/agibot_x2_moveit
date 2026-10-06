@@ -37,6 +37,59 @@ struct Fixture
     step.trajectory.joint_trajectory.points = {a, b};
   }
 };
+TEST(SavedPlan, CheckpointReportsJointLimitsWithExistingTolerance)
+{
+  Fixture f;
+  std::string error;
+  auto measured = *f.step.start;
+  EXPECT_TRUE(validateSavedCheckpointState(measured, f.scene, f.plan.config, error));
+  measured.setVariablePosition("j", 1.0000005);
+  measured.update();
+  EXPECT_TRUE(validateSavedCheckpointState(measured, f.scene, f.plan.config, error));
+  for (const double position : {-1.01, 1.01}) {
+    measured.setVariablePosition("j", position);
+    measured.update();
+    EXPECT_FALSE(validateSavedCheckpointState(measured, f.scene, f.plan.config, error));
+    EXPECT_NE(error.find("joint=j"), std::string::npos) << error;
+    EXPECT_NE(error.find("actual="), std::string::npos) << error;
+    EXPECT_NE(error.find("limits=[-1, 1]"), std::string::npos) << error;
+    EXPECT_NE(error.find("excess=0.01"), std::string::npos) << error;
+    EXPECT_NE(error.find("bounds_tolerance=1e-06"), std::string::npos) << error;
+  }
+}
+
+TEST(SavedPlan, CheckpointReportsCollisionPairs)
+{
+  Fixture f;
+  moveit_msgs::msg::CollisionObject obstacle;
+  obstacle.header.frame_id = "base";
+  obstacle.id = "work_table";
+  obstacle.operation = moveit_msgs::msg::CollisionObject::ADD;
+  shape_msgs::msg::SolidPrimitive shape;
+  shape.type = shape_msgs::msg::SolidPrimitive::BOX;
+  shape.dimensions = {0.03, 0.03, 0.03};
+  obstacle.primitives.push_back(shape);
+  geometry_msgs::msg::Pose pose;
+  pose.orientation.w = 1;
+  obstacle.primitive_poses.push_back(pose);
+  ASSERT_TRUE(f.scene->processCollisionObjectMsg(obstacle));
+  std::string error;
+  EXPECT_FALSE(validateSavedCheckpointState(*f.step.start, f.scene, f.plan.config, error));
+  EXPECT_NE(error.find("saved checkpoint collision"), std::string::npos) << error;
+  EXPECT_NE(error.find("tip <-> work_table"), std::string::npos) << error;
+}
+
+TEST(SavedPlan, CheckpointReportsMissingSceneOrGroup)
+{
+  Fixture f;
+  std::string error;
+  EXPECT_FALSE(validateSavedCheckpointState(*f.step.start, nullptr, f.plan.config, error));
+  EXPECT_NE(error.find("unavailable"), std::string::npos);
+  f.plan.config.planning_group = "missing";
+  EXPECT_FALSE(validateSavedCheckpointState(*f.step.start, f.scene, f.plan.config, error));
+  EXPECT_NE(error.find("unavailable"), std::string::npos);
+}
+
 TEST(SavedPlan, TableDetectionUsesCapturedLimitsWithLegacyFallback)
 {
   PickPlaceConfig config;

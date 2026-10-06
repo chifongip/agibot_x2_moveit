@@ -1976,14 +1976,16 @@ private:
               if (!std::isfinite(current->getVariablePosition(name)) ||
                 std::abs(current->getVariablePosition(name) - step.start->getVariablePosition(name)) >
                 config_.execution_joint_tolerance)
-              {failure = "saved checkpoint start mismatch: " + name; return false;}
+              {
+                failure = "saved checkpoint start mismatch: " + name +
+                  " actual=" + std::to_string(current->getVariablePosition(name)) +
+                  " expected=" + std::to_string(step.start->getVariablePosition(name)) +
+                  " tolerance=" + std::to_string(config_.execution_joint_tolerance);
+                return false;
+              }
             }
-            moveit::core::RobotState checked(*current);
             const auto scene = planning_scene_.snapshot();
-            if (!copySceneAttachments(checked, scene->getCurrentState()) ||
-              !checked.satisfiesBounds(checked.getJointModelGroup(config_.planning_group), 1e-6) ||
-              graspContactScene(scene, config_)->isStateColliding(checked, config_.planning_group))
-            {failure = "saved checkpoint state is invalid"; return false;}
+            if (!validateSavedCheckpointState(*current, scene, config_, failure)) {return false;}
             const Eigen::Isometry3d & pose = step.kind == SavedStepKind::ATTACH ? plan->pick_pose : plan->place_pose;
             if (!check_pose_tolerance(current->getGlobalLinkTransform(config_.left_tcp),
                 current->getGlobalLinkTransform(config_.right_tcp), pose * plan->box_to_left,
@@ -2028,10 +2030,13 @@ private:
           feedback(status.status == "paused" ? "paused/" + status.phase : status.phase,
             static_cast<float>(index) / plan->steps.size(), held_pose_);
           if (!status.failure.empty()) {
-            RCLCPP_WARN(node_->get_logger(), "Saved plan %s %s: %s", id.c_str(), step.name.c_str(), status.failure.c_str());
+            RCLCPP_WARN(node_->get_logger(), "Saved plan %s step %zu/%zu (%s): %s",
+              id.c_str(), index + 1, plan->steps.size(), step.name.c_str(), status.failure.c_str());
           }
         }, error, [&]() {return dispatched;});
       if (!ok) {
+        error = "saved plan " + id + " step " + std::to_string(index + 1) + "/" +
+          std::to_string(plan->steps.size()) + " (" + step.name + "): " + error;
         if (dispatched || state_.load() == ManipulationState::HOLDING) {
           setState(ManipulationState::RECOVERY_REQUIRED, error);
         }

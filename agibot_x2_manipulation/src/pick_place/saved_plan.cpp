@@ -4,6 +4,8 @@
 #include <geometric_shapes/shapes.h>
 #include <set>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 
 namespace agibot_x2_manipulation
 {
@@ -44,6 +46,61 @@ bool validate_table_detection(
     std::to_string(std::abs(Eigen::AngleAxisd(actual.linear().transpose() * reference.linear()).angle())) +
     " rad (limit=" + std::to_string(orientation_limit) + ")";
   return false;
+}
+
+bool validateSavedCheckpointState(
+  const moveit::core::RobotState & measured, const planning_scene::PlanningScenePtr & scene,
+  const PickPlaceConfig & config, std::string & error)
+{
+  moveit::core::RobotState checked(measured);
+  const auto * group = checked.getJointModelGroup(config.planning_group);
+  if (!scene || !group) {
+    error = "saved checkpoint validation scene or planning group unavailable";
+    return false;
+  }
+  if (!copySceneAttachments(checked, scene->getCurrentState())) {
+    error = "saved checkpoint attachment copy failed: scene attachment link is absent from robot model";
+    return false;
+  }
+  constexpr double bounds_tolerance = 1e-6;
+  if (!checked.satisfiesBounds(group, bounds_tolerance)) {
+    std::ostringstream details;
+    details << std::setprecision(9) << "saved checkpoint joint limits violated";
+    for (const auto & name : group->getVariableNames()) {
+      const auto & bounds = checked.getRobotModel()->getVariableBounds(name);
+      const double actual = checked.getVariablePosition(name);
+      if (bounds.position_bounded_ &&
+        (actual < bounds.min_position_ - bounds_tolerance ||
+        actual > bounds.max_position_ + bounds_tolerance))
+      {
+        details << "; joint=" << name << " actual=" << actual << " limits=[" <<
+          bounds.min_position_ << ", " << bounds.max_position_ << "] excess=" <<
+          std::max(bounds.min_position_ - actual, actual - bounds.max_position_);
+      }
+    }
+    details << "; bounds_tolerance=" << bounds_tolerance;
+    error = details.str();
+    return false;
+  }
+  const auto contact_scene = graspContactScene(scene, config);
+  if (contact_scene->isStateColliding(checked, config.planning_group)) {
+    collision_detection::CollisionRequest request;
+    request.group_name = config.planning_group;
+    request.contacts = true;
+    request.max_contacts = 32;
+    request.max_contacts_per_pair = 1;
+    collision_detection::CollisionResult result;
+    contact_scene->checkCollision(request, result, checked);
+    error = "saved checkpoint collision";
+    for (const auto & entry : result.contacts) {
+      if (!entry.second.empty()) {
+        error += "; " + entry.first.first + " <-> " + entry.first.second;
+      }
+    }
+    if (result.contacts.empty()) {error += "; contact pair unavailable";}
+    return false;
+  }
+  return true;
 }
 
 bool prepareSavedMotion(

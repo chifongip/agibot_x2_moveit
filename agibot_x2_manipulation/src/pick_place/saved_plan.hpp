@@ -54,6 +54,10 @@ bool validate_table_detection(
   const Eigen::Isometry3d & actual, const Eigen::Isometry3d & reference,
   const PickPlaceConfig & config, std::string & error);
 
+bool validateSavedCheckpointState(
+  const moveit::core::RobotState & measured, const planning_scene::PlanningScenePtr & scene,
+  const PickPlaceConfig & config, std::string & error);
+
 bool prepareSavedMotion(
   const SavedStep & step, const SavedPlan & plan, const moveit::core::RobotState & measured,
   const planning_scene::PlanningScenePtr & scene, moveit_msgs::msg::RobotTrajectory & output,

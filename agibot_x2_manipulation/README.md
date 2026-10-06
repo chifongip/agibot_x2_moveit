@@ -905,6 +905,12 @@ segment and never replans or repeats completed checkpoints. Failure after motion
 or attachment/release dispatch stops the sequence and requires recovery; it never
 replays a partly executed trajectory. Logs identify the plan, segment, alignment,
 and new planner-call count. Validate with fake feedback before hardware execution.
+Attach/release checkpoint failures identify attachment-copy errors, joint-limit
+violations (joint, measured position, limits, excess, and the unchanged `1e-6`
+bounds tolerance), or colliding link/object pairs. Saved-step warnings include
+the step name and index; failed action results also include the plan ID and step.
+Checkpoint start mismatches report measured/expected joint positions and the
+execution tolerance. These diagnostics do not change validation or retry behavior.
 
 The new action fields require rebuilding `agibot_x2_manipulation_msgs` and all
 clients that use these four actions. For captured simulation validation:
