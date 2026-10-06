@@ -19,15 +19,43 @@ existing unlock and confirmation controls.
 The saved detection geometry remains fixed. Execution checks fresh observations
 against that snapshot, measured joint feedback, current external obstacles,
 attachment geometry, bounds, controller interpolation, and applicable path
-constraints. A small feedback discrepancy may add an analytic alignment prefix;
-saved waypoint positions remain unchanged. Derivatives and timestamps remain
-unchanged when the original connector works; the timing fallback uniformly
-slows the affected segment and preserves its spline geometry. Validation failures
+constraints. For a stationary saved start, a small feedback discrepancy adds a
+separate rest-to-rest alignment goal. After fresh settled feedback passes the
+existing start, scene, and attachment checks, the main trajectory executes with
+its original timestamps, velocities, and accelerations. A nonzero saved starting
+acceleration is retained in the main goal; alignment finishes with zero
+acceleration. No jerk-continuity requirement is introduced between these
+stationary controller goals. Nonzero starting velocities retain the continuous
+connector, with uniform timing slowdown as the last fallback. Validation failures
 pause; Continue revalidates the unfinished segment. Physical dispatch failures
 require recovery rather than replay. IDs are single-use and invalidated when
 physical manipulation changes the context.
 
 ## Results
+
+### Separate stationary alignment (2026-10-06)
+
+All six captured `pose_to_pose` workflows passed with `--saved-plan` and
+`--exercise-start-alignment`. All eight saved executions received a 0.001-rad
+fake-controller offset, used separate alignment, and completed without new
+planner calls. All 40 main-motion steps reported `timing_scale=1.0`.
+The grey-box sequence alignment took 0.240281 seconds per injected offset.
+Compared with `alignment_timing_fallback_01`, grey-box Pick changed from
+17.938 to 11.532 seconds and Place from 29.981 to 13.681 seconds. These are
+whole-action simulation timings including validation and feedback waits,
+not hardware performance guarantees.
+
+The captured grey-box combined `closed_chain` workflow also passed with the
+injected offset. Its eight main-motion steps retained timing scale 1.0 and
+performed zero new planning searches.
+
+Artifacts: `separate_alignment_01` and `separate_alignment_closed_chain_01`.
+The focused six CTest targets and 11 simulation-harness Python tests passed,
+including 20 saved-plan tests. New coverage verifies unchanged main trajectory
+messages, stationary alignment controller limits with nonzero saved starting
+acceleration, retained nonstationary fallback, collision and Cartesian checks,
+post-alignment mismatch rejection, and cancellation. Configuration values and
+ordinary execution modes were preserved.
 
 ### Automatic alignment timing fallback (2026-10-06)
 

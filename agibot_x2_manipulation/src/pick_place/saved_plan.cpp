@@ -256,7 +256,7 @@ bool prepareSavedMotion(
   const SavedStep & step, const SavedPlan & plan, const moveit::core::RobotState & measured,
   const planning_scene::PlanningScenePtr & scene, moveit_msgs::msg::RobotTrajectory & output,
   double & alignment_seconds, std::string & error, const CancelFunction & canceled,
-  SavedAlignmentInfo * alignment_info)
+  SavedAlignmentInfo * alignment_info, SavedMotionPreparation preparation)
 {
   alignment_seconds = 0.0;
   if (alignment_info) {*alignment_info = {};}
@@ -355,7 +355,7 @@ bool prepareSavedMotion(
     distance = std::max(distance, std::abs(current.getVariablePosition(joints.joint_names[i]) - joints.points[0].positions[i]));
   }
   if (alignment_info) {alignment_info->start_difference = distance;}
-  if (distance <= 1e-6) {return true;}
+  if (distance <= 1e-6 && preparation != SavedMotionPreparation::VERIFY_START) {return true;}
   for (const auto & name : joints.joint_names) {
     double velocity, acceleration;
     if (!motionLimits(*current.getRobotModel(), name, config, velocity, acceleration, error)) {return false;}
@@ -365,6 +365,90 @@ bool prepareSavedMotion(
   {error = "alignment requires saved start velocity and acceleration"; return false;}
   if (rclcpp::Duration(joints.points.front().time_from_start).nanoseconds() != 0)
   {error = "alignment requires a zero-time saved start"; return false;}
+  auto prefix = joints.points.front();
+  for (size_t i = 0; i < joints.joint_names.size(); ++i) {
+    prefix.positions[i] = current.getVariablePosition(joints.joint_names[i]);
+  }
+  std::fill(prefix.velocities.begin(), prefix.velocities.end(), 0.0);
+  std::fill(prefix.accelerations.begin(), prefix.accelerations.end(), 0.0);
+  prefix.time_from_start = rclcpp::Duration::from_seconds(0.0);
+  if (!current.satisfiesBounds(group, config.place_start_state_bounds_tolerance)) {
+    error = "measured alignment start exceeds configured bounds tolerance"; return false;
+  }
+  const auto alignment_valid = [&](const moveit::core::RobotState & state, std::string & failure) {
+      // Recorded feedback may lie just beyond a model limit. Allow only the
+      // existing start-bounds tolerance, and never travel further outside it.
+      for (const auto & name : joints.joint_names) {
+        const auto & bounds = current.getRobotModel()->getVariableBounds(name);
+        const double position = state.getVariablePosition(name);
+        const double initial = current.getVariablePosition(name);
+        if (bounds.position_bounded_ &&
+          (position < std::min(bounds.min_position_, initial) - 1e-6 ||
+          position > std::max(bounds.max_position_, initial) + 1e-6))
+        {failure = "alignment increases position-bounds violation: " + name; return false;}
+      }
+      if (!closure_valid(state, failure, true)) {return false;}
+      for (const auto & range : step.cartesian) {
+        if (range.first == 0 && !validateCartesianState(
+            {state.getGlobalLinkTransform(config.left_tcp), state.getGlobalLinkTransform(config.right_tcp)},
+            range.from, range.to,
+            config.execution_position_limit(config.cartesian_path_position_tolerance),
+            config.execution_orientation_limit(config.cartesian_path_orientation_tolerance), failure)) {return false;}
+      }
+      return true;
+    };
+  if (preparation == SavedMotionPreparation::VERIFY_START) {
+    if (distance > config.execution_joint_tolerance) {
+      error = "post-alignment start exceeds execution joint tolerance"; return false;
+    }
+    if (!alignment_valid(current, error)) {return false;}
+    if (validation_scene->isStateColliding(current, config.planning_group)) {
+      error = "measured saved-motion start is in collision"; return false;
+    }
+    error.clear();
+    return true;
+  }
+  if (preparation == SavedMotionPreparation::SEPARATE && alignment_info &&
+    std::all_of(joints.points.front().velocities.begin(), joints.points.front().velocities.end(),
+      [](double velocity) {return std::abs(velocity) <= 1e-9;}))
+  {
+    auto target = joints.points.front();
+    std::fill(target.velocities.begin(), target.velocities.end(), 0.0);
+    std::fill(target.accelerations.begin(), target.accelerations.end(), 0.0);
+    double seconds = 1e-3;
+    for (size_t i = 0; i < joints.joint_names.size(); ++i) {
+      double velocity, acceleration;
+      if (!motionLimits(*current.getRobotModel(), joints.joint_names[i], config,
+          velocity, acceleration, error)) {return false;}
+      const double delta = std::abs(target.positions[i] - prefix.positions[i]);
+      seconds = std::max({seconds, 1.875 * delta / velocity,
+        std::sqrt((10.0 / std::sqrt(3.0)) * delta / acceleration)});
+    }
+    target.time_from_start = rclcpp::Duration::from_seconds(seconds * (1.0 + 1e-6));
+    auto connector = step.trajectory;
+    connector.joint_trajectory.points = {prefix, target};
+    double scale;
+    std::string failure;
+    if (!trajectoryTimingScale(connector, *current.getRobotModel(), config, scale, failure, canceled)) {
+      error = failure; return false;
+    }
+    robot_trajectory::RobotTrajectory alignment(current.getRobotModel(), config.planning_group);
+    alignment.setRobotTrajectoryMsg(current, connector);
+    if (scale <= 1.0 && validateTimedReturnTrajectory(alignment, validation_scene,
+        config.return_validation_joint_step, failure, canceled, false,
+        step.held ? config.minimum_carry_joint_margin : 0.0, alignment_valid, nullptr,
+        config.controller_spline_bounds_tolerance))
+    {
+      alignment_info->alignment = std::move(connector);
+      alignment_info->strategy = "separate";
+      alignment_seconds = rclcpp::Duration(target.time_from_start).seconds();
+      error.clear();
+      return true;
+    }
+    alignment_info->fallback_reason = failure.empty() ? "separate alignment exceeds motion limits" : failure;
+  } else if (preparation == SavedMotionPreparation::SEPARATE && alignment_info) {
+    alignment_info->fallback_reason = "saved trajectory starts with nonzero velocity";
+  }
   std::string timing_failure;
   // Exact polynomial derivative bounds for a stationary-to-saved-start
   // connector. Only prepend a new sample; retain every original sample verbatim.
@@ -402,38 +486,6 @@ bool prepareSavedMotion(
     }
     if (!bounded) {duration *= 1.4;}
   }
-  auto prefix = joints.points.front();
-  for (size_t i = 0; i < joints.joint_names.size(); ++i) {
-    prefix.positions[i] = current.getVariablePosition(joints.joint_names[i]);
-  }
-  std::fill(prefix.velocities.begin(), prefix.velocities.end(), 0.0);
-  std::fill(prefix.accelerations.begin(), prefix.accelerations.end(), 0.0);
-  prefix.time_from_start = rclcpp::Duration::from_seconds(0.0);
-  if (!current.satisfiesBounds(group, config.place_start_state_bounds_tolerance)) {
-    error = "measured alignment start exceeds configured bounds tolerance"; return false;
-  }
-  const auto alignment_valid = [&](const moveit::core::RobotState & state, std::string & failure) {
-      // Recorded feedback may lie just beyond a model limit. Allow only the
-      // existing start-bounds tolerance, and never travel further outside it.
-      for (const auto & name : joints.joint_names) {
-        const auto & bounds = current.getRobotModel()->getVariableBounds(name);
-        const double position = state.getVariablePosition(name);
-        const double initial = current.getVariablePosition(name);
-        if (bounds.position_bounded_ &&
-          (position < std::min(bounds.min_position_, initial) - 1e-6 ||
-          position > std::max(bounds.max_position_, initial) + 1e-6))
-        {failure = "alignment increases position-bounds violation: " + name; return false;}
-      }
-      if (!closure_valid(state, failure, true)) {return false;}
-      for (const auto & range : step.cartesian) {
-        if (range.first == 0 && !validateCartesianState(
-            {state.getGlobalLinkTransform(config.left_tcp), state.getGlobalLinkTransform(config.right_tcp)},
-            range.from, range.to,
-            config.execution_position_limit(config.cartesian_path_position_tolerance),
-            config.execution_orientation_limit(config.cartesian_path_orientation_tolerance), failure)) {return false;}
-      }
-      return true;
-    };
   const auto make_candidate = [&](double connector_duration) {
       auto message = step.trajectory;
       for (auto & point : message.joint_trajectory.points) {
@@ -485,6 +537,7 @@ bool prepareSavedMotion(
     if (required_scale <= 1.0 && validate_candidate(candidate, false, timing_failure)) {
       output = std::move(candidate);
       alignment_seconds = duration;
+      if (alignment_info) {alignment_info->strategy = "continuous";}
       error.clear();
       return true;
     }
@@ -527,7 +580,11 @@ bool prepareSavedMotion(
     if (!validate_candidate(candidate.trajectory, true, last_failure)) {continue;}
     output = std::move(candidate.trajectory);
     alignment_seconds = rclcpp::Duration(output.joint_trajectory.points[1].time_from_start).seconds();
-    if (alignment_info) {alignment_info->timing_scale = candidate.timing_scale;}
+    if (alignment_info) {
+      alignment_info->timing_scale = candidate.timing_scale;
+      alignment_info->strategy = "slowed_fallback";
+      alignment_info->fallback_reason += "; " + timing_failure;
+    }
     error.clear();
     return true;
   }

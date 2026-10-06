@@ -1962,11 +1962,35 @@ private:
             double alignment = 0.0;
             SavedAlignmentInfo alignment_info;
             if (!prepareSavedMotion(step, *plan, *current, planning_scene_.snapshot(), trajectory,
-                alignment, failure, interrupted, &alignment_info)) {return false;}
+                alignment, failure, interrupted, &alignment_info, SavedMotionPreparation::SEPARATE)) {return false;}
             RCLCPP_INFO(node_->get_logger(),
-              "Saved plan %s step %zu/%zu (%s) start alignment %.6fs; start_difference=%.9f timing_scale=%.9f",
+              "Saved plan %s step %zu/%zu (%s) start alignment %.6fs; start_difference=%.9f timing_scale=%.9f strategy=%s main_duration=%.6fs",
               id.c_str(), index + 1, plan->steps.size(), step.name.c_str(), alignment,
-              alignment_info.start_difference, alignment_info.timing_scale);
+              alignment_info.start_difference, alignment_info.timing_scale, alignment_info.strategy.c_str(),
+              rclcpp::Duration(trajectory.joint_trajectory.points.back().time_from_start).seconds());
+            if (!alignment_info.fallback_reason.empty()) {
+              RCLCPP_WARN(node_->get_logger(), "Saved plan %s step %s alignment fallback: %s",
+                id.c_str(), step.name.c_str(), alignment_info.fallback_reason.c_str());
+            }
+            if (alignment_info.alignment) {
+              dispatched = true;
+              if (!trajectory_executor_.execute(*alignment_info.alignment, canceled)) {
+                failure = trajectory_executor_.error("saved start alignment execution failed"); return false;
+              }
+              // Use actual cancellation and a fresh validation budget after motion.
+              if (!refreshMotionState(failure, canceled, step.held, carry_only)) {return false;}
+              current = move_group_.getCurrentState(config_.reset_state_timeout);
+              if (!current) {failure = "post-alignment feedback unavailable"; return false;}
+              const auto validation_deadline = std::chrono::steady_clock::now() +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                  std::chrono::duration<double>(config_.phase_retry_timeout));
+              const CancelFunction validation_interrupted = [&, validation_deadline]() {
+                  return canceled() || std::chrono::steady_clock::now() >= validation_deadline;
+                };
+              if (!prepareSavedMotion(step, *plan, *current, planning_scene_.snapshot(), trajectory,
+                  alignment, failure, validation_interrupted, nullptr,
+                  SavedMotionPreparation::VERIFY_START)) {return false;}
+            }
             if (trajectory.joint_trajectory.points.size() > 1) {
               dispatched = true;
               if (!trajectory_executor_.execute(trajectory, canceled)) {
