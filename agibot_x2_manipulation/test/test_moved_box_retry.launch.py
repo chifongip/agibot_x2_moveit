@@ -1,4 +1,4 @@
-"""Recover moved targets and obstacles using fresh detections, without Continue."""
+"""Opt into selected-target replanning while retaining other objects."""
 
 import os
 from pathlib import Path
@@ -22,10 +22,11 @@ from rclpy.action import ActionClient
 
 @pytest.mark.launch_test
 def generate_test_description():
-    return make_test_description()
+    return make_test_description(extra_arguments={"pick_replan_on_target_movement": "true"})
 
 
-def make_test_description(box_profiles_file=None, publish_table=True, table_profiles_file=None):
+def make_test_description(box_profiles_file=None, publish_table=True, table_profiles_file=None,
+                          extra_arguments=None):
     share = get_package_share_directory("agibot_x2_manipulation")
     port = 20000 + os.getpid() % 10000
     stack = IncludeLaunchDescription(
@@ -45,6 +46,7 @@ def make_test_description(box_profiles_file=None, publish_table=True, table_prof
                                      Path(__file__).parent / "config" / "box_profiles_simulation.yaml"),
             "manipulation_state_file": f"/tmp/x2_moved_box_retry_{os.getpid()}",
             **({"table_profiles_file": str(table_profiles_file)} if table_profiles_file else {}),
+            **(extra_arguments or {}),
         }.items(),
     )
     fake = Node(
@@ -118,11 +120,10 @@ class TestMovedBoxRetry(unittest.TestCase):
             self.assertEqual(result.status, GoalStatus.STATUS_SUCCEEDED, result.result.message)
             self.assertTrue(shifted)
             self.assertTrue(result.result.object_held)
-            self.assertTrue(any("refreshed detections and scene" in s.failure for s in statuses))
+            self.assertTrue(any("refreshed selected Pick target" in s.failure for s in statuses))
             self.assertFalse(any(s.status == "paused" for s in statuses))
 
-            # A moved obstacle while carrying must refresh the scene, preserving
-            # the attached box, and automatically retry Place.
+            # A new Place captures fresh geometry, without comparing to Pick.
             statuses.clear()
             positions["tag:1"] = (2.2, 1.0, 0.14)
             publish()
@@ -142,7 +143,7 @@ class TestMovedBoxRetry(unittest.TestCase):
             self.assertTrue(handle.accepted)
             result = wait(handle.get_result_async(), 100.0)
             self.assertEqual(result.status, GoalStatus.STATUS_SUCCEEDED, result.result.message)
-            self.assertTrue(any("refreshed detections and scene" in s.failure for s in statuses))
+            self.assertFalse(any("refreshed" in s.failure for s in statuses))
             self.assertFalse(any(s.status == "paused" for s in statuses))
         finally:
             for client in clients:

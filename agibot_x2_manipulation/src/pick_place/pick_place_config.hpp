@@ -45,6 +45,7 @@ struct PickPlaceConfig
   std::optional<double> planning_orientation_tolerance;
   std::optional<double> execution_position_tolerance;
   std::optional<double> execution_orientation_tolerance;
+  bool pick_replan_on_target_movement{false};
   std::optional<double> detection_position_tolerance;
   std::optional<double> detection_orientation_tolerance;
   double planning_position_limit() const

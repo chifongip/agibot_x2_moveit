@@ -270,6 +270,7 @@ bool PlanningSceneManager::updateDetectionScene(
     error = "MoveIt rejected detection scene update";
     return false;
   }
+  for (const auto & object : diff.world.collision_objects) {retainObject(object);}
   if (!synchronize(error)) {
     return false;
   }
@@ -398,6 +399,43 @@ bool PlanningSceneManager::synchronize(std::string & error)
   }
 }
 
+bool PlanningSceneManager::isDetectionObjectId(const std::string & id) const
+{
+  return isManagedBoxId(id) || id == config_.table_collision_id ||
+    std::find(config_.managed_table_ids.begin(), config_.managed_table_ids.end(), id) !=
+    config_.managed_table_ids.end();
+}
+
+bool PlanningSceneManager::retainDetectionObjects(std::string & error)
+{
+  if (!synchronize(error)) {return false;}
+  planning_scene_monitor::LockedPlanningSceneRO scene(scene_monitor_);
+  moveit_msgs::msg::PlanningScene message;
+  scene->getPlanningSceneMsg(message);
+  std::lock_guard<std::mutex> lock(retained_objects_mutex_);
+  if (retained_objects_) {return true;}
+  retained_objects_.emplace();
+  for (const auto & object : message.world.collision_objects) {
+    if (isDetectionObjectId(object.id)) {retained_objects_->emplace(object.id, object);}
+  }
+  return true;
+}
+
+void PlanningSceneManager::releaseDetectionObjects()
+{
+  std::lock_guard<std::mutex> lock(retained_objects_mutex_);
+  retained_objects_.reset();
+}
+
+void PlanningSceneManager::retainObject(const moveit_msgs::msg::CollisionObject & object)
+{
+  std::lock_guard<std::mutex> lock(retained_objects_mutex_);
+  if (!retained_objects_ || !isDetectionObjectId(object.id)) {return;}
+  if (object.operation == moveit_msgs::msg::CollisionObject::REMOVE) {
+    retained_objects_->erase(object.id);
+  } else {retained_objects_->insert_or_assign(object.id, object);}
+}
+
 bool PlanningSceneManager::clearCarryObstacles(std::string & error)
 {
   if (!synchronize(error)) {return false;}
@@ -435,6 +473,7 @@ bool PlanningSceneManager::applyBox(const Eigen::Isometry3d & pose, std::string 
       error = "MoveIt rejected the box collision object";
       return false;
     }
+    retainObject(object);
     owned_box_ids_.insert(config_.box_id);
     return true;
   } catch (const std::exception & exception) {
@@ -446,7 +485,21 @@ bool PlanningSceneManager::applyBox(const Eigen::Isometry3d & pose, std::string 
 planning_scene::PlanningScenePtr PlanningSceneManager::snapshot() const
 {
   planning_scene_monitor::LockedPlanningSceneRO scene(scene_monitor_);
-  return planning_scene::PlanningScene::clone(scene);
+  auto result = planning_scene::PlanningScene::clone(scene);
+  std::lock_guard<std::mutex> lock(retained_objects_mutex_);
+  if (retained_objects_) {
+    for (const auto & id : result->getWorld()->getObjectIds()) {
+      if (isDetectionObjectId(id)) {result->getWorldNonConst()->removeObject(id);}
+    }
+    for (const auto & entry : *retained_objects_) {
+      if (!result->getCurrentState().hasAttachedBody(entry.first)) {
+        if (!result->processCollisionObjectMsg(entry.second)) {
+          throw std::runtime_error("cannot restore retained detection object: " + entry.first);
+        }
+      }
+    }
+  }
+  return result;
 }
 
 planning_scene::PlanningScenePtr PlanningSceneManager::releasedBoxSnapshot(
@@ -472,6 +525,7 @@ bool PlanningSceneManager::applyTable(const Eigen::Isometry3d & pose, std::strin
       error = "MoveIt rejected the table collision object";
       return false;
     }
+    retainObject(object);
     return true;
   } catch (const std::exception & exception) {
     error = "failed to apply the table collision object: " + std::string(exception.what());
@@ -585,6 +639,10 @@ bool PlanningSceneManager::removeOwnedBox(const std::string & id, std::string & 
         return false;
       }
     }
+    moveit_msgs::msg::CollisionObject removed;
+    removed.id = id;
+    removed.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    retainObject(removed);
     return true;
   } catch (const std::exception & exception) {
     error = "failed to remove owned box '" + id + "': " + exception.what();
@@ -624,12 +682,13 @@ bool PlanningSceneManager::applyObstacleBoxes(
 
   for (const auto & box : boxes) {
     try {
-      if (!scene_interface_.applyCollisionObject(
-          makeBoxObject(box.id, box.dimensions, box.pose)))
+      const auto object = makeBoxObject(box.id, box.dimensions, box.pose);
+      if (!scene_interface_.applyCollisionObject(object))
       {
         error = "MoveIt rejected visible-box obstacle '" + box.id + "'";
         return false;
       }
+      retainObject(object);
     } catch (const std::exception & exception) {
       error = "failed to apply visible-box obstacle '" + box.id + "': " + exception.what();
       return false;
@@ -740,17 +799,19 @@ bool PlanningSceneManager::clearManagedBoxes(std::string & error)
 bool PlanningSceneManager::removeBox(std::string & error)
 {
   try {
-    if (scene_interface_.getObjects({config_.box_id}).empty()) {
-      return true;
-    }
     moveit_msgs::msg::CollisionObject object;
     object.header.frame_id = config_.planning_frame;
     object.id = config_.box_id;
     object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    if (scene_interface_.getObjects({config_.box_id}).empty()) {
+      retainObject(object);
+      return true;
+    }
     if (!scene_interface_.applyCollisionObject(object)) {
       error = "MoveIt rejected removal of the box collision object";
       return false;
     }
+    retainObject(object);
     return true;
   } catch (const std::exception & exception) {
     error = "failed to remove the box collision object: " + std::string(exception.what());
@@ -781,15 +842,27 @@ bool PlanningSceneManager::detachBox(std::string & error)
 bool PlanningSceneManager::restoreSavedObjects(
   const moveit_msgs::msg::PlanningSceneWorld & world, bool held, std::string & error)
 {
-  std::vector<moveit_msgs::msg::CollisionObject> objects;
-  for (auto object : world.collision_objects) {
-    if (held && object.id == config_.box_id) {continue;}
-    object.operation = moveit_msgs::msg::CollisionObject::ADD;
-    objects.push_back(std::move(object));
+  if (!synchronize(error)) {return false;}
+  moveit_msgs::msg::PlanningScene diff;
+  diff.is_diff = true;
+  diff.robot_state.is_diff = true;
+  const auto current = snapshot();
+  for (const auto & id : current->getWorld()->getObjectIds()) {
+    if (!isDetectionObjectId(id)) {continue;}
+    moveit_msgs::msg::CollisionObject object;
+    object.id = id;
+    object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    diff.world.collision_objects.push_back(object);
   }
-  if (!scene_interface_.applyCollisionObjects(objects)) {
+  for (auto object : world.collision_objects) {
+    if (!isDetectionObjectId(object.id) || (held && object.id == config_.box_id)) {continue;}
+    object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    diff.world.collision_objects.push_back(std::move(object));
+  }
+  if (!scene_interface_.applyPlanningScene(diff)) {
     error = "failed to restore saved detection geometry"; return false;
   }
+  for (const auto & object : diff.world.collision_objects) {retainObject(object);}
   return synchronize(error);
 }
 
@@ -901,6 +974,7 @@ bool PlanningSceneManager::restoreWorldBox(
       error = "MoveIt rejected restoration of the world box";
       return false;
     }
+    retainObject(object);
     return verifyBoxState(false, true, error);
   } catch (const std::exception & exception) {
     error = "failed to restore the world box: " + std::string(exception.what());
@@ -947,7 +1021,7 @@ bool PlanningSceneManager::collisionFree(
   moveit::core::RobotState & state, bool allow_pad_contact, bool ignore_box,
   std::string * collision_pairs) const
 {
-  planning_scene_monitor::LockedPlanningSceneRO scene(scene_monitor_);
+  const auto scene = snapshot();
   collision_detection::AllowedCollisionMatrix acm = scene->getAllowedCollisionMatrix();
   if (ignore_box) {
     acm.setEntry(config_.box_id, true);
@@ -972,8 +1046,7 @@ bool PlanningSceneManager::collisionFreeWithBox(
   moveit::core::RobotState & state, const Eigen::Isometry3d & box_pose,
   bool allow_pad_contact, std::string * collision_pairs) const
 {
-  planning_scene_monitor::LockedPlanningSceneRO locked(scene_monitor_);
-  auto scene = locked->diff();
+  auto scene = snapshot();
   moveit_msgs::msg::CollisionObject object;
   object.header.frame_id = config_.planning_frame;
   object.id = config_.box_id;

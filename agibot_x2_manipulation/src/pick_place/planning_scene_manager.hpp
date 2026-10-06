@@ -68,6 +68,8 @@ public:
 
   bool restoreSavedObjects(const moveit_msgs::msg::PlanningSceneWorld & world, bool held, std::string & error);
   bool synchronize(std::string & error);
+  bool retainDetectionObjects(std::string & error);
+  void releaseDetectionObjects();
   bool clearCarryObstacles(std::string & error);
   planning_scene::PlanningScenePtr snapshot() const;
   planning_scene::PlanningScenePtr releasedBoxSnapshot(const Eigen::Isometry3d & pose) const;
@@ -114,6 +116,10 @@ private:
     const Eigen::Isometry3d & pose) const;
   bool removeOwnedBox(const std::string & id, std::string & error);
   bool isManagedBoxId(const std::string & id) const;
+  bool isDetectionObjectId(const std::string & id) const;
+  void retainObject(const moveit_msgs::msg::CollisionObject & object);
+  mutable std::mutex retained_objects_mutex_;
+  std::optional<std::map<std::string, moveit_msgs::msg::CollisionObject>> retained_objects_;
   void clearTableMarker();
   void expireTableMarker();
   void deleteTableMarkerLocked();

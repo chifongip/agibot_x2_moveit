@@ -44,8 +44,9 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
         scene = self.node.create_client(GetPlanningScene, "/get_planning_scene")
         self.assertTrue(scene.wait_for_service(timeout_sec=40.0))
         state = {"table_x": 10.0, "obstacle_x": 2.0, "target_x": 0.33,
-                 "publish_table": True}
+                 "publish_table": True, "publish_boxes": True}
         samples = {}
+        statuses = []
         shifted = set()
 
         def publish():
@@ -63,7 +64,8 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
                 box.pose.pose.position.z = 0.14
                 box.pose.pose.orientation.w = 1.0
                 message.boxes.append(box)
-            boxes.publish(message)
+            if state["publish_boxes"]:
+                boxes.publish(message)
             if state["publish_table"]:
                 transform = TransformStamped()
                 transform.header.frame_id = "base_link"
@@ -84,13 +86,13 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
                 tags.publish(array)
 
         def status(message):
+            statuses.append(message)
             if message.status != "running":
                 return
-            # A moved box starts a new box snapshot, while both tables retain
-            # their accepted geometry. Table jitter alone must not rewrite it.
+            # Default-off replanning retains all boxes and tables.
             key = (message.action, message.phase)
             if key == ("pick", "prepare") and key not in shifted:
-                state.update(table_x=10.002, obstacle_x=2.2, target_x=0.332)
+                state.update(table_x=10.002, obstacle_x=2.2, target_x=0.45)
                 shifted.add(key)
             elif key == ("place", "perception") and key not in shifted:
                 state.update(table_x=10.004, obstacle_x=2.204)
@@ -101,8 +103,8 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
                 samples[key] = scene.call_async(request)
             # A table detector outage after release must not require a new table
             # observation for retreat/Prepare/Ready with an accepted snapshot.
-            if key == ("place", "release_scene"):
-                state["publish_table"] = False
+            if key in [("pick", "carry"), ("place", "release_scene")]:
+                state.update(publish_table=False, publish_boxes=False)
 
         subscription = self.node.create_subscription(
             ManipulationTaskStatus, "/manipulation_task_status", status, 50)
@@ -120,6 +122,7 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
                 rclpy.spin_once(self.node, timeout_sec=0.03)
             picked = self.send_goal(Pick, "/pick_box", Pick.Goal(instance_id="tag:0"), 120.0)
             self.assertTrue(picked.object_held)
+            state.update(publish_table=True, publish_boxes=True)
             # Allow the changed stable table observation to reach the tracker
             # before Place captures its own, independent snapshot.
             deadline = time.monotonic() + 0.3
@@ -129,8 +132,10 @@ class TestDetectionSnapshot(workflow.TestDummyWorkflow):
             self.place_pose(place)
             self.send_goal(Place, "/place_box", place, 120.0)
             self.assertEqual(len(shifted), 2)
+            self.assertFalse(any("refreshed" in item.failure or item.status == "paused"
+                                 for item in statuses))
             for key, table_x, obstacle_x in [
-                    (("pick", "carry"), 10.0, 2.2),
+                    (("pick", "carry"), 10.0, 2.0),
                     (("place", "to_prepare"), 10.002, 2.2)]:
                 self.assertIn(key, samples)
                 future = samples[key]

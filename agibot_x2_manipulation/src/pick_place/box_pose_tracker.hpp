@@ -44,6 +44,9 @@ public:
     double orientation_tolerance);
 
   bool stablePose(const std::string & instance_id, TrackedBoxPose & pose) const;
+  // Nonblocking: absent, stale, invalid, or different-profile poses are ignored.
+  bool movedStablePose(
+    const TrackedBoxPose & reference, TrackedBoxPose & latest, std::string & detail) const;
   bool waitForStablePose(
     const std::string & instance_id, double timeout, const std::function<bool()> & canceled,
     TrackedBoxPose & pose, std::string & error,

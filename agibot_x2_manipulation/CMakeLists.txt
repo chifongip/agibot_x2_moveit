@@ -232,6 +232,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_saved_plan pick_place_core)
   ament_target_dependencies(test_saved_plan moveit_core moveit_ros_planning rclcpp)
 
+  ament_add_gtest(test_retained_planning_scene test/test_retained_planning_scene.cpp)
+  target_include_directories(test_retained_planning_scene PRIVATE src include)
+  target_link_libraries(test_retained_planning_scene pick_place_core)
+  ament_target_dependencies(test_retained_planning_scene moveit_core moveit_ros_planning rclcpp)
+
   ament_add_gtest(test_post_place_planner test/test_post_place_planner.cpp)
   target_include_directories(test_post_place_planner PRIVATE src include)
   target_link_libraries(test_post_place_planner pick_place_core)
@@ -280,6 +285,7 @@ if(BUILD_TESTING)
   set_tests_properties(test_test_table_profiles.launch.py PROPERTIES
     ENVIRONMENT "ROS_DOMAIN_ID=196" RUN_SERIAL TRUE)
   add_launch_test(test/test_detection_snapshot.launch.py TIMEOUT 300)
+  add_launch_test(test/test_saved_detection_snapshot.launch.py TIMEOUT 600)
   add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_pose_to_pose
     ARGS "mode:=pose_to_pose" TIMEOUT 180)
   add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_closed_chain

@@ -19,11 +19,15 @@ Eigen::Isometry3d toEigen(const geometry_msgs::msg::Pose & pose)
 {
   Eigen::Quaterniond rotation(
     pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z);
+  const Eigen::Vector3d position(pose.position.x, pose.position.y, pose.position.z);
+  if (!position.allFinite() || !rotation.coeffs().allFinite() || !std::isfinite(rotation.norm())) {
+    throw std::invalid_argument("pose contains non-finite values");
+  }
   if (rotation.norm() < 1e-9) {
     throw std::invalid_argument("pose quaternion has zero length");
   }
   Eigen::Isometry3d result = Eigen::Isometry3d::Identity();
-  result.translation() = Eigen::Vector3d(pose.position.x, pose.position.y, pose.position.z);
+  result.translation() = position;
   result.linear() = rotation.normalized().toRotationMatrix();
   return result;
 }
@@ -174,6 +178,18 @@ bool BoxPoseTracker::stablePose(
   return true;
 }
 
+bool BoxPoseTracker::movedStablePose(
+  const TrackedBoxPose & reference, TrackedBoxPose & latest, std::string & detail) const
+{
+  detail.clear();
+  if (!stablePose(reference.instance_id, latest)) {return false;}
+  if ((node_->now() - latest.pose.header.stamp).seconds() < 0.0) {return false;}
+  bool moved = false;
+  withinTolerance(reference, latest, detail, &moved);
+  if (!moved) {detail.clear();}
+  return moved;
+}
+
 bool BoxPoseTracker::waitForFresh(
   const std::function<bool(std::string &)> & ready, double timeout,
   const std::function<bool()> & canceled, const std::function<void()> & waiting,
@@ -276,14 +292,14 @@ bool BoxPoseTracker::withinTolerance(
     error = "box profile changed before approach";
     return false;
   }
-  Eigen::Isometry3d current;
+  Eigen::Isometry3d current, reference_pose;
   try {
     current = toEigen(latest.pose.pose.pose);
+    reference_pose = toEigen(reference.pose.pose.pose);
   } catch (const std::exception & exception) {
     error = exception.what();
     return false;
   }
-  const Eigen::Isometry3d reference_pose = toEigen(reference.pose.pose.pose);
   const double position_error = (current.translation() - reference_pose.translation()).norm();
   const Eigen::Quaterniond reference_q(reference_pose.linear());
   const Eigen::Quaterniond current_q(current.linear());

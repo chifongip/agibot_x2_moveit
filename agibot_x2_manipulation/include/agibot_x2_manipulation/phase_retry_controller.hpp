@@ -88,7 +88,8 @@ public:
   bool run(const std::string & phase, bool plan_only, int attempts,
     double timeout, double delay, const Attempt & attempt, const Cancel & canceled,
     const Publish & publish, std::string & error,
-    const Cancel & terminal = []() {return false;})
+    const Cancel & terminal = []() {return false;},
+    const Cancel & completed = []() {return true;})
   {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -111,7 +112,7 @@ public:
           if (canceled()) {break;}
           {
             std::lock_guard<std::mutex> lock(mutex_);
-            status_.last_completed_phase = phase;
+            if (completed()) {status_.last_completed_phase = phase;}
             status_.status = "running";
             status_.failure.clear();
           }

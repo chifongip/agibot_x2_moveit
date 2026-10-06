@@ -3,7 +3,9 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from launch import LaunchContext
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.utilities import perform_substitutions
+import pytest
 import yaml
 from sensor_msgs.msg import CameraInfo, Image
 
@@ -56,6 +58,29 @@ def load_launch_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_pick_replan_launch_default_respects_yaml(monkeypatch, enabled):
+    module = load_launch_module()
+    original_load = module.yaml.safe_load
+
+    def configured_load(stream):
+        data = original_load(stream)
+        if isinstance(data, dict) and "pick_place_server" in data:
+            data["pick_place_server"]["ros__parameters"]["pick_replan_on_target_movement"] = enabled
+        return data
+
+    monkeypatch.setattr(module.yaml, "safe_load", configured_load)
+    description = module.generate_launch_description()
+    argument = next(action for action in description.entities
+                    if isinstance(action, DeclareLaunchArgument) and
+                    action.name == "pick_replan_on_target_movement")
+    context = LaunchContext()
+    assert perform_substitutions(context, argument.default_value) == str(enabled).lower()
+    context.launch_configurations[argument.name] = str(not enabled).lower()
+    argument.execute(context)
+    assert context.launch_configurations[argument.name] == str(not enabled).lower()
 
 
 def test_launch_controls_perception_source_selection():
@@ -228,7 +253,8 @@ def test_late_visible_box_detections_do_not_interrupt_a_planned_task():
         Path(__file__).parents[1] / "src" / "pick_place" / "box_pose_tracker.cpp"
     ).read_text(encoding="utf-8")
 
-    assert "box_pose_tracker_.waitForUnchangedPoses(expected" in server_source
+    assert "box_pose_tracker_.waitForUnchangedPoses(" not in server_source
+    assert "box_pose_tracker_.movedStablePose(*reference, latest, detail)" in server_source
     assert "if (actual.size() != expected.size())" not in server_source
     assert "for (const auto & reference : references)" in tracker_source
     assert "changed before motion:" in tracker_source
@@ -262,7 +288,7 @@ def test_detailed_planning_trace_file_is_automatic_and_launch_configurable():
     assert "adaptive_carry_selected" in planner_source
 
 
-def test_empty_operations_reconcile_detections_and_restart_cleanup_remains_available():
+def test_empty_operations_keep_retained_scene_and_restart_cleanup_remains_available():
     scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
     server_source = (
         Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
@@ -274,7 +300,10 @@ def test_empty_operations_reconcile_detections_and_restart_cleanup_remains_avail
     assert "scene_interface_.getAttachedObjects()" in scene_source
     assert "clearManagedBoxes(error)" in scene_source
     assert "clearSceneAfterEmptyOperation(task);" in server_source
-    assert 'updateVisibleBoxScene("", false, true, visible_boxes, error,' in server_source
+    cleanup = server_source.split("void clearSceneAfterEmptyOperation", 1)[1].split(
+        "const char * carryPoseName", 1)[0]
+    assert "active_visible_boxes_.clear()" in cleanup
+    assert "updateVisibleBoxScene" not in cleanup
     assert (
         "planning_scene_.updateDetectionScene(observations, protected_ids, false, error)"
         in server_source

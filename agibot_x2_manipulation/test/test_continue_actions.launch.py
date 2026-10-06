@@ -12,17 +12,18 @@ from ament_index_python.packages import get_package_share_directory
 from agibot_x2_manipulation_msgs.action import MoveCarryPose, Pick, PickPlace, Place, ResetManipulation
 from agibot_x2_manipulation_msgs.msg import BoxState, BoxStateArray, ManipulationTaskStatus
 from agibot_x2_manipulation_msgs.srv import ContinueManipulation
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, TransformStamped
 import launch_testing
 import pytest
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from moveit_msgs.msg import CollisionObject
-from moveit_msgs.srv import ApplyPlanningScene
+from moveit_msgs.msg import CollisionObject, PlanningSceneComponents
+from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_srvs.srv import Trigger
+from tf2_ros import TransformBroadcaster
 import yaml
 
 _spec = importlib.util.spec_from_file_location(
@@ -116,7 +117,11 @@ class TestContinueActions(unittest.TestCase):
         self.statuses, self.clients = [], []
         joints = {}
         position = [0.33, 0.0, 0.14]
+        obstacle_x = [2.0]
+        place_frame_x = [0.0]
+        broadcaster = TransformBroadcaster(self.node)
         self.scene = self.node.create_client(ApplyPlanningScene, "/apply_planning_scene")
+        self.read_scene = self.node.create_client(GetPlanningScene, "/get_planning_scene")
         self.resume_client = self.node.create_client(ContinueManipulation, "/continue_manipulation")
         self.assertTrue(self.scene.wait_for_service(timeout_sec=40.0))
         self.assertTrue(self.resume_client.wait_for_service(timeout_sec=40.0))
@@ -124,13 +129,34 @@ class TestContinueActions(unittest.TestCase):
         injection = {"action": "", "phase": "", "future": None}
 
         def publish():
+            transform = TransformStamped()
+            transform.header.frame_id = "base_link"
+            transform.header.stamp = self.node.get_clock().now().to_msg()
+            transform.child_frame_id = "continue_place_frame"
+            transform.transform.translation.x = place_frame_x[0]
+            transform.transform.rotation.w = 1.0
+            broadcaster.sendTransform(transform)
             box = BoxState()
             box.header.frame_id = "base_link"
             box.header.stamp = self.node.get_clock().now().to_msg()
             box.instance_id, box.profile_id = "tag:0", "small_carton"
             box.pose.pose.position.x, box.pose.pose.position.y, box.pose.pose.position.z = position
             box.pose.pose.orientation.w = 1.0
-            publisher.publish(BoxStateArray(boxes=[box]))
+            obstacle = BoxState()
+            obstacle.header = box.header
+            obstacle.instance_id, obstacle.profile_id = "tag:1", "small_carton"
+            obstacle.pose.pose.position.x = obstacle_x[0]
+            obstacle.pose.pose.position.y, obstacle.pose.pose.position.z = 1.0, 0.14
+            obstacle.pose.pose.orientation.w = 1.0
+            publisher.publish(BoxStateArray(boxes=[box, obstacle]))
+
+        def assert_obstacle(x):
+            request = GetPlanningScene.Request()
+            request.components.components = PlanningSceneComponents.WORLD_OBJECT_GEOMETRY
+            future = self.read_scene.call_async(request)
+            self.wait(future.done, 10.0)
+            objects = {obj.id: obj for obj in future.result().scene.world.collision_objects}
+            self.assertAlmostEqual(objects["grasp_box_tag_1"].pose.position.x, x, places=6)
 
         def status(message):
             self.statuses.append(message)
@@ -163,6 +189,7 @@ class TestContinueActions(unittest.TestCase):
             self.assertEqual(paused.phase, "planning_prepare")
             self.assertEqual(paused.object_disposition, "not_attached")
             position[0] = 0.45
+            obstacle_x[0] = 2.2
             publish()
             self.set_block(False)
             self.resume(task_id, paused.pause_id)
@@ -175,8 +202,9 @@ class TestContinueActions(unittest.TestCase):
             self.resume(task_id, paused.pause_id)
             self.assertTrue(self.succeed(result).object_held)
             self.assertEqual(len(physical_calls), 1)
-            self.assertTrue(any(s.task_id == task_id and s.phase == "planning_prepare"
-                                and "refreshed detections" in s.failure for s in self.statuses))
+            assert_obstacle(2.0)
+            self.assertFalse(any(s.task_id == task_id and "refreshed" in s.failure
+                                 for s in self.statuses))
 
             # Carry: retain attachment and resume the same destination.
             self.set_block(True)
@@ -209,10 +237,14 @@ class TestContinueActions(unittest.TestCase):
             # Place scene check must pause without repeating attachment.
             self.set_block(True)
             goal = self.place_goal(PickPlace)
+            goal.place_pose.header.frame_id = "continue_place_frame"
             goal.instance_id = "tag:0"
             _, result, task_id = self.start(PickPlace, "/pick_place", goal)
             self.wait(lambda: self.paused(task_id) is not None)
             first_pause = self.paused(task_id)
+            place_frame_x[0] = 0.5
+            obstacle_x[0] = 2.4
+            publish()
             injection.update(action="pick_place", phase="attach_scene", future=None)
             self.set_block(False)
             self.resume(task_id, first_pause.pause_id)
@@ -222,10 +254,14 @@ class TestContinueActions(unittest.TestCase):
             self.assertIn(second_pause.last_completed_phase, ("attach_scene", "carry"))
             self.assertIn(second_pause.phase, ("carry", "scene"))
             injection.update(action="", phase="")
+            obstacle_x[0] = 2.6
+            publish()
             self.set_block(False)
             self.resume(task_id, second_pause.pause_id)
-            self.succeed(result)
+            completed = self.succeed(result)
+            self.assertAlmostEqual(completed.achieved_pose.pose.position.x, 0.35, delta=0.05)
             self.assertEqual(len(physical_calls), 4)
+            assert_obstacle(2.2)
             checkpoints = [s.last_completed_phase for s in self.statuses if s.task_id == task_id]
             self.assertIn("release", checkpoints)
             self.assertIn("to_prepare", checkpoints)
@@ -238,9 +274,12 @@ class TestContinueActions(unittest.TestCase):
             self.wait(lambda: self.paused(task_id) is not None)
             paused = self.paused(task_id)
             self.assertEqual(paused.object_disposition, "released")
+            obstacle_x[0] = 3.0
+            publish()
             self.set_block(False)
             self.resume(task_id, paused.pause_id)
             self.succeed(result)
+            assert_obstacle(2.6)
             srdf = Path(get_package_share_directory("agibot_x2_moveit_config")) / "config/x2_ultra.srdf"
             ready = ET.parse(srdf).find(".//group_state[@name='ready'][@group='dual_arm']")
             expected = {joint.attrib["name"]: float(joint.attrib["value"]) for joint in ready}
@@ -257,6 +296,7 @@ class TestContinueActions(unittest.TestCase):
             self.node.destroy_subscription(subscription)
             self.node.destroy_subscription(joint_subscription)
             self.node.destroy_client(self.scene)
+            self.node.destroy_client(self.read_scene)
             self.node.destroy_client(self.resume_client)
             self.node.destroy_node()
             rclpy.shutdown()

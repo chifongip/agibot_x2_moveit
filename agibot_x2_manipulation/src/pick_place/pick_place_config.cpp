@@ -132,6 +132,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.planning_orientation_tolerance = optional_pose_tolerance(node, "planning_orientation_tolerance");
   config.execution_position_tolerance = optional_pose_tolerance(node, "execution_position_tolerance");
   config.execution_orientation_tolerance = optional_pose_tolerance(node, "execution_orientation_tolerance");
+  config.pick_replan_on_target_movement = parameter<bool>(
+    node, "pick_replan_on_target_movement", false);
   config.detection_position_tolerance = optional_pose_tolerance(node, "detection_position_tolerance");
   config.detection_orientation_tolerance = optional_pose_tolerance(node, "detection_orientation_tolerance");
   config.max_pose_age = parameter<double>(node, "maximum_box_pose_age", 0.50);

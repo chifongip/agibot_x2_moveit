@@ -9,6 +9,20 @@
 namespace agibot_x2_manipulation
 {
 
+TEST(PhaseRetryController, DeferredMotionDoesNotAdvanceCompletedCheckpoint)
+{
+  PhaseRetryController controller;
+  controller.begin("task", "pick", "not_attached");
+  controller.checkpoint("saved/pregrasp", "not_attached");
+  std::string error;
+  EXPECT_TRUE(controller.run("saved/approach", false, 1, 1.0, 0.0,
+    [](auto, std::string &) {return true;}, []() {return false;},
+    [](const auto &) {}, error, []() {return false;}, []() {return false;}));
+  EXPECT_EQ(controller.snapshot().last_completed_phase, "saved/pregrasp");
+  EXPECT_EQ(controller.snapshot().object_disposition, "not_attached");
+  EXPECT_FALSE(controller.snapshot().can_continue);
+}
+
 TEST(PhaseRetryController, FirstFailureRetriesWithoutPausing)
 {
   PhaseRetryController controller;

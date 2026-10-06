@@ -558,7 +558,7 @@ geometry is retained through approach, carry, split Pick/Place, and retreat.
 `grasp_position_tolerance` and `grasp_orientation_tolerance` control coordinated
 grasp candidate search. The independent `detection_position_tolerance` and
 `detection_orientation_tolerance` check detected box movement against the planned
-snapshot and table-tag movement before saved execution. The shipped detection
+snapshot when optional Pick target replanning is enabled. Tables remain frozen. The shipped detection
 limits are 0.1 m / 0.1745329252 rad (10 degrees), preserving the previous movement
 thresholds. Changing detection limits does not change grasp candidates; changing
 grasp search limits does not change detection checks when detection limits are
@@ -566,12 +566,12 @@ explicitly configured.
 
 Legacy configurations remain supported per component. An absent detection
 position/orientation setting falls back to the corresponding grasp tolerance
-for boxes, or `closed_chain_contact_*_error` for the saved-plan table check.
+for boxes. Saved execution does not validate live table detections.
 Explicit detection values must be finite, positive doubles. Startup logs report
-effective box/table limits; movement failures identify the instance/tag and
-report errors and limits. Detection freshness/stability, held/released target
-exclusions, and snapshot/retry behavior remain unchanged. Restart the server
-after configuration changes and create new previews; live updates are not added.
+effective box/table limits; optional target movement logs identify the instance
+and report errors and limits. Only initial acquisition requires fresh detections.
+Restart the server after tolerance changes and create new previews. The Pick
+replanning toggle can be changed at runtime and is latched for each new action.
 See [detection tolerance validation](test/detection_tolerance_validation.md)
 for regression and captured-simulation results.
 
@@ -884,16 +884,21 @@ invalidates other saved plans. Ordinary physical manipulation, posture changes,
 reset, recovery, and profile reload invalidate saved plans. Restarting the server
 also clears them. `plan_only: true` with a nonempty ID is invalid.
 
-Saved execution performs no IK or OMPL search. It accepts measured start error
+With `pick_replan_on_target_movement: false` (the default), saved execution
+performs no IK or OMPL search. It accepts measured start error
 within `execution_joint_tolerance` and preserves the saved trajectory; timing
 changes only when enabled model motion limits require slowdown. The scene
 monitor retains a parent scene so full MoveIt snapshots honor obstacle removals
 as well as additions when Continue refreshes the scene. Before every segment,
 it waits for settled feedback and checks the complete robot start, current scene,
 attachment geometry, joint bounds, controller spline, and the applicable Cartesian
-or closed-chain constraints. Detection jitter does not replace the saved geometry;
-missing detections, newly detected obstacles, or movement beyond tolerance block
-Pick/Place execution. Standalone MoveCarryPose skips detection verification and
+or closed-chain constraints. Saved box/table geometry is restored once without
+checking current detections.
+Missing detections, newly detected boxes/tables, and detector movement do not
+block execution or replace the snapshot. With optional Pick target replanning
+enabled, only selected-target movement before attachment can replace dependent
+saved trajectories; saved PickPlace rebuilds its remaining complete sequence.
+Standalone MoveCarryPose skips detection verification and
 clears previous perception obstacles before checking the live collision scene,
 without restoring old saved obstacle geometry.
 A measured-start discrepancy within `execution_joint_tolerance` executes the
@@ -1140,59 +1145,59 @@ box profile so hardware calibration does not determine their feasibility.
 
 ### Waiting for tag detections
 
-Pick, Place, and plan-only PickPlace accept an action-scoped
-box/table detection snapshot. Normal planning retries and Continue retain it:
-small detection fluctuations do not update collision geometry between motions.
-Place derives its tag-based target and collision table from the same accepted
-observation. Executed PickPlace captures a new snapshot for its Place portion;
-its initial target check does not freeze a tag-derived target before Pick.
-Detection tracking and table visualization remain live. A new Pick/Place action
-acquires fresh observations; cancellation and exceptions discard the local snapshot.
-For standalone Pick, table acquisition is optional and does not wait: a fresh
-stable observation is frozen with the box snapshot, while an absent or expired
-observation removes the previous managed table. Saved Pick execution also proceeds
-without a fresh table detection; a fresh observation, when present, must pass the
-existing movement check, and any table geometry saved in the plan remains
-collision-checked. This applies to ordinary and plan-only Pick; Place and combined
-PickPlace keep their existing table requirements.
-The snapshot is expressed in `planning_frame`; keep the robot base/posture and
-physical table stationary during an action. After repositioning, cancel/restart
-the action to acquire a new snapshot. External planning-scene/OctoMap updates
-remain live and trajectory validation still checks the current MoveIt scene.
+Pick, Place, PickPlace, and their plan-only requests accept one box/table
+snapshot per action. Initial acquisition must complete before motion. Planning
+retries and Continue retain object identities, profiles, dimensions, poses, and
+the placement target. Combined PickPlace shares one snapshot through Pick,
+Place, and return; separately submitted Pick and Place capture independently.
+Standalone Pick accepts a currently fresh stable table observation without
+waiting; Place and combined PickPlace retain their initial table requirements.
+A new ordinary action acquires fresh observations. Cancellation and exceptions
+release the local retention scope. Completion does not reacquire detections.
+Detection tracking and table visualization remain live.
 
-When a visible box moves beyond the planned-snapshot tolerance, the server
-reacquires the same instances, updates the collision scene, and automatically
-retries planning against the refreshed snapshot. Pick updates its target and
-invalidates cached grasp trajectories; movement during approach requires a new
-pregrasp before approaching. Pick/Place carrying stages retain the attached
-object's geometry and refresh other obstacles. Standalone MoveCarryPose uses the
-remaining scene after clearing previous perception obstacles, without acquiring
-or verifying detections. Missing tags in
-Pick/Place wait for reacquisition, then pause for Continue if the retry budget is
-exhausted. Profile changes remain invalidations.
+`pick_replan_on_target_movement: false` is the default. Set the ROS parameter or
+launch argument to `true` to allow **only the selected pickup box** to update
+before physical attachment. The value is latched when each action starts,
+including saved execution; changes during an action apply to the next action.
+At stationary motion boundaries, fresh stable same-profile observations are
+compared to the last accepted target using `detection_position_tolerance` and
+`detection_orientation_tolerance` (with the existing legacy fallbacks when unset).
+Exceeding either threshold updates the target and replans dependent grasp,
+pregrasp, approach, and carry paths from measured robot state. Saved PickPlace
+also rebuilds Place/release/return paths before resuming. Replanning uses bounded
+phase retries and Continue; an active trajectory is never interrupted solely
+because a detection changes. Missing, stale, invalid, or changed-profile
+observations are ignored. Other boxes and tables remain frozen. After attachment,
+object state comes from robot feedback and the attachment model.
 
-`tag_reacquisition_timeout: 10.0` seconds is the shared wait limit for fresh box
-selection, planned visible-box checks, and required stable table-tag acquisition
-in Place and PickPlace. These actions publish `waiting_for_detection`
-feedback while waiting before the next motion, retain the current held-object
-state, and respond to cancellation/reset requests. All boxes in a planned
-snapshot share one deadline. The held box is excluded from visible-box checks;
-its state continues to come from robot feedback and attachment tracking.
+The snapshot is expressed in `planning_frame`. This toggle responds to observed
+relative target displacement; it does not estimate base motion or compensate
+other retained objects for base movement. Cancel/restart to acquire an entirely
+new scene after repositioning.
 
-Initial acquisition freshness remains controlled by `maximum_box_pose_age` and
-`maximum_table_tag_pose_age`; waiting does not make an old observation valid.
-Visible-box freshness is checked between motions; an accepted table snapshot
-does not expire mid-action.
-Fresh observations must retain the planned instance/profile and stay within the
-existing movement tolerances. A moved box invalidates the existing plan rather
-than resuming motion toward an old target. Exhausted waits report an error.
-These checks run between motions, so a tag dropout alone does not interrupt an
-executing trajectory. Controller faults and collision validation remain active.
+Standalone MoveCarryPose clears prior managed perception obstacles once at entry
+and retains the resulting managed scene, without acquiring detections. Reset
+captures once after preemption and authorized attachment cleanup, retaining the
+scene through retries and Continue. Explicit attach/release and virtual planning
+transitions still update the manipulated box; the released box uses its commanded
+pose. External planning-scene objects and OctoMap remain live, and collision,
+controller-spline, joint-limit, and attachment checks remain active.
+
+`tag_reacquisition_timeout` bounds initial box selection and required stable
+table acquisition, with `waiting_for_detection` feedback and cancellation support.
+Initial freshness remains controlled by `maximum_box_pose_age` and
+`maximum_table_tag_pose_age`; accepted snapshots do not expire mid-action.
+Optional target checks run between motions; a tag dropout does not interrupt
+an executing trajectory. Controller faults and collision validation remain active.
 
 When `tag_reacquisition_timeout` is not set, it inherits the legacy
 `table_tag_stability_timeout` value. Explicitly set the shared parameter to tune
-all action detection waits together. Reset retains its existing optional scene
-refresh behavior and does not require reacquiring tags that are absent.
+initial action detection waits together. Reset captures optional detections once
+and does not reacquire them during retries.
+
+Validation commands and results are recorded in
+[object retention validation](test/object_retention_validation.md).
 
 ### Post-place return planning
 
@@ -1227,7 +1232,7 @@ Post-place retreat, Prepare, Ready, and their retries retain the table
 observation accepted at Place start. They do not require newer tag detections
 between stages or after Continue. Initial table acquisition still requires a
 fresh stable observation and supports cancellation, Reset, and the existing
-retry/pause flow. Visible-box freshness/movement checks remain active. The
+retry/pause flow. Boxes and tables remain frozen during return stages. The
 released task box is represented at its selected placement pose and is not
 reacquired from detections during post-place retries.
 

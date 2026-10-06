@@ -40,7 +40,8 @@ pick_place_server:
     # Measured alignment, contact, held-state consistency, and recovery (m / rad).
     execution_position_tolerance: 0.1
     execution_orientation_tolerance: 0.1745329252  # 10 degrees
-    # Box/table movement against the planned detection snapshot (m / rad).
+    # Optional selected Pick target movement against the retained snapshot (m / rad).
+    pick_replan_on_target_movement: false
     detection_position_tolerance: 0.1
     detection_orientation_tolerance: 0.1745329252  # 10 degrees
     # Legacy fallbacks below remain supported when the new settings are absent.

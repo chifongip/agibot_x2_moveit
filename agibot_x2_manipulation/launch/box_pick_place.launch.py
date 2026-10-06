@@ -125,6 +125,7 @@ def generate_launch_description():
     depth_image_topic = LaunchConfiguration("depth_image_topic")
     depth_camera_info_topic = LaunchConfiguration("depth_camera_info_topic")
     lidar_pointcloud_topic = LaunchConfiguration("lidar_pointcloud_topic")
+    pick_replan_on_target_movement = LaunchConfiguration("pick_replan_on_target_movement")
     allow_execution = LaunchConfiguration("allow_execution")
     motion_planning_mode = LaunchConfiguration("motion_planning_mode")
     manipulation_state_file = LaunchConfiguration("manipulation_state_file")
@@ -240,6 +241,12 @@ def generate_launch_description():
                     "Configure and activate dual_arm_controller. Set false only "
                     "when it is already active on the shared controller manager."
                 ),
+            ),
+            DeclareLaunchArgument(
+                "pick_replan_on_target_movement",
+                default_value=str(server_params.get("pick_replan_on_target_movement", False)).lower(),
+                choices=["true", "false"],
+                description="Replan Pick for selected-target movement before attachment",
             ),
             DeclareLaunchArgument(
                 "allow_execution",
@@ -532,6 +539,9 @@ def generate_launch_description():
                     table_profiles_file,
                     {
                         "perception_3d_source": perception_3d_source,
+                        "pick_replan_on_target_movement": ParameterValue(
+                            pick_replan_on_target_movement, value_type=bool
+                        ),
                         "allow_execution": ParameterValue(
                             allow_execution, value_type=bool
                         ),
