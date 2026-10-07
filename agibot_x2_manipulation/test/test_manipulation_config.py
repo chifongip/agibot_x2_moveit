@@ -254,7 +254,7 @@ def test_late_visible_box_detections_do_not_interrupt_a_planned_task():
     ).read_text(encoding="utf-8")
 
     assert "box_pose_tracker_.waitForUnchangedPoses(" not in server_source
-    assert "box_pose_tracker_.movedStablePose(*reference, latest, detail)" in server_source
+    assert "box_pose_tracker_.movedStablePose(*reference, latest, detail, detection_request_stamp_)" in server_source
     assert "if (actual.size() != expected.size())" not in server_source
     assert "for (const auto & reference : references)" in tracker_source
     assert "changed before motion:" in tracker_source

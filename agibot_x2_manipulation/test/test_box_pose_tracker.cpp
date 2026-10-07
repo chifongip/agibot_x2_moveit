@@ -103,8 +103,34 @@ TEST_F(BoxPoseTrackerTest, OptionalMovementCheckIgnoresMissingExpiredAndChangedP
   auto future = pose("target", 0.1);
   future.pose.header.stamp = node_->now() + rclcpp::Duration::from_seconds(1.0);
   publish({future});
-  ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, latest, detail));
+  EXPECT_FALSE(tracker_->waitForStablePose("target", 0.03, []() {return false;}, latest, detail));
   EXPECT_FALSE(tracker_->movedStablePose(reference, latest, detail));
+}
+
+TEST_F(BoxPoseTrackerTest, RequestCutoffRejectsCachedAndDelayedOldObservations)
+{
+  auto cached = pose("target", 0.1);
+  publish({cached});
+  TrackedBoxPose latest;
+  std::string error;
+  ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, latest, error));
+  const auto request_stamp = node_->now();
+  EXPECT_FALSE(tracker_->stablePose("target", latest, request_stamp));
+  EXPECT_TRUE(tracker_->freshPoses(request_stamp).empty());
+  const auto reference = pose("target", 0.0);
+  EXPECT_FALSE(tracker_->movedStablePose(reference, latest, error, request_stamp));
+  // A message arriving after the request still has to carry a newer observation timestamp.
+  publish({cached});
+  EXPECT_FALSE(tracker_->waitForStablePose("target", 0.03, []() {return false;}, latest,
+    error, {}, request_stamp));
+  int waits = 0;
+  ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, latest,
+    error, [&]() {++waits; publish({pose("target", 0.2)});}, request_stamp)) << error;
+  EXPECT_EQ(waits, 1);
+  EXPECT_DOUBLE_EQ(latest.pose.pose.pose.position.x, 0.2);
+  EXPECT_GT(rclcpp::Time(latest.pose.header.stamp), request_stamp);
+  EXPECT_EQ(tracker_->freshPoses(request_stamp).size(), 1U);
+  EXPECT_TRUE(tracker_->movedStablePose(reference, latest, error, request_stamp));
 }
 
 TEST_F(BoxPoseTrackerTest, OptionalMovementCheckUsesPositionAndOrientationThresholds)

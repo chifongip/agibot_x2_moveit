@@ -411,6 +411,9 @@ private:
   template<typename GoalHandleT>
   void beginTask(const std::shared_ptr<GoalHandleT> & goal, const std::string & action)
   {
+    // Worker start is a conservative cutoff after goal acceptance. Keep it
+    // unchanged through acquisition retries and nested PickPlace operations.
+    detection_request_stamp_ = node_->now();
     pick_replan_on_target_movement_ = node_->get_parameter(
       "pick_replan_on_target_movement").as_bool();
     std::ostringstream id;
@@ -768,7 +771,7 @@ private:
     }
     if (!waitForDetections([&](const auto & waiting) {
         return box_pose_tracker_.waitForStablePose(instance_id, config_.tag_reacquisition_timeout,
-          canceled, box, error, waiting);
+          canceled, box, error, waiting, detection_request_stamp_);
       }))
     {
       return false;
@@ -783,17 +786,40 @@ private:
     const CancelFunction & canceled)
   {
     visible_boxes.clear();
+    const auto previous_boxes = box_pose_tracker_.freshPoses();
+    const auto acquisition_deadline = std::min(phase_deadline_,
+      std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(config_.tag_reacquisition_timeout)));
     if (require_target) {
       TrackedBoxPose target;
       if (!waitForDetections([&](const auto & waiting) {
           return box_pose_tracker_.waitForStablePose(target_instance_id,
-            config_.tag_reacquisition_timeout, canceled, target, error, waiting);
+            config_.tag_reacquisition_timeout, canceled, target, error, waiting, detection_request_stamp_);
         }))
       {
         return false;
       }
     }
-    const auto fresh_boxes = box_pose_tracker_.freshPoses();
+    // Give previously visible optional obstacles a chance to provide a new
+    // observation before freezing the scene, including Reset without a target.
+    // A lost optional obstacle is excluded after the shared acquisition budget.
+    for (const auto & entry : previous_boxes) {
+      if (!detection_request_stamp_ || entry.first == target_instance_id ||
+        rclcpp::Time(entry.second.pose.header.stamp, node_->get_clock()->get_clock_type()) >
+        *detection_request_stamp_)
+      {continue;}
+      std::string ignored;
+      const bool observed = waitForDetections([&](const auto & waiting) {
+          const double remaining = std::max(0.0, std::chrono::duration<double>(
+            acquisition_deadline - std::chrono::steady_clock::now()).count());
+          TrackedBoxPose latest;
+          return box_pose_tracker_.waitForStablePose(entry.first, remaining, canceled,
+            latest, ignored, waiting, detection_request_stamp_);
+        });
+      if (!observed && canceled()) {error = "box scene acquisition canceled"; return false;}
+    }
+    const auto fresh_boxes = box_pose_tracker_.freshPoses(detection_request_stamp_);
     const auto target = fresh_boxes.find(target_instance_id);
     if (require_target && target == fresh_boxes.end()) {
       error = "selected box is no longer a fresh visible instance: " + target_instance_id;
@@ -895,8 +921,10 @@ private:
         continue;
       } else {
         geometry_msgs::msg::PoseStamped observed;
-        std::string ignored;
-        if (!entry.second->waitForStablePose(0.0, canceled, observed, ignored)) {continue;}
+        if (!collectOptionalTablePose(*entry.second, observed, canceled)) {
+          if (canceled()) {error = "table scene acquisition canceled"; return false;}
+          continue;
+        }
         pose = toEigen(observed.pose);
         if (detection_snapshot_active_) {detection_table_poses_[entry.first] = pose;}
       }
@@ -905,6 +933,27 @@ private:
         tablePoseFromVerticalTag(pose, profile.dimensions, profile.tabletop_center)});
     }
     return true;
+  }
+
+  bool collectOptionalTablePose(TableTagPoseTracker & tracker,
+    geometry_msgs::msg::PoseStamped & pose, const CancelFunction & canceled)
+  {
+    std::string ignored;
+    if (tracker.waitForStablePose(0.0, canceled, pose, ignored, {}, detection_request_stamp_)) {
+      return true;
+    }
+    // Preserve optional acquisition when no fresh observation exists at all.
+    // If a cached table exists, allow it to renew rather than dropping it just
+    // because the first post-request detector callback has not arrived yet.
+    if (!detection_request_stamp_ ||
+      !tracker.waitForStablePose(0.0, canceled, pose, ignored)) {return false;}
+    const double timeout = std::min(config_.tag_reacquisition_timeout,
+      std::max(0.0, std::chrono::duration<double>(
+        phase_deadline_ - std::chrono::steady_clock::now()).count()));
+    return waitForDetections([&](const auto & waiting) {
+        return tracker.waitForStablePose(timeout, canceled, pose, ignored, waiting,
+          detection_request_stamp_);
+      });
   }
 
   bool collectSelectedTable(DetectionSceneSnapshot & observations, std::string & error,
@@ -926,10 +975,7 @@ private:
         return true;
       }
       geometry_msgs::msg::PoseStamped tag_pose;
-      std::string observation_error;
-      if (table_tag_pose_tracker_->waitForStablePose(
-          0.0, []() {return false;}, tag_pose, observation_error))
-      {
+      if (collectOptionalTablePose(*table_tag_pose_tracker_, tag_pose, canceled)) {
         try {
           const auto accepted_pose = toEigen(tag_pose.pose);
           observations.table = SceneBox{config_.table_collision_id, config_.table_dimensions,
@@ -941,6 +987,7 @@ private:
           return false;
         }
       }
+      if (canceled()) {error = "table scene acquisition canceled"; return false;}
     }
     return true;
   }
@@ -1007,7 +1054,9 @@ private:
     if (reference == boxes.end()) {return true;}
     TrackedBoxPose latest;
     std::string detail;
-    if (!box_pose_tracker_.movedStablePose(*reference, latest, detail)) {return true;}
+    if (!box_pose_tracker_.movedStablePose(*reference, latest, detail, detection_request_stamp_)) {
+      return true;
+    }
     if (!planning_scene_.applyBox(toEigen(stampedBoxPose(latest).pose), error)) {return false;}
     *reference = latest;
     detection_boxes_ = boxes;
@@ -1076,7 +1125,8 @@ private:
     geometry_msgs::msg::PoseStamped tag_pose;
     if (!waitForDetections([&](const auto & waiting) {
         return table_tag_pose_tracker_->waitForStablePose(
-          config_.tag_reacquisition_timeout, canceled, tag_pose, error, waiting);
+          config_.tag_reacquisition_timeout, canceled, tag_pose, error, waiting,
+          detection_request_stamp_);
       }))
     {
       return false;
@@ -3607,6 +3657,7 @@ private:
   std::vector<TrackedBoxPose> active_visible_boxes_;
   // Accessed only by the reserved action worker. Trackers/markers remain live;
   // accepted detections enter MoveIt once per action (or confirmed box movement).
+  std::optional<rclcpp::Time> detection_request_stamp_;
   bool detection_snapshot_active_{false};
   bool detection_table_required_{true};
   bool detection_scene_captured_{false};

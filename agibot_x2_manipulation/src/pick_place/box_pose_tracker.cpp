@@ -144,12 +144,15 @@ BoxPoseTracker::BoxPoseTracker(
 }
 
 bool BoxPoseTracker::stablePose(
-  const std::string & instance_id, TrackedBoxPose & pose) const
+  const std::string & instance_id, TrackedBoxPose & pose,
+  const std::optional<rclcpp::Time> & not_before) const
 {
   std::lock_guard<std::mutex> lock(mutex_);
-  const auto fresh = [this](const TrackedBoxPose & candidate) {
-      return candidate.pose.header.frame_id == planning_frame_ &&
-             (node_->now() - candidate.pose.header.stamp).seconds() <= maximum_age_;
+  const auto fresh = [this, &not_before](const TrackedBoxPose & candidate) {
+      const rclcpp::Time stamp(candidate.pose.header.stamp, node_->get_clock()->get_clock_type());
+      const double age = (node_->now() - stamp).seconds();
+      return candidate.pose.header.frame_id == planning_frame_ && age >= 0.0 &&
+             age <= maximum_age_ && (!not_before || stamp > *not_before);
     };
   if (!instance_id.empty()) {
     const auto found = latest_poses_.find(instance_id);
@@ -179,11 +182,11 @@ bool BoxPoseTracker::stablePose(
 }
 
 bool BoxPoseTracker::movedStablePose(
-  const TrackedBoxPose & reference, TrackedBoxPose & latest, std::string & detail) const
+  const TrackedBoxPose & reference, TrackedBoxPose & latest, std::string & detail,
+  const std::optional<rclcpp::Time> & not_before) const
 {
   detail.clear();
-  if (!stablePose(reference.instance_id, latest)) {return false;}
-  if ((node_->now() - latest.pose.header.stamp).seconds() < 0.0) {return false;}
+  if (!stablePose(reference.instance_id, latest, not_before)) {return false;}
   bool moved = false;
   withinTolerance(reference, latest, detail, &moved);
   if (!moved) {detail.clear();}
@@ -227,11 +230,13 @@ bool BoxPoseTracker::waitForFresh(
 
 bool BoxPoseTracker::waitForStablePose(
   const std::string & instance_id, double timeout, const std::function<bool()> & canceled,
-  TrackedBoxPose & pose, std::string & error, const std::function<void()> & waiting) const
+  TrackedBoxPose & pose, std::string & error, const std::function<void()> & waiting,
+  const std::optional<rclcpp::Time> & not_before) const
 {
-  return waitForFresh([&](std::string &) {return stablePose(instance_id, pose);},
-    timeout, canceled, waiting, instance_id.empty() ? "a uniquely selectable fresh box pose" :
-    "fresh box pose for instance " + instance_id, error);
+  return waitForFresh([&](std::string &) {return stablePose(instance_id, pose, not_before);},
+    timeout, canceled, waiting, (instance_id.empty() ? "a uniquely selectable fresh box pose" :
+    "fresh box pose for instance " + instance_id) +
+    std::string(not_before ? " captured after the action request" : ""), error);
 }
 
 bool BoxPoseTracker::waitForUnchangedPoses(
@@ -258,14 +263,17 @@ bool BoxPoseTracker::waitForUnchangedPoses(
     }, timeout, canceled, waiting, "fresh detections for the planned box snapshot", error);
 }
 
-std::map<std::string, TrackedBoxPose> BoxPoseTracker::freshPoses() const
+std::map<std::string, TrackedBoxPose> BoxPoseTracker::freshPoses(
+  const std::optional<rclcpp::Time> & not_before) const
 {
   std::lock_guard<std::mutex> lock(mutex_);
   std::map<std::string, TrackedBoxPose> result;
   for (const auto & entry : latest_poses_) {
     const auto & candidate = entry.second;
-    if (candidate.pose.header.frame_id == planning_frame_ &&
-      (node_->now() - candidate.pose.header.stamp).seconds() <= maximum_age_)
+    const rclcpp::Time stamp(candidate.pose.header.stamp, node_->get_clock()->get_clock_type());
+    const double age = (node_->now() - stamp).seconds();
+    if (candidate.pose.header.frame_id == planning_frame_ && age >= 0.0 &&
+      age <= maximum_age_ && (!not_before || stamp > *not_before))
     {
       result.emplace(entry.first, candidate);
     }
@@ -444,10 +452,10 @@ void TableTagPoseTracker::updateStablePose(
 bool TableTagPoseTracker::waitForStablePose(
   double timeout, const std::function<bool()> & canceled,
   geometry_msgs::msg::PoseStamped & output, std::string & error,
-  const std::function<void()> & waiting) const
+  const std::function<void()> & waiting, const std::optional<rclcpp::Time> & not_before) const
 {
   std::uint64_t consumed_generation = 0;
-  return waitForStablePoseAfter(0, timeout, canceled, output, consumed_generation, error, waiting);
+  return waitForStablePoseAfter(0, timeout, canceled, output, consumed_generation, error, waiting, not_before);
 }
 
 std::uint64_t TableTagPoseTracker::generation() const
@@ -459,7 +467,8 @@ std::uint64_t TableTagPoseTracker::generation() const
 bool TableTagPoseTracker::waitForStablePoseAfter(
   std::uint64_t minimum_generation, double timeout, const std::function<bool()> & canceled,
   geometry_msgs::msg::PoseStamped & output, std::uint64_t & generation,
-  std::string & error, const std::function<void()> & waiting) const
+  std::string & error, const std::function<void()> & waiting,
+  const std::optional<rclcpp::Time> & not_before) const
 {
   error.clear();
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout);
@@ -471,6 +480,8 @@ bool TableTagPoseTracker::waitForStablePoseAfter(
       return false;
     }
     if (have_stable_pose_ && stable_generation_ > minimum_generation &&
+      (!not_before || rclcpp::Time(stable_pose_.header.stamp,
+        node_->get_clock()->get_clock_type()) > *not_before) &&
       (node_->now() - stable_pose_.header.stamp).seconds() >= 0.0 &&
       (node_->now() - stable_pose_.header.stamp).seconds() <= maximum_age_)
     {
@@ -480,7 +491,8 @@ bool TableTagPoseTracker::waitForStablePoseAfter(
     }
     const auto now = std::chrono::steady_clock::now();
     if (now >= deadline) {
-      error = "no fresh stable table tag pose";
+      error = not_before ? "no fresh stable table tag pose captured after the action request" :
+        "no fresh stable table tag pose";
       return false;
     }
     if (!announced && waiting) {

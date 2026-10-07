@@ -311,6 +311,29 @@ TEST_F(TableTagPoseTrackerTest, RequiresNewStableObservationAndAcceptsUnchangedP
       []() {return false;}, pose, consumed, error));
 }
 
+TEST_F(TableTagPoseTrackerTest, RequestTimestampRequiresANewerStableResult)
+{
+  const auto publish_sample = [&]() {
+      const auto stamp = node_->now();
+      publishTransform(0.25, stamp);
+      spinFor(std::chrono::milliseconds(10));
+      publishDetection(stamp);
+      spinFor(std::chrono::milliseconds(20));
+    };
+  for (int index = 0; index < 3; ++index) {publish_sample();}
+  geometry_msgs::msg::PoseStamped pose;
+  std::string error;
+  ASSERT_TRUE(tracker_->waitForStablePose(0.0, []() {return false;}, pose, error));
+  const auto cutoff = node_->now();
+  EXPECT_FALSE(tracker_->waitForStablePose(0.02, []() {return false;}, pose, error, {}, cutoff));
+  int waits = 0;
+  ASSERT_TRUE(tracker_->waitForStablePose(0.2, []() {return false;}, pose, error,
+    [&]() {++waits; publish_sample();}, cutoff)) << error;
+  EXPECT_EQ(waits, 1);
+  EXPECT_GT(rclcpp::Time(pose.header.stamp), cutoff);
+  EXPECT_NEAR(pose.pose.position.x, 0.25, 1e-6);
+}
+
 TEST_F(TableTagPoseTrackerTest, RejectsStaleLatestTransform)
 {
   tracker_.reset();

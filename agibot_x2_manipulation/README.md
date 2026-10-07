@@ -1147,11 +1147,21 @@ box profile so hardware calibration does not determine their feasibility.
 
 Pick, Place, PickPlace, and their plan-only requests accept one box/table
 snapshot per action. Initial acquisition must complete before motion. Planning
+uses observations timestamped strictly after the action worker starts (after
+request acceptance), rather than a still-fresh cached detection. Required box
+and table acquisition waits for such a result within `tag_reacquisition_timeout`;
+optional boxes/tables with only pre-request observations are excluded.
+Previously visible optional obstacles get a bounded initial opportunity to
+renew their observations before being excluded; an absent optional table does
+not require a detection to appear. Delayed messages with older observation
+timestamps cannot satisfy this requirement.
+Saved-plan execution retains its saved geometry and does not reacquire detections.
+The request cutoff stays fixed through acquisition retries. Planning
 retries and Continue retain object identities, profiles, dimensions, poses, and
 the placement target. Combined PickPlace shares one snapshot through Pick,
 Place, and return; separately submitted Pick and Place capture independently.
-Standalone Pick accepts a currently fresh stable table observation without
-waiting; Place and combined PickPlace retain their initial table requirements.
+Standalone Pick accepts optional post-request stable table observations;
+Place and combined PickPlace retain their initial table requirements.
 A new ordinary action acquires fresh observations. Cancellation and exceptions
 release the local retention scope. Completion does not reacquire detections.
 Detection tracking and table visualization remain live.

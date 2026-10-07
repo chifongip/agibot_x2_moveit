@@ -43,19 +43,24 @@ public:
     double position_tolerance,
     double orientation_tolerance);
 
-  bool stablePose(const std::string & instance_id, TrackedBoxPose & pose) const;
+  // When supplied, not_before excludes observations captured at/before the request.
+  bool stablePose(const std::string & instance_id, TrackedBoxPose & pose,
+    const std::optional<rclcpp::Time> & not_before = {}) const;
   // Nonblocking: absent, stale, invalid, or different-profile poses are ignored.
   bool movedStablePose(
-    const TrackedBoxPose & reference, TrackedBoxPose & latest, std::string & detail) const;
+    const TrackedBoxPose & reference, TrackedBoxPose & latest, std::string & detail,
+    const std::optional<rclcpp::Time> & not_before = {}) const;
   bool waitForStablePose(
     const std::string & instance_id, double timeout, const std::function<bool()> & canceled,
     TrackedBoxPose & pose, std::string & error,
-    const std::function<void()> & waiting = {}) const;
+    const std::function<void()> & waiting = {},
+    const std::optional<rclcpp::Time> & not_before = {}) const;
   bool waitForUnchangedPoses(
     const std::vector<TrackedBoxPose> & references, double timeout,
     const std::function<bool()> & canceled, std::string & error,
     const std::function<void()> & waiting = {}, bool * moved = nullptr) const;
-  std::map<std::string, TrackedBoxPose> freshPoses() const;
+  std::map<std::string, TrackedBoxPose> freshPoses(
+    const std::optional<rclcpp::Time> & not_before = {}) const;
   bool stillWithinTolerance(
     const TrackedBoxPose & reference, TrackedBoxPose & latest,
     std::string & error) const;
@@ -132,14 +137,16 @@ public:
   bool waitForStablePose(
     double timeout, const std::function<bool()> & canceled,
     geometry_msgs::msg::PoseStamped & output, std::string & error,
-    const std::function<void()> & waiting = {}) const;
+    const std::function<void()> & waiting = {},
+    const std::optional<rclcpp::Time> & not_before = {}) const;
 
   // A stable observation generation advances even when the detected pose is unchanged.
   std::uint64_t generation() const;
   bool waitForStablePoseAfter(
     std::uint64_t minimum_generation, double timeout, const std::function<bool()> & canceled,
     geometry_msgs::msg::PoseStamped & output, std::uint64_t & generation,
-    std::string & error, const std::function<void()> & waiting = {}) const;
+    std::string & error, const std::function<void()> & waiting = {},
+    const std::optional<rclcpp::Time> & not_before = {}) const;
 
 private:
   void onDetections(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message);

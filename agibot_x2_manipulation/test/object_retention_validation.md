@@ -156,3 +156,71 @@ snapshot/replanning execution. Across both review runs, all six affected launch
 targets passed. Changed Python files parse successfully and `git diff --check`
 passes. The full workspace suite and hardware execution were not run. No commit
 was created during review.
+
+## Post-request initial acquisition — 2026-10-07
+
+New ordinary Pick, Place, PickPlace, and plan-only actions use a fixed timestamp
+cutoff taken when their reserved worker starts, after request acceptance. Required
+box/table observations must carry a strictly newer observation timestamp and pass
+the existing freshness/stability checks. Receipt after the request does not make
+an older sensor observation eligible. The cutoff remains unchanged through
+acquisition retries and Continue.
+
+Previously visible optional boxes share a bounded initial renewal budget;
+previously visible optional tables also get a bounded opportunity to renew.
+Absent optional observations remain optional, and pre-request cached geometry
+is excluded. This prevents an acquisition race from dropping a visible obstacle
+before its first post-request callback. Reset applies the same rule after gaining
+exclusive access. Carry still requires no detections. Once acquired, the managed
+scene stays retained throughout the action. Saved execution continues restoring
+its saved geometry; optional Pick target replanning accepts only post-request
+target observations.
+
+Tracker regressions verify cached-result rejection, delayed old messages, new
+unchanged table results, timestamp-filtered obstacle collection, and optional
+target movement checks. The new fake-feedback Combine regression seeds cached
+box/table poses, replays their old timestamps after the request, then releases new
+box and table observations separately. It checks the new accepted poses, exclusion
+of an obstacle with only old observations, and saved execution during a detector
+outage.
+
+```bash
+colcon build --symlink-install --packages-select agibot_x2_manipulation --parallel-workers 2
+
+ROS_DOMAIN_ID=222 colcon test --packages-select agibot_x2_manipulation \
+  --ctest-args -R 'test_box_pose_tracker$|test_table_tag_pose_tracker$|test_pick_place_config$|test_manipulation_config$|test_saved_plan$|test_retained_planning_scene$|test_phase_retry_controller$|^test_test_request_detection.launch.py$|^test_test_detection_snapshot.launch.py$|^test_test_saved_detection_snapshot.launch.py$|^test_test_continue_actions.launch.py$|^test_test_optional_pick_table.launch.py$' \
+  --output-on-failure --event-handlers console_direct+
+```
+
+Build log: `/tmp/x2-request-detection-final-build.log`. Regression log:
+`/tmp/x2-request-detection-final-tests.log`. The first integration run exposed
+the optional-observation acquisition race in Reset and standalone Pick; bounded
+initial renewal fixes it. No tuned parameters or captured inputs were changed.
+
+The final build and all 12 selected CTest targets passed: 81 C++ cases, 38 Python
+configuration cases, and five launch targets. All result reports contain zero
+failures/errors. Changed Python files parse and `git diff --check` passes.
+
+Captured replay also passed 6/6 ordinary and 6/6 saved workflows. Ordinary replay
+took 236.8 seconds; saved replay took 272.8 seconds. All launch processes exited
+with zero, every action matched its expected outcome, and all capture SHA-256
+values are unchanged. All 71 saved planner-call counters remained zero with
+optional target replanning disabled. These runs used isolated fake feedback,
+domains 223/224, and ports 31411–31416/31511–31516.
+
+```bash
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-request-detection-captured-ordinary-20261007 \
+  --workflow both --exercise-carry --mode pose_to_pose \
+  --domain-id 223 --port-base 31411
+
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-request-detection-captured-saved-20261007 \
+  --workflow both --saved-plan --exercise-carry --exercise-pause \
+  --exercise-start-alignment --mode pose_to_pose --domain-id 224 --port-base 31511
+```
+
+The captured output directories contain `results.json`, timings, and per-case
+logs. The full workspace suite and hardware execution were not run.
