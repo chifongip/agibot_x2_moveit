@@ -118,6 +118,59 @@ TEST(SavedPlan, CheckpointReportsMissingSceneOrGroup)
   EXPECT_NE(error.find("unavailable"), std::string::npos);
 }
 
+TEST(SavedPlan, RecoveryContactPolicyKeepsTheBoxAndRejectsUnrelatedCollisions)
+{
+  Fixture f;
+  f.plan.config.box_id = "grasp_box_selected";
+  // Exercise the actual wrist link name, independently of custom TCP names.
+  auto urdf = urdf::parseURDF(R"(<robot name="contact">
+    <link name="base"/>
+    <link name="right_wrist_roll_link"><collision><geometry><sphere radius="0.02"/></geometry></collision></link>
+    <link name="right_elbow_link"><collision><geometry><sphere radius="0.02"/></geometry></collision></link>
+    <joint name="wrist" type="prismatic"><parent link="base"/><child link="right_wrist_roll_link"/>
+      <axis xyz="1 0 0"/><limit lower="-1" upper="1" effort="10" velocity="1"/></joint>
+    <joint name="elbow" type="prismatic"><parent link="base"/><child link="right_elbow_link"/>
+      <origin xyz="0 0.5 0"/><axis xyz="1 0 0"/><limit lower="-1" upper="1" effort="10" velocity="1"/></joint>
+    </robot>)");
+  auto srdf = std::make_shared<srdf::Model>();
+  srdf->initString(*urdf, R"(<robot name="contact"><group name="arm">
+    <joint name="wrist"/><joint name="elbow"/></group></robot>)");
+  auto model = std::make_shared<moveit::core::RobotModel>(urdf, srdf);
+  auto scene = std::make_shared<planning_scene::PlanningScene>(model);
+  auto measured = scene->getCurrentState();
+  measured.setToDefaultValues(); measured.update();
+  const auto add = [&](const std::string & id, double y) {
+      moveit_msgs::msg::CollisionObject object;
+      object.header.frame_id = "base";
+      object.id = id;
+      object.operation = object.ADD;
+      shape_msgs::msg::SolidPrimitive shape;
+      shape.type = shape.BOX; shape.dimensions = {0.05, 0.05, 0.05};
+      geometry_msgs::msg::Pose pose;
+      pose.position.y = y; pose.orientation.w = 1.0;
+      object.primitives = {shape}; object.primitive_poses = {pose};
+      EXPECT_TRUE(scene->processCollisionObjectMsg(object));
+    };
+  std::string error;
+  add(f.plan.config.box_id, 0.0);
+  EXPECT_TRUE(scene->isStateColliding(measured, "arm"));
+  auto contact = graspContactScene(scene, f.plan.config);
+  EXPECT_TRUE(contact->getWorld()->hasObject(f.plan.config.box_id));
+  EXPECT_FALSE(contact->isStateColliding(measured, "arm"));
+  EXPECT_TRUE(validateSavedCheckpointState(measured, scene, f.plan.config, error)) << error;
+  add(f.plan.config.box_id, 0.5);
+  EXPECT_FALSE(validateSavedCheckpointState(measured, scene, f.plan.config, error));
+  EXPECT_NE(error.find("right_elbow_link"), std::string::npos) << error;
+  add(f.plan.config.box_id, 0.0);
+  for (const auto & id : {"work_table", "grasp_box_other", "external_obstacle"}) {
+    add(id, 0.0);
+    EXPECT_FALSE(validateSavedCheckpointState(measured, scene, f.plan.config, error));
+    EXPECT_NE(error.find(id), std::string::npos) << error;
+    scene->getWorldNonConst()->removeObject(id);
+  }
+  EXPECT_TRUE(validateSavedCheckpointState(measured, scene, f.plan.config, error)) << error;
+}
+
 TEST(SavedPlan, TableDetectionUsesCapturedLimitsWithLegacyFallback)
 {
   PickPlaceConfig config;

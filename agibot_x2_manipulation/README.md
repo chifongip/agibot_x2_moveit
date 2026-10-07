@@ -1179,8 +1179,11 @@ including saved execution; changes during an action apply to the next action.
 At stationary motion boundaries, fresh stable same-profile observations are
 compared to the last accepted target using `detection_position_tolerance` and
 `detection_orientation_tolerance` (with the existing legacy fallbacks when unset).
-Exceeding either threshold updates the target and replans dependent grasp,
-pregrasp, approach, and carry paths from measured robot state. Saved PickPlace
+Exceeding either threshold updates the target and replans dependent paths from
+measured robot state. Before Approach, this can rebuild Pregrasp and select a new
+grasp. During Approach or an unfinished attachment, recovery preserves the
+selected box-relative contacts and plans Cartesian motion directly from measured
+hand poses to the updated contact poses. Saved PickPlace
 also rebuilds Place/release/return paths before resuming. Replanning uses bounded
 phase retries and Continue; an active trajectory is never interrupted solely
 because a detection changes. Missing, stale, invalid, or changed-profile
@@ -1712,6 +1715,21 @@ When contact has moved outside those bounds, the unfinished approach or placemen
 is planned again before the physical operation is dispatched.
 Pick also validates joint limits and collisions at attachment against the current
 scene, including refreshed obstacles when the hand contacts have not moved.
+
+Approach and attachment recovery never fall back to free-space Pregrasp planning.
+If contacts remain within tolerance at attachment, no repeated approach is needed.
+Otherwise, the remaining Cartesian approach and carry continuation must be valid
+before motion. A failed Cartesian recovery stays paused for another Continue,
+cancellation, or Reset. Saved execution rebuilds its dependent remaining paths
+using the same recovery policy.
+
+The selected box remains present during Cartesian Approach planning. Only its
+designated hand, TCP, and wrist contacts are allowed; collisions with other robot
+links, tables, other boxes, and external obstacles remain checked. Lift and Place
+use the attached box's touch links. Retreat permits disengagement contact but
+requires a clear endpoint before strict Prepare/Ready motion. These contact rules
+apply during ordinary execution and recovery, without globally disabling box
+collisions or changing the live scene's allowed collision matrix.
 
 Task checkpoint diagnostics are saved beside `state_file` in `state_file.task`.
 The live action worker retains the complete goal and planning context. After a

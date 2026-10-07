@@ -1155,17 +1155,10 @@ public:
     std::chrono::steady_clock::time_point::max())
   {
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
-      moveit_msgs::msg::CollisionObject saved_box;
-      if (!retreat_scene && !planning_scene_.removeWorldBoxTemporarily(saved_box, error)) {return false;}
       const auto scene = retreat_scene ? retreat_scene : graspContactScene(planning_scene_.snapshot(), config_);
       const auto cartesian_started = std::chrono::steady_clock::now();
       const bool planned = planCartesianMotion(start, {target.left_contact, target.right_contact},
         scene, config_, output, end_state, error, canceled, std::min(outer_deadline, phase_deadline_));
-      std::string restore_error;
-      if (!retreat_scene && !planning_scene_.restoreWorldBox(saved_box, restore_error)) {
-        error = restore_error;
-        return false;
-      }
       writeTrace("cartesian_segment", planned, error,
         {{"segment", retreat_scene ? "retreat" : "approach"},
           {"elapsed_seconds", std::to_string(std::chrono::duration<double>(

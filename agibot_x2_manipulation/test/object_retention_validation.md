@@ -355,3 +355,87 @@ workflows passed**, with clean shutdowns and unchanged capture hashes; report:
 `/tmp/x2-continue-review-captured-20261007/results.json`. Changed Python files pass
 syntax checks and `git diff --check` passes. No hardware motion or tuned parameter
 changes were involved.
+
+## Cartesian contact recovery (2026-10-07)
+
+Ordinary and saved Approach/Attach recovery preserve selected box-relative hand
+contacts and plan directly from measured TCP poses to refreshed contact poses.
+They do not invoke full Pick/Pregrasp planning after Approach has begun. Valid
+attachment contacts are retained; changed contacts require a valid Cartesian
+approach and carry preflight before motion or attachment. Cartesian Approach now
+keeps the selected box in its local planning scene instead of temporarily removing
+the entire world box. Only designated hand/wrist/TCP contact is allowed.
+
+No action/service interfaces, runtime parameter files, tolerances, calibration,
+captures, or robot settings changed. The new launch fixture uses temporary
+test-only parameters and isolated fake feedback.
+
+Validation:
+
+- Builds passed: `/tmp/x2-cartesian-recovery-build.log` and
+  `/tmp/x2-cartesian-recovery-tests-build.log`.
+- Six existing targets passed: saved-plan, Cartesian, post-place planner,
+  ordinary Continue, saved Continue, and optional target-movement replanning.
+  Log: `/tmp/x2-cartesian-recovery-baseline-tests.log`.
+- The new collision unit test verifies actual wrist contact is permitted while
+  the selected box remains present, selected-box/elbow contact is rejected, and
+  table, other-box, and external-object collisions remain checked.
+- The new pose-to-pose launch regression passed all ordinary/saved Approach and
+  Attach scenarios, repeated Continue, and cancellation. It confirms real
+  right hand/wrist contact using MoveIt's strict state-validity service, verifies
+  no Pregrasp search after Continue, and counts physical attachment/release calls.
+  Log: `/tmp/x2-cartesian-recovery-final-pose.log`; XML:
+  `/tmp/x2-cartesian-recovery-final-pose.xml`.
+- An initial 4 cm test offset did not produce the required collision; the fixture
+  now uses an 8 cm offset and explicitly verifies overlap. This changes test
+  geometry only.
+- With the same displaced target, closed-chain Approach accepts the contact,
+  but carry preflight exhausts the existing eight-second search budget. The
+  regression verifies the task remains paused before attachment, performs no
+  Pregrasp fallback, and can be canceled. It does not claim that displaced Carry
+  is feasible or increase its budget. Log:
+  `/tmp/x2-cartesian-recovery-closed-final.log`; XML:
+  `/tmp/x2-cartesian-recovery-closed-final.xml`.
+- The final registered CTest run covers phase retry, retained scene, saved plan,
+  and the closed-chain pause/cancel regression; log:
+  `/tmp/x2-cartesian-recovery-final-ctest.log`.
+
+Commands used after unsetting `FASTRTPS_DEFAULT_PROFILES_FILE` and sourcing ROS
+and the workspace:
+
+```bash
+ROS_DOMAIN_ID=214 colcon test --packages-select agibot_x2_manipulation \
+  --ctest-args -R 'test_saved_plan$|test_cartesian_motion$|test_post_place_planner$|^test_test_continue_actions.launch.py$|^test_test_saved_continue_detection.launch.py$|^test_test_moved_box_retry.launch.py$' \
+  --output-on-failure --event-handlers console_direct+
+
+ROS_DOMAIN_ID=220 python3 -m launch_testing.launch_test \
+  src/agibot_x2_moveit/agibot_x2_manipulation/test/test_cartesian_recovery.launch.py \
+  --junit-xml=/tmp/x2-cartesian-recovery-final-pose.xml \
+  --package-name=agibot_x2_manipulation
+
+X2_RECOVERY_TEST_MODE=closed_chain ROS_DOMAIN_ID=222 \
+  colcon test --packages-select agibot_x2_manipulation --ctest-args \
+  -R 'test_saved_plan$|test_phase_retry_controller$|test_retained_planning_scene$|^test_test_cartesian_recovery.launch.py$' \
+  --output-on-failure --event-handlers console_direct+
+
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-cartesian-recovery-captured-ordinary-20261007 \
+  --workflow both --exercise-carry --mode pose_to_pose \
+  --domain-id 216 --port-base 32311
+
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-cartesian-recovery-captured-saved-20261007 \
+  --workflow both --saved-plan --exercise-carry --exercise-pause \
+  --exercise-start-alignment --mode pose_to_pose --domain-id 218 --port-base 32411
+```
+
+All **6 ordinary** and **6 saved captured workflows passed**, with clean shutdowns
+and unchanged capture SHA256 hashes. Their output directories contain the full
+results and per-case logs. Full workspace tests and hardware motion were not run.
+
+The cancellation launch fixtures completed their functional assertions and the
+manipulation server exited cleanly, but `move_group` reproduced the documented
+shutdown segmentation fault after cancellation. Those fixture shutdowns are not
+counted as clean; the twelve captured workflows above all exited with code zero.

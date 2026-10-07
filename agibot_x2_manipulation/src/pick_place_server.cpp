@@ -1994,6 +1994,7 @@ private:
     if (!released && previous.action != "pick" &&
       !refreshPlacementTarget(place, error, canceled)) {return false;}
     bool resume_contact = false;
+    bool resume_approach = false;
     Eigen::Isometry3d contact_pose = previous.pick_pose;
     if (!released && state_.load() == ManipulationState::EMPTY) {
       const auto selected = std::find_if(detection_boxes_.begin(), detection_boxes_.end(),
@@ -2011,7 +2012,9 @@ private:
           config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
           "Continue attachment contact", contact_error) &&
         validateSavedCheckpointState(*current, planning_scene_.snapshot(), config_, contact_error);
-      if (!resume_contact) {
+      resume_approach = previous.steps[index].name == "approach" ||
+        previous.steps[index].kind == SavedStepKind::ATTACH;
+      if (!resume_contact && !resume_approach) {
         const auto task = planCompletePath(previous.instance_id, place, canceled,
           previous.action == "pick", true);
         error = task.message;
@@ -2034,24 +2037,44 @@ private:
       return true;
     }
     moveit::core::RobotState start(*current);
-    Eigen::Isometry3d from = resume_contact ? contact_pose : toEigen(held_pose_.pose);
-    const Eigen::Isometry3d left = resume_contact ? previous.box_to_left : held_box_to_left_contact_;
-    const Eigen::Isometry3d right = resume_contact ? previous.box_to_right : held_box_to_right_contact_;
-    if (resume_contact) {
+    const bool before_attachment = resume_contact || resume_approach;
+    Eigen::Isometry3d from = before_attachment ? contact_pose : toEigen(held_pose_.pose);
+    const Eigen::Isometry3d left = before_attachment ? previous.box_to_left : held_box_to_left_contact_;
+    const Eigen::Isometry3d right = before_attachment ? previous.box_to_right : held_box_to_right_contact_;
+    if (before_attachment) {
       building_plan_->pick_pose = contact_pose;
       building_plan_->box_to_left = left;
       building_plan_->box_to_right = right;
+      if (!resume_contact) {
+        RCLCPP_INFO(node_->get_logger(),
+          "Saved Cartesian approach recovery for %s from measured hands; Pregrasp skipped",
+          config_.box_id.c_str());
+        auto grasp = motion_planner_.graspFromBoxToTcp(contact_pose, left, right, 0.0);
+        grasp.left_pregrasp = start.getGlobalLinkTransform(config_.left_tcp);
+        grasp.right_pregrasp = start.getGlobalLinkTransform(config_.right_tcp);
+        moveit_msgs::msg::RobotTrajectory approach;
+        moveit::core::RobotState contact_end(start);
+        if (!motion_planner_.buildApproach(start, grasp, approach, contact_end, error, canceled))
+        {return false;}
+        std::vector<CartesianSegment> cartesian;
+        if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+          cartesian.push_back({0, approach.joint_trajectory.points.size() - 1,
+            {grasp.left_pregrasp, grasp.right_pregrasp}, {grasp.left_contact, grasp.right_contact}});
+        }
+        saveMotion("approach", approach, start, false, true, false, cartesian);
+        start = contact_end;
+      }
       SavedStep attach;
       attach.name = "attach";
       attach.kind = SavedStepKind::ATTACH;
       attach.start = std::make_shared<moveit::core::RobotState>(start);
       building_plan_->steps.push_back(std::move(attach));
     }
-    if (resume_contact || previous.steps[index].name == "carry") {
+    if (before_attachment || previous.steps[index].name == "carry") {
       AdaptiveCarryPlan carry;
-      const double lift_top = (resume_contact ? contact_pose : previous.pick_pose).translation().z() +
+      const double lift_top = (before_attachment ? contact_pose : previous.pick_pose).translation().z() +
         config_.lift_height;
-      if (!motion_planner_.planAdaptiveCarry(start, from, previous.carry_pose, resume_contact,
+      if (!motion_planner_.planAdaptiveCarry(start, from, previous.carry_pose, before_attachment,
           left, right, carry, error, canceled, lift_top))
       {return false;}
       saveMotion("carry", carry.trajectory, start, true, false, false, carry.cartesian);
@@ -2064,7 +2087,7 @@ private:
     moveit::core::RobotState end(start);
     Eigen::Isometry3d selected = toEigen(place.pose);
     PostPlacePlan return_plan;
-    if (!motion_planner_.planAdaptivePlace(start, from, selected, false, resume_contact,
+    if (!motion_planner_.planAdaptivePlace(start, from, selected, false, before_attachment,
         left, right, transport, end, selected,
         error, canceled, postPlaceContinuation(left, right, canceled, &return_plan))) {return false;}
     savePlace(start, transport, selected, return_plan);
@@ -2526,7 +2549,6 @@ private:
     uint64_t pick_scene_revision = detection_scene_revision_;
     bool pregrasp_cache_available = false;
     bool approach_cache_available = false;
-    bool pick_replan_required = false;
     const auto validate_pick_scene = [&](const CancelFunction & planning_canceled,
         std::string & failure) {
         bool changed = false;
@@ -2535,10 +2557,7 @@ private:
           visible_boxes = detection_boxes_;
           if (!refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, failure)) {return false;}
           box_message = stampedBoxPose(tracked_box);
-          const auto refreshed_pick = toEigen(box_message.pose);
-          pick_replan_required = pick_replan_required ||
-            !pick_pose.matrix().isApprox(refreshed_pick.matrix(), 1e-9);
-          pick_pose = refreshed_pick;
+          pick_pose = toEigen(box_message.pose);
           pregrasp_cache_available = false;
           approach_cache_available = false;
           pick_scene_revision = detection_scene_revision_;
@@ -2547,7 +2566,6 @@ private:
         if (changed) {
           pregrasp_cache_available = false;
           approach_cache_available = false;
-          pick_replan_required = true;
           if (!refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, failure)) {return false;}
           box_message = stampedBoxPose(tracked_box);
           pick_pose = toEigen(box_message.pose);
@@ -2637,7 +2655,6 @@ private:
     moveit::core::RobotState cached_approach_start(preflight_pregrasp.getLastWayPoint());
     pregrasp_cache_available = true;
     approach_cache_available = true;
-    pick_replan_required = false;
 
     if (!runPhase("prepare", false, feedback, 0.25F, box_message, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
@@ -2687,7 +2704,6 @@ private:
             planned.setRobotTrajectoryMsg(*measured, pregrasp_plan.trajectory_);
             cached_approach_start = planned.getLastWayPoint();
             approach_cache_available = true;
-            pick_replan_required = false;
           }
           if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
             failure = trajectory_executor_.error("pregrasp execution failed");
@@ -2708,26 +2724,15 @@ private:
             !validate_pick_scene(planning_canceled, failure)) {return false;}
           current = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!current) {failure = "approach state unavailable"; return false;}
-          if (pick_replan_required) {
-            if (!motion_planner_.planPickPath(box_message, pick_pose, pregrasp_plan, approach,
-                contact_end, selected_grasp, carry_validator, failure, planning_canceled,
-                current.get())) {return false;}
-            // A moved target requires a new pregrasp before approaching it.
-            // Recheck visibility before executing the newly planned motion.
-            if (!validate_pick_scene(planning_canceled, failure)) {return false;}
-            if (!trajectory_executor_.execute(pregrasp_plan, canceled)) {
-              failure = trajectory_executor_.error("updated pregrasp execution failed");
-              return false;
-            }
-            current = move_group_.getCurrentState(config_.reset_state_timeout);
-            if (!current) {failure = "updated approach state unavailable"; return false;}
-            pick_replan_required = false;
-            approach_cache_available = false;
-            if (!validate_pick_scene(planning_canceled, failure)) {return false;}
-          }
-          auto grasp = selected_grasp.candidate.grasp;
+          // Preserve the selected box-relative contacts and approach directly
+          // from feedback. A full Pick search would send contact states through
+          // strict free-space Pregrasp planning after a detection refresh.
+          auto candidate = selected_grasp;
+          auto grasp = motion_planner_.graspFromBoxToTcp(pick_pose,
+            candidate.candidate.box_to_left_contact, candidate.candidate.box_to_right_contact, 0.0);
           grasp.left_pregrasp = current->getGlobalLinkTransform(config_.left_tcp);
           grasp.right_pregrasp = current->getGlobalLinkTransform(config_.right_tcp);
+          candidate.candidate.grasp = grasp;
           std::string cache_error;
           const bool reuse = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
             approach_cache_available && validateReusablePickTrajectory(
@@ -2742,8 +2747,19 @@ private:
           approach_cache_available = false;
           RCLCPP_INFO(node_->get_logger(), "Approach preflight plan %s: %s",
             reuse ? "reused" : "replanned", cache_error.c_str());
-          if (!reuse && !motion_planner_.buildApproach(*current, grasp, approach, contact_end,
-              failure, planning_canceled)) {return false;}
+          if (!reuse) {
+            RCLCPP_INFO(node_->get_logger(),
+              "Cartesian approach recovery for %s from measured hands; Pregrasp skipped",
+              config_.box_id.c_str());
+            if (!motion_planner_.buildApproach(*current, grasp, approach, contact_end,
+                failure, planning_canceled)) {return false;}
+            AdaptiveCarryPlan recovered_carry;
+            if (!motion_planner_.planAdaptiveCarry(contact_end, pick_pose, nominal_carry_pose, true,
+                candidate.candidate.box_to_left_contact, candidate.candidate.box_to_right_contact,
+                recovered_carry, failure, planning_canceled)) {return false;}
+            carry_plan = std::move(recovered_carry);
+          }
+          selected_grasp = std::move(candidate);
           if (!trajectory_executor_.execute(approach, canceled)) {
             failure = trajectory_executor_.error("approach execution failed");
             return false;
@@ -2772,8 +2788,10 @@ private:
             !synchronizeTableCollisionScene(failure, planning_canceled)) {return false;}
           auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!measured) {failure = "attachment state unavailable"; return false;}
-          const auto & contact = selected_grasp.candidate.grasp;
-          if (pick_replan_required || !check_pose_tolerance(
+          const auto contact = motion_planner_.graspFromBoxToTcp(pick_pose,
+            selected_grasp.candidate.box_to_left_contact,
+            selected_grasp.candidate.box_to_right_contact, 0.0);
+          if (!check_pose_tolerance(
               measured->getGlobalLinkTransform(config_.left_tcp),
               measured->getGlobalLinkTransform(config_.right_tcp),
               contact.left_contact, contact.right_contact,
@@ -2797,6 +2815,9 @@ private:
           // unchanged. Validate that checkpoint before dispatching attachment.
           if (!validateSavedCheckpointState(*measured, planning_scene_.snapshot(), config_, failure))
           {return false;}
+          selected_grasp.candidate.grasp = motion_planner_.graspFromBoxToTcp(pick_pose,
+            selected_grasp.candidate.box_to_left_contact,
+            selected_grasp.candidate.box_to_right_contact, 0.0);
           return attachment_.attach(failure, &attach_dispatched);
         }, [&]() {return attach_dispatched;})) {
       if (attach_dispatched) {
