@@ -110,3 +110,16 @@ def test_replay_pid_is_specific_and_unambiguous():
     for log in (other, replay + "\n" + replay):
         with pytest.raises(ValueError):
             MODULE.replay_process_id(log)
+
+
+def test_saved_execution_allows_replanning_only_after_continue():
+    feedback = [dict(stage="saved/pregrasp", seconds=0.0),
+                dict(stage="paused/saved/pregrasp", seconds=1.0),
+                dict(stage="waiting_for_detection", seconds=2.0),
+                dict(stage="replanning_remaining", seconds=3.0),
+                dict(stage="saved/pregrasp", seconds=4.0)]
+    assert not MODULE.saved_execution_feedback_is_valid(feedback)
+    assert not MODULE.saved_execution_feedback_is_valid(feedback, 2.5)
+    assert MODULE.saved_execution_feedback_is_valid(feedback, 1.5)
+    feedback.append(dict(stage="planning_unexpected", seconds=5.0))
+    assert not MODULE.saved_execution_feedback_is_valid(feedback, 1.5)

@@ -40,7 +40,8 @@ def generate_test_description():
         "ros__parameters": {"simulate_ideal_attachment": True}}
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as params:
         yaml.safe_dump(profiles, params)
-    return fixture.make_test_description(params.name)
+    return fixture.make_test_description(params.name, extra_arguments={
+        "phase_retry_attempts": "1", "phase_retry_timeout": "20.0"})
 
 
 class TestContinueActions(unittest.TestCase):
@@ -118,6 +119,7 @@ class TestContinueActions(unittest.TestCase):
         joints = {}
         position = [0.33, 0.0, 0.14]
         obstacle_x = [2.0]
+        frozen_stamp = [None]
         place_frame_x = [0.0]
         broadcaster = TransformBroadcaster(self.node)
         self.scene = self.node.create_client(ApplyPlanningScene, "/apply_planning_scene")
@@ -138,7 +140,7 @@ class TestContinueActions(unittest.TestCase):
             broadcaster.sendTransform(transform)
             box = BoxState()
             box.header.frame_id = "base_link"
-            box.header.stamp = self.node.get_clock().now().to_msg()
+            box.header.stamp = frozen_stamp[0] or self.node.get_clock().now().to_msg()
             box.instance_id, box.profile_id = "tag:0", "small_carton"
             box.pose.pose.position.x, box.pose.pose.position.y, box.pose.pose.position.z = position
             box.pose.pose.orientation.w = 1.0
@@ -192,6 +194,15 @@ class TestContinueActions(unittest.TestCase):
             obstacle_x[0] = 2.2
             publish()
             self.set_block(False)
+            # Replay a pre-Continue timestamp: receipt after Continue is insufficient.
+            frozen_stamp[0] = self.node.get_clock().now().to_msg()
+            publish()
+            self.resume(task_id, paused.pause_id)
+            self.wait(lambda: self.paused(task_id, paused.pause_id) is not None)
+            paused = self.paused(task_id, paused.pause_id)
+            self.assertIn("after the action request", paused.failure)
+            self.assertEqual(physical_calls, [])
+            frozen_stamp[0] = None
             self.resume(task_id, paused.pause_id)
             self.wait(lambda: self.paused(task_id, paused.pause_id) is not None)
             paused = self.paused(task_id, paused.pause_id)
@@ -199,10 +210,21 @@ class TestContinueActions(unittest.TestCase):
             self.assertEqual(physical_calls, [])
             services.append(self.node.create_service(
                 Trigger, "/mujoco_grasp/attach", physical_operation))
+            # A refreshed scene must be checked at the physical checkpoint,
+            # even if the target and hand contacts have not moved.
+            self.set_block(True)
+            self.resume(task_id, paused.pause_id)
+            self.wait(lambda: self.paused(task_id, paused.pause_id) is not None)
+            paused = self.paused(task_id, paused.pause_id)
+            self.assertEqual(paused.phase, "attach")
+            self.assertEqual(paused.object_disposition, "not_attached")
+            self.assertIn("checkpoint collision", paused.failure)
+            self.assertEqual(physical_calls, [])
+            self.set_block(False)
             self.resume(task_id, paused.pause_id)
             self.assertTrue(self.succeed(result).object_held)
             self.assertEqual(len(physical_calls), 1)
-            assert_obstacle(2.0)
+            assert_obstacle(2.2)
             self.assertFalse(any(s.task_id == task_id and "refreshed" in s.failure
                                  for s in self.statuses))
 
@@ -261,13 +283,13 @@ class TestContinueActions(unittest.TestCase):
             completed = self.succeed(result)
             self.assertAlmostEqual(completed.achieved_pose.pose.position.x, 0.35, delta=0.05)
             self.assertEqual(len(physical_calls), 4)
-            assert_obstacle(2.2)
+            assert_obstacle(2.6)
             checkpoints = [s.last_completed_phase for s in self.statuses if s.task_id == task_id]
             self.assertIn("release", checkpoints)
             self.assertIn("to_prepare", checkpoints)
             self.assertIn("from_prepare_to_ready", checkpoints)
 
-            # Reset: retain the same reset worker and confirmation checkpoint.
+            # Reset: refresh optional geometry without repeating cleanup.
             self.set_block(True)
             _, result, task_id = self.start(
                 ResetManipulation, "/reset_manipulation", ResetManipulation.Goal(confirm_empty=True))
@@ -279,7 +301,7 @@ class TestContinueActions(unittest.TestCase):
             self.set_block(False)
             self.resume(task_id, paused.pause_id)
             self.succeed(result)
-            assert_obstacle(2.6)
+            assert_obstacle(3.0)
             srdf = Path(get_package_share_directory("agibot_x2_moveit_config")) / "config/x2_ultra.srdf"
             ready = ET.parse(srdf).find(".//group_state[@name='ready'][@group='dual_arm']")
             expected = {joint.attrib["name"]: float(joint.attrib["value"]) for joint in ready}

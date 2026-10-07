@@ -323,7 +323,11 @@ public:
       std::shared_ptr<ContinueManipulation::Response> response) {
         response->success = (!reset_coordinator_.resetRequested() ||
           phase_controller_.snapshot().action == "reset") &&
-          phase_controller_.requestContinue(request->task_id, request->pause_id, response->message);
+          phase_controller_.requestContinue(request->task_id, request->pause_id, response->message,
+            [this]() {
+              std::lock_guard<std::mutex> lock(continue_detection_mutex_);
+              continue_detection_stamp_ = node_->now();
+            });
         if (response->success) {response->message = "Continue accepted; replanning unfinished phase";}
         else if (response->message.empty()) {response->message = "reset is pending";}
       }, rmw_qos_profile_services_default, continue_callback_group_);
@@ -414,6 +418,12 @@ private:
     // Worker start is a conservative cutoff after goal acceptance. Keep it
     // unchanged through acquisition retries and nested PickPlace operations.
     detection_request_stamp_ = node_->now();
+    placement_request_.reset();
+    action_box_selected_ = false;
+    {
+      std::lock_guard<std::mutex> lock(continue_detection_mutex_);
+      continue_detection_stamp_.reset();
+    }
     pick_replan_on_target_movement_ = node_->get_parameter(
       "pick_replan_on_target_movement").as_bool();
     std::ostringstream id;
@@ -502,7 +512,8 @@ private:
             return canceled() || shutting_down_.load() || !rclcpp::ok() ||
               std::chrono::steady_clock::now() >= deadline;
           };
-        return attempt(planning_canceled, failure);
+        return prepareContinueScene(planning_canceled, failure) &&
+          attempt(planning_canceled, failure);
       }, [this, canceled]() {return canceled() || shutting_down_.load() || !rclcpp::ok();},
       [this, &feedback, progress, &pose](const PhaseRetryStatus & status) {
         publishTaskStatus(status);
@@ -767,7 +778,9 @@ private:
         return false;
       }
       box = *found;
-      return activateBoxProfile(box, error);
+      if (!activateBoxProfile(box, error)) {return false;}
+      action_box_selected_ = true;
+      return true;
     }
     if (!waitForDetections([&](const auto & waiting) {
         return box_pose_tracker_.waitForStablePose(instance_id, config_.tag_reacquisition_timeout,
@@ -776,7 +789,9 @@ private:
     {
       return false;
     }
-    return activateBoxProfile(box, error);
+    if (!activateBoxProfile(box, error)) {return false;}
+    action_box_selected_ = true;
+    return true;
   }
 
   bool collectFreshBoxes(
@@ -1010,6 +1025,91 @@ private:
     return true;
   }
 
+  // Only the action worker changes snapshots. The service records the accepted
+  // request timestamp; failed acquisition retains it until another Continue.
+  bool prepareContinueScene(const CancelFunction & canceled, std::string & error)
+  {
+    std::optional<rclcpp::Time> request_stamp;
+    {
+      std::lock_guard<std::mutex> lock(continue_detection_mutex_);
+      request_stamp = continue_detection_stamp_;
+    }
+    if (!request_stamp) {return true;}
+    const auto status = phase_controller_.snapshot();
+    if (status.action == "move_carry_pose") {
+      std::lock_guard<std::mutex> lock(continue_detection_mutex_);
+      continue_detection_stamp_.reset();
+      return true;
+    }
+    if (!trajectory_executor_.waitUntilStopped(canceled, error)) {return false;}
+    detection_request_stamp_ = request_stamp;
+    const bool pick_target = (status.action == "pick" || status.action == "pick_place") &&
+      status.object_disposition == "not_attached";
+    if (pick_target && !action_box_selected_) {
+      std::lock_guard<std::mutex> lock(continue_detection_mutex_);
+      continue_detection_stamp_.reset();
+      return true;
+    }
+    const auto old_table = detection_table_pose_;
+    const auto old_tables = detection_table_poses_;
+    const bool old_captured = detection_scene_captured_;
+    detection_table_pose_.reset();
+    detection_table_poses_.clear();
+    detection_scene_captured_ = false;
+    ScopeExit rollback([&]() {
+      detection_table_pose_ = old_table;
+      detection_table_poses_ = old_tables;
+      detection_scene_captured_ = old_captured;
+    });
+    DetectionSceneSnapshot observations;
+    std::vector<TrackedBoxPose> boxes;
+    const std::string target = status.action == "reset" ? "" : active_box_instance_id_;
+    if (!collectFreshBoxes(target, pick_target && !target.empty(), observations, boxes,
+        error, canceled) || !collectFreshTable(observations, error, canceled)) {return false;}
+    if (pick_target && !target.empty()) {
+      const auto selected = std::find_if(boxes.begin(), boxes.end(),
+        [&](const auto & box) {return box.instance_id == target;});
+      if (selected == boxes.end()) {error = "Continue is missing the selected box"; return false;}
+      try {
+        observations.boxes.push_back({config_.box_id, config_.dimensions,
+          toEigen(stampedBoxPose(*selected).pose)});
+      } catch (const std::exception & exception) {
+        error = "invalid Continue target observation: " + std::string(exception.what());
+        return false;
+      }
+    }
+    const std::set<std::string> protected_ids = !pick_target && !target.empty() ?
+      std::set<std::string>{config_.box_id} : std::set<std::string>{};
+    if (canceled()) {error = "Continue scene acquisition canceled"; return false;}
+    if (!planning_scene_.updateDetectionScene(observations, protected_ids,
+        status.action == "reset", error) || !planning_scene_.retainDetectionObjects(error))
+    {return false;}
+    rollback.dismiss();
+    detection_boxes_ = boxes;
+    active_visible_boxes_ = boxes;
+    detection_scene_captured_ = true;
+    ++detection_scene_revision_;
+    {
+      std::lock_guard<std::mutex> lock(continue_detection_mutex_);
+      continue_detection_stamp_.reset();
+    }
+    RCLCPP_INFO(node_->get_logger(), "Continue accepted detection snapshot revision %lu",
+      static_cast<unsigned long>(detection_scene_revision_));
+    return true;
+  }
+
+  bool refreshPlacementTarget(geometry_msgs::msg::PoseStamped & pose, std::string & error,
+    const CancelFunction & canceled)
+  {
+    if (!placement_request_) {return true;}
+    if (!placement_request_->header.frame_id.empty()) {
+      pose = *placement_request_;
+      return true;
+    }
+    if (!config_.use_tag_derived_place_pose) {return true;}
+    return resolvePlacePose(*placement_request_, pose, error, canceled);
+  }
+
   bool refreshSelectedBoxFromSnapshot(
     TrackedBoxPose & selected_box, const std::vector<TrackedBoxPose> & visible_boxes,
     std::string & error) const
@@ -1101,8 +1201,14 @@ private:
     geometry_msgs::msg::PoseStamped & output, bool plan_only, const FeedbackFunction & feedback,
     std::string & error, const CancelFunction & canceled)
   {
+    const bool first_resolution = !placement_request_;
+    if (first_resolution) {placement_request_ = requested;}
     if (!requested.header.frame_id.empty() || !config_.use_tag_derived_place_pose) {
-      return resolvePlacePose(requested, output, error, canceled);
+      if (!resolvePlacePose(requested, output, error, canceled)) {return false;}
+      // Retain explicit requests in the planning frame. Replanning must not
+      // accumulate adaptive placement offsets or follow a moving source frame.
+      if (first_resolution) {placement_request_ = output;}
+      return true;
     }
     return runPhase("place_target", plan_only, feedback, 0.05F, held_pose_, canceled, error,
       [&](const CancelFunction & planning_canceled, std::string & failure) {
@@ -1761,6 +1867,7 @@ private:
     if (!building_plan_) {return;}
     auto & plan = *building_plan_;
     plan.config = config_;
+    plan.placement_request = placement_request_;
     plan.profile_version = profile_version_;
     plan.instance_id = active_box_instance_id_;
     plan.profile_id = active_profile_id_;
@@ -1876,6 +1983,94 @@ private:
     savePostPlace(return_plan, empty);
   }
 
+  bool rebuildSavedRemainder(const SavedPlan & previous, size_t index, bool released,
+    const CancelFunction & canceled, std::string & error)
+  {
+    if (!refreshMotionState(error, canceled, !released && state_.load() == ManipulationState::HOLDING))
+    {return false;}
+    auto current = move_group_.getCurrentState(config_.reset_state_timeout);
+    if (!current) {error = "Continue saved-plan feedback unavailable"; return false;}
+    geometry_msgs::msg::PoseStamped place = stampedPose(previous.place_pose);
+    if (!released && previous.action != "pick" &&
+      !refreshPlacementTarget(place, error, canceled)) {return false;}
+    bool resume_contact = false;
+    Eigen::Isometry3d contact_pose = previous.pick_pose;
+    if (!released && state_.load() == ManipulationState::EMPTY) {
+      const auto selected = std::find_if(detection_boxes_.begin(), detection_boxes_.end(),
+        [&](const auto & box) {return box.instance_id == previous.instance_id;});
+      if (selected == detection_boxes_.end()) {error = "Continue target is absent"; return false;}
+      contact_pose = toEigen(stampedBoxPose(*selected).pose);
+      // At attachment, valid contacts are already the unfinished checkpoint.
+      // Do not send the hands back through the box to repeat a pregrasp.
+      std::string contact_error;
+      resume_contact = previous.steps[index].kind == SavedStepKind::ATTACH &&
+        check_pose_tolerance(current->getGlobalLinkTransform(config_.left_tcp),
+          current->getGlobalLinkTransform(config_.right_tcp), contact_pose * previous.box_to_left,
+          contact_pose * previous.box_to_right,
+          config_.execution_position_limit(config_.closed_chain_contact_position_error),
+          config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+          "Continue attachment contact", contact_error) &&
+        validateSavedCheckpointState(*current, planning_scene_.snapshot(), config_, contact_error);
+      if (!resume_contact) {
+        const auto task = planCompletePath(previous.instance_id, place, canceled,
+          previous.action == "pick", true);
+        error = task.message;
+        return task.success;
+      }
+    }
+    capturePlanContext();
+    if (released) {
+      const bool retreat = previous.steps[index].retreat;
+      const bool prepare = std::any_of(previous.steps.begin() + index, previous.steps.end(),
+        [&](const auto & step) {
+          return !config_.prepare_named_target.empty() &&
+                 step.name.rfind(config_.prepare_named_target + "_", 0) == 0;
+        });
+      PostPlacePlan remainder;
+      if (!planPostPlaceSequence(*current, previous.place_pose, previous.box_to_left,
+          previous.box_to_right, planning_scene_.snapshot(), retreat, remainder, error,
+          canceled, phase_deadline_, prepare)) {return false;}
+      savePostPlace(remainder, *current);
+      return true;
+    }
+    moveit::core::RobotState start(*current);
+    Eigen::Isometry3d from = resume_contact ? contact_pose : toEigen(held_pose_.pose);
+    const Eigen::Isometry3d left = resume_contact ? previous.box_to_left : held_box_to_left_contact_;
+    const Eigen::Isometry3d right = resume_contact ? previous.box_to_right : held_box_to_right_contact_;
+    if (resume_contact) {
+      building_plan_->pick_pose = contact_pose;
+      building_plan_->box_to_left = left;
+      building_plan_->box_to_right = right;
+      SavedStep attach;
+      attach.name = "attach";
+      attach.kind = SavedStepKind::ATTACH;
+      attach.start = std::make_shared<moveit::core::RobotState>(start);
+      building_plan_->steps.push_back(std::move(attach));
+    }
+    if (resume_contact || previous.steps[index].name == "carry") {
+      AdaptiveCarryPlan carry;
+      const double lift_top = (resume_contact ? contact_pose : previous.pick_pose).translation().z() +
+        config_.lift_height;
+      if (!motion_planner_.planAdaptiveCarry(start, from, previous.carry_pose, resume_contact,
+          left, right, carry, error, canceled, lift_top))
+      {return false;}
+      saveMotion("carry", carry.trajectory, start, true, false, false, carry.cartesian);
+      start = *carry.end_state;
+      from = carry.pose;
+      building_plan_->carry_pose = carry.pose;
+    }
+    if (previous.action == "pick") {return !building_plan_->steps.empty();}
+    moveit_msgs::msg::RobotTrajectory transport;
+    moveit::core::RobotState end(start);
+    Eigen::Isometry3d selected = toEigen(place.pose);
+    PostPlacePlan return_plan;
+    if (!motion_planner_.planAdaptivePlace(start, from, selected, false, resume_contact,
+        left, right, transport, end, selected,
+        error, canceled, postPlaceContinuation(left, right, canceled, &return_plan))) {return false;}
+    savePlace(start, transport, selected, return_plan);
+    return true;
+  }
+
   TaskOutcome executeSavedPlan(const std::string & action, const std::string & id,
     bool plan_only, const FeedbackFunction & feedback, const CancelFunction & canceled,
     const std::string & requested_table = "")
@@ -1899,12 +2094,14 @@ private:
       return outcome(false, kInvalidGoal, table_error);
     }
     config_ = plan->config;
+    placement_request_ = plan->placement_request;
     active_box_instance_id_ = plan->instance_id;
+    action_box_selected_ = true;
     active_profile_id_ = plan->profile_id;
     const auto * profile = profiles_.find(plan->profile_id);
     active_carry_pose_a_ = profile ? profile->carry_pose_a : config_.carry_pose;
     active_carry_pose_b_ = profile ? profile->carry_pose_b : config_.carry_pose_b;
-    auto detection_scope = freezeDetectionScene();
+    auto detection_scope = freezeDetectionScene(action != "pick");
     detection_boxes_ = plan->boxes;
     detection_table_pose_ = plan->table_tag;
     detection_table_poses_ = plan->table_tags;
@@ -1916,6 +2113,9 @@ private:
     bool scene_restored = false;
     bool replanned = false;
     bool target_replan_pending = false;
+    bool continue_replan_pending = false;
+    bool continued_replanning = false;
+    uint64_t saved_scene_revision = detection_scene_revision_;
     bool released = false;
     std::string error;
     size_t index = 0;
@@ -1941,30 +2141,33 @@ private:
         if (!refreshPickTarget(detection_boxes_, changed, error, canceled)) {
           return outcome(false, kSafetyAbort, error, held_pose_);
         }
-        if (changed || target_replan_pending) {
-          feedback("replanning_pick", static_cast<float>(index) / plan->steps.size(),
-            stampedPose(plan->pick_pose));
-          auto replacement = std::make_shared<SavedPlan>(*plan);
-          replacement->steps.clear();
-          const auto original_building = building_plan_;
-          building_plan_ = replacement;
-          ScopeExit restore_building([this, original_building]() {building_plan_ = original_building;});
-          const bool rebuilt = runPhase("replanning_pick", false, feedback, 0.0F,
-            stampedPose(plan->pick_pose), canceled, error,
-            [&](const CancelFunction & interrupted, std::string & failure) {
-              bool moved_again = false;
-              if (!refreshPickTarget(detection_boxes_, moved_again, failure, interrupted)) {return false;}
-              const auto task = planCompletePath(plan->instance_id,
-                stampedPose(plan->place_pose), interrupted, action == "pick", true);
-              failure = task.message;
-              return task.success;
-            });
-          if (!rebuilt) {return outcome(false, kPlanningFailed, error, held_pose_);}
-          plan = replacement;
-          replanned = true;
-          target_replan_pending = false;
-          index = 0;
-        }
+        target_replan_pending = target_replan_pending || changed;
+      }
+      if (continue_replan_pending || target_replan_pending) {
+        const std::string replan_phase = continue_replan_pending ?
+          "replanning_remaining" : "replanning_pick";
+        continued_replanning = continued_replanning || continue_replan_pending;
+        feedback(replan_phase, static_cast<float>(index) / plan->steps.size(), held_pose_);
+        auto replacement = std::make_shared<SavedPlan>(*plan);
+        const auto original_building = building_plan_;
+        building_plan_ = replacement;
+        ScopeExit restore_building([this, original_building]() {building_plan_ = original_building;});
+        const bool rebuilt = runPhase(replan_phase, false, feedback, 0.0F,
+          held_pose_, canceled, error,
+          [&](const CancelFunction & interrupted, std::string & failure) {
+            replacement->steps.clear();
+            bool moved_again = false;
+            if (!released && state_.load() == ManipulationState::EMPTY &&
+              !refreshPickTarget(detection_boxes_, moved_again, failure, interrupted)) {return false;}
+            return rebuildSavedRemainder(*plan, index, released, interrupted, failure);
+          });
+        if (!rebuilt) {return outcome(false, kPlanningFailed, error, held_pose_);}
+        plan = replacement;
+        replanned = true;
+        target_replan_pending = false;
+        continue_replan_pending = false;
+        saved_scene_revision = detection_scene_revision_;
+        index = 0;
       }
       const auto & step = plan->steps[index];
       bool dispatched = false;
@@ -1974,6 +2177,15 @@ private:
           const CancelFunction interrupted = [&, deadline]() {
               return canceled() || std::chrono::steady_clock::now() >= deadline;
             };
+          phase_deadline_ = deadline;
+          ScopeExit restore_deadline([this]() {
+            phase_deadline_ = std::chrono::steady_clock::time_point::max();
+          });
+          if (!prepareContinueScene(interrupted, failure)) {return false;}
+          if (!carry_only && saved_scene_revision != detection_scene_revision_) {
+            continue_replan_pending = true;
+            return true;
+          }
           if (!refreshMotionState(failure, interrupted, step.held)) {return false;}
           if ((action == "pick" || action == "pick_place") && !released && !step.held) {
             bool changed = false;
@@ -2096,8 +2308,10 @@ private:
             RCLCPP_WARN(node_->get_logger(), "Saved plan %s step %zu/%zu (%s): %s",
               id.c_str(), index + 1, plan->steps.size(), step.name.c_str(), status.failure.c_str());
           }
-        }, error, [&]() {return dispatched;}, [&]() {return !target_replan_pending;});
-      if (ok && target_replan_pending) {continue;}
+        }, error, [&]() {return dispatched;}, [&]() {
+          return !target_replan_pending && !continue_replan_pending;
+        });
+      if (ok && (target_replan_pending || continue_replan_pending)) {continue;}
       if (!ok) {
         error = "saved plan " + id + " step " + std::to_string(index + 1) + "/" +
           std::to_string(plan->steps.size()) + " (" + step.name + "): " + error;
@@ -2115,8 +2329,9 @@ private:
       setSelectedCarryPose(plan->carry_target, plan->carry_pose);
       setState(ManipulationState::HOLDING, "saved plan completed at carry pose");
     } else {setState(ManipulationState::EMPTY, "saved plan completed after release and return");}
-    auto task = outcome(true, kSuccess, replanned ? "saved plan completed after Pick target replanning" :
-      "saved plan completed without replanning",
+    auto task = outcome(true, kSuccess, continued_replanning ?
+      "saved plan completed after Continue replanning" : replanned ?
+      "saved plan completed after Pick target replanning" : "saved plan completed without replanning",
       stampedPose(released ? plan->place_pose : plan->carry_pose));
     task.plan_id = id;
     RCLCPP_INFO(node_->get_logger(), "Saved plan %s completed; planner_calls=%zu",
@@ -2308,6 +2523,7 @@ private:
       return outcome(false, kInvalidGoal, exception.what());
     }
 
+    uint64_t pick_scene_revision = detection_scene_revision_;
     bool pregrasp_cache_available = false;
     bool approach_cache_available = false;
     bool pick_replan_required = false;
@@ -2315,6 +2531,18 @@ private:
         std::string & failure) {
         bool changed = false;
         if (plan_only) {return !planning_canceled();}
+        if (pick_scene_revision != detection_scene_revision_) {
+          visible_boxes = detection_boxes_;
+          if (!refreshSelectedBoxFromSnapshot(tracked_box, visible_boxes, failure)) {return false;}
+          box_message = stampedBoxPose(tracked_box);
+          const auto refreshed_pick = toEigen(box_message.pose);
+          pick_replan_required = pick_replan_required ||
+            !pick_pose.matrix().isApprox(refreshed_pick.matrix(), 1e-9);
+          pick_pose = refreshed_pick;
+          pregrasp_cache_available = false;
+          approach_cache_available = false;
+          pick_scene_revision = detection_scene_revision_;
+        }
         const bool valid = refreshPickTarget(visible_boxes, changed, failure, planning_canceled);
         if (changed) {
           pregrasp_cache_available = false;
@@ -2565,6 +2793,10 @@ private:
                 "execution contact", failure))
             {failure = "attachment contact has not converged: " + failure; return false;}
           }
+          // Continue can replace surrounding obstacles while the contacts stay
+          // unchanged. Validate that checkpoint before dispatching attachment.
+          if (!validateSavedCheckpointState(*measured, planning_scene_.snapshot(), config_, failure))
+          {return false;}
           return attachment_.attach(failure, &attach_dispatched);
         }, [&]() {return attach_dispatched;})) {
       if (attach_dispatched) {
@@ -2841,7 +3073,9 @@ private:
     }
     geometry_msgs::msg::PoseStamped place_message;
     std::string error;
-    if (!resolveTaskPlacePose(requested_pose, place_message, plan_only, feedback, error, canceled)) {
+    uint64_t place_scene_revision = detection_scene_revision_;
+    if (!resolveTaskPlacePose(requested_pose, place_message, plan_only, feedback, error, canceled) ||
+      !refreshPlacementTarget(place_message, error, canceled)) {
       return outcome(false, kInvalidGoal, error);
     }
     Eigen::Isometry3d place_pose;
@@ -2884,6 +3118,12 @@ private:
     const auto place_attempt =
         [&](const CancelFunction & planning_canceled, std::string & failure) {
           if (!plan_only && !refreshMotionState(failure, planning_canceled, true)) {return false;}
+          if (place_scene_revision != detection_scene_revision_) {
+            if (!refreshPlacementTarget(place_message, failure, planning_canceled)) {return false;}
+            place_pose = toEigen(place_message.pose);
+            selected_place_pose = place_pose;
+            place_scene_revision = detection_scene_revision_;
+          }
           if (!validateRetainedScene(failure, planning_canceled) ||
             !synchronizeTableCollisionScene(failure, planning_canceled))
           {return false;}
@@ -2938,7 +3178,8 @@ private:
           if (!measured) {failure = "release state unavailable"; return false;}
           const auto contact = motion_planner_.graspFromBoxToTcp(
             place_pose, held_box_to_left_contact_, held_box_to_right_contact_, 0.0);
-          if (!check_pose_tolerance(measured->getGlobalLinkTransform(config_.left_tcp),
+          if (place_scene_revision != detection_scene_revision_ ||
+            !check_pose_tolerance(measured->getGlobalLinkTransform(config_.left_tcp),
               measured->getGlobalLinkTransform(config_.right_tcp),
               contact.left_contact, contact.right_contact,
               config_.execution_position_limit(config_.closed_chain_contact_position_error),
@@ -3655,9 +3896,14 @@ private:
   std::optional<Eigen::Isometry3d> selected_carry_pose_a_;
   std::optional<Eigen::Isometry3d> selected_carry_pose_b_;
   std::vector<TrackedBoxPose> active_visible_boxes_;
-  // Accessed only by the reserved action worker. Trackers/markers remain live;
-  // accepted detections enter MoveIt once per action (or confirmed box movement).
+  // The action worker owns accepted snapshots and planning context. Trackers
+  // remain live; the service synchronizes only the pending Continue timestamp.
   std::optional<rclcpp::Time> detection_request_stamp_;
+  std::mutex continue_detection_mutex_;
+  std::optional<rclcpp::Time> continue_detection_stamp_;
+  std::optional<geometry_msgs::msg::PoseStamped> placement_request_;
+  uint64_t detection_scene_revision_{0};
+  bool action_box_selected_{false};
   bool detection_snapshot_active_{false};
   bool detection_table_required_{true};
   bool detection_scene_captured_{false};

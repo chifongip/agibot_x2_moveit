@@ -224,3 +224,134 @@ ros2 run agibot_x2_manipulation time_saved_simulation \
 
 The captured output directories contain `results.json`, timings, and per-case
 logs. The full workspace suite and hardware execution were not run.
+
+## Post-Continue detection acquisition (2026-10-07)
+
+A valid Continue request records its ROS timestamp before signaling the retained
+worker. Pick, Place, combined PickPlace, Reset, and saved execution acquire a
+replacement managed scene from observations captured strictly after that
+request. Automatic retries reuse that cutoff and the accepted snapshot.
+Required acquisition failure pauses again; it does not fall back to cached
+required detections. Stale/duplicate Continue requests cannot change the cutoff.
+MoveCarryPose remains detection-free, including Continue.
+
+The replacement scene protects attached and explicitly released task geometry.
+Pick invalidates dependent caches; valid attachment contacts can be retained,
+while changed targets require replanning from measured state. Saved execution
+rebuilds remaining motion without replaying completed attachment, release, or
+return stages. Explicit placement requests retain their initially resolved
+planning-frame target; table-derived requests are recalculated before release.
+Invalid target geometry pauses acquisition rather than escaping the worker.
+
+Validation used ROS 2 Humble, fake feedback, `pose_to_pose`, isolated ROS domains,
+and distinct local ZMQ endpoints. No robot runtime settings, calibration,
+tolerances, or captured YAML files were changed.
+
+- Final build: `colcon build --symlink-install --packages-select
+  agibot_x2_manipulation --parallel-workers 2`, with DDS profile unset and ROS /
+  workspace setup sourced. Passed; log:
+  `/tmp/x2-continue-refresh-final-verified-build.log`.
+- Broad regression run in domain 201 covered tracker/configuration/saved-plan /
+  retained-scene units and Continue, optional table, initial request acquisition,
+  ordinary snapshot, and saved snapshot launch tests. Log:
+  `/tmp/x2-continue-refresh-final-tests.log`.
+- Final focused run in domain 206 covered phase retry, saved plan, manipulation
+  configuration, replay utility, ordinary Continue, and the new saved Continue
+  launch test. **6/6 targets passed**, 208.46 seconds. Log:
+  `/tmp/x2-continue-refresh-release-tests.log`.
+- The broad run's new saved fixture initially omitted the selected instance while
+  publishing two boxes; that test-only failure was corrected and superseded by
+  the final focused pass. Other fixture fixes prevented an empty injection phase
+  from creating a blocker and avoided removing an already absent blocker.
+- The final XML reports for all **14 affected targets** contain zero failures or
+  errors: **132 C++/Python cases** and six launch targets (seven launch cases).
+  New coverage includes old-stamp replay, repeated Continue, invalid target
+  geometry, fresh table acquisition, changed target/obstacle geometry, paused
+  attachment, held and released saved checkpoints, and table-derived placement.
+  Existing automatic movement-toggle and uninterrupted saved-snapshot tests pass.
+- Changed Python files pass AST parsing; `git diff --check` passes.
+
+Captured ordinary workflows:
+
+```bash
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-continue-refresh-final-ordinary-20261007 \
+  --workflow both --exercise-carry --mode pose_to_pose \
+  --domain-id 202 --port-base 31811
+```
+
+Five cases passed in that run. `small_carton_place` launched during relinking and
+failed before node startup because the executable was temporarily unavailable.
+After the final build, the unchanged capture was symlinked into
+`/tmp/x2-continue-refresh-place-capture` and rerun in domain 208 / port 32111:
+**1/1 passed**, 28.61 seconds; results:
+`/tmp/x2-continue-refresh-place-rerun-20261007/results.json`.
+All **six distinct ordinary workflows passed**. An earlier complete ordinary run
+also passed all six cases:
+`/tmp/x2-continue-refresh-captured-ordinary-20261007/results.json`.
+
+Captured saved workflows:
+
+```bash
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-continue-refresh-final-saved-20261007 \
+  --workflow both --saved-plan --exercise-carry --exercise-pause \
+  --exercise-start-alignment --mode pose_to_pose \
+  --domain-id 203 --port-base 31911
+```
+
+**6/6 passed**, 259.59 seconds. The replay utility now permits acquisition and
+replanning only after its explicit Continue probe; uninterrupted saved execution
+still rejects unexpected planning feedback. A unit regression verifies that
+planning before Continue remains rejected.
+
+Detection-outage Carry validation:
+
+```bash
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-continue-refresh-carry-no-detections-20261007 \
+  --workflow sequence --saved-plan --exercise-carry-no-detections \
+  --exercise-pause --mode pose_to_pose --domain-id 207 --port-base 32011
+```
+
+**4/4 passed**, 166.72 seconds. Carry retains attachment, clears managed carry
+obstacles, preserves external obstacles, and resumes after Continue with box and
+table detections stopped and expired. Place subsequently requires newly captured
+detections. Capture SHA256 hashes remain unchanged across all replay reports.
+The full workspace suite and hardware motion were not run.
+
+### Continue review: attachment checkpoint validation
+
+Review found that ordinary Pick could dispatch attachment after Continue replaced
+the scene, without checking collisions at unchanged hand contacts. A regression
+with an external blocker reproduced attachment followed by a pause in Carry
+before the fix (`/tmp/x2-continue-review-regression.log`). Pick now validates the
+measured checkpoint against current collisions and joint limits before dispatching
+attachment. The regression verifies that it pauses at attachment with no physical
+operation, then attaches exactly once after the blocker is removed.
+
+The rebuilt package passed (`/tmp/x2-continue-review-build.log`). With the DDS
+profile unset and ROS/workspace setup sourced, the focused checks were:
+
+```bash
+ROS_DOMAIN_ID=212 ROS_LOG_DIR=/tmp/x2-continue-review-fixed-ros \
+  colcon test --packages-select agibot_x2_manipulation --ctest-args \
+  -R 'test_phase_retry_controller$|test_saved_plan$|test_time_saved_simulation$|^test_test_continue_actions.launch.py$|^test_test_saved_continue_detection.launch.py$' \
+  --output-on-failure --event-handlers console_direct+
+
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-continue-review-captured-20261007 \
+  --workflow both --exercise-carry --mode pose_to_pose \
+  --domain-id 213 --port-base 32211
+```
+
+All **5 focused targets passed** (54 cases), including ordinary and saved Continue
+recovery; log: `/tmp/x2-continue-review-fixed-tests.log`. All **6 captured ordinary
+workflows passed**, with clean shutdowns and unchanged capture hashes; report:
+`/tmp/x2-continue-review-captured-20261007/results.json`. Changed Python files pass
+syntax checks and `git diff --check` passes. No hardware motion or tuned parameter
+changes were involved.

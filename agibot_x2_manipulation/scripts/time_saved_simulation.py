@@ -19,6 +19,20 @@ import time
 import yaml
 
 
+def saved_execution_feedback_is_valid(feedback, continue_requested_seconds=None):
+    """Allow fresh acquisition/replanning only after an explicit Continue probe."""
+    stored_stages = ("saved/", "checking_detections", "paused/saved/")
+    resumed_stages = ("waiting_for_detection", "replanning_remaining",
+                      "retrying/replanning_remaining", "paused/replanning_remaining")
+    return all(
+        item["stage"].startswith(stored_stages) or (
+            continue_requested_seconds is not None
+            and item["seconds"] >= continue_requested_seconds
+            and item["stage"].startswith(resumed_stages)
+        ) for item in feedback
+    )
+
+
 def step_spans(feedback, elapsed):
     """Measure consecutive feedback intervals, including unobserved startup."""
     if not math.isfinite(elapsed) or elapsed < 0:
@@ -193,7 +207,7 @@ def parse_arguments(argv=None):
         default=114,
         help="Isolated offline ROS domain (default: %(default)s).",
     )
-    parser.add_argument("--exercise-pause", action="store_true", help="Inject an external obstacle, then remove it and Continue the same saved segment.")
+    parser.add_argument("--exercise-pause", action="store_true", help="Inject an external obstacle, then remove it and Continue unfinished saved execution.")
     parser.add_argument("--exercise-carry", action="store_true", help="Exercise saved carry A/B actions between pick and place.")
     parser.add_argument(
         "--exercise-carry-no-detections", action="store_true",
@@ -469,6 +483,7 @@ def run_simulations(arguments):
                 assert obstacle.id not in record["scene_after_obstacle_removal"]["world"], "obstacle still present after removal"
                 assert continue_client.wait_for_service(timeout_sec=5), "Continue unavailable"
                 req = ContinueManipulation.Request(task_id=status.task_id, pause_id=status.pause_id)
+                record["continue_requested_seconds"] = time.monotonic() - started
                 future = continue_client.call_async(req)
                 assert spin_until(future.done, 5) and future.result().success, "Continue failed"
                 pause_exercised = True
@@ -533,7 +548,13 @@ def run_simulations(arguments):
             assert record.get("status") == GoalStatus.STATUS_SUCCEEDED and record["success"], record["message"]
             if arguments.saved_plan and not goal.plan_only:
                 assert record["plan_id"] == goal.plan_id, "executed plan ID changed"
-                assert all(item["stage"].startswith(("saved/", "checking_detections", "paused/saved/")) for item in record["feedback"]), "saved execution entered planning"
+                continue_seconds = (record.get("continue_requested_seconds")
+                                    if topic != "/move_carry_pose" else None)
+                assert saved_execution_feedback_is_valid(record["feedback"], continue_seconds), \
+                    "saved execution entered planning before an explicit Continue"
+                if continue_seconds is not None:
+                    assert any(item["stage"] == "replanning_remaining"
+                               for item in record["feedback"]), "Continue did not rebuild remaining motion"
                 import copy
                 action(action_type, topic, copy.deepcopy(goal), case, expected_success=False)
         else:

@@ -1145,8 +1145,9 @@ box profile so hardware calibration does not determine their feasibility.
 
 ### Waiting for tag detections
 
-Pick, Place, PickPlace, and their plan-only requests accept one box/table
-snapshot per action. Initial acquisition must complete before motion. Planning
+Pick, Place, PickPlace, and their plan-only requests accept a box/table
+snapshot before planning, retaining it until an explicit Continue replaces it.
+Initial acquisition must complete before motion. Planning
 uses observations timestamped strictly after the action worker starts (after
 request acceptance), rather than a still-fresh cached detection. Required box
 and table acquisition waits for such a result within `tag_reacquisition_timeout`;
@@ -1155,10 +1156,15 @@ Previously visible optional obstacles get a bounded initial opportunity to
 renew their observations before being excluded; an absent optional table does
 not require a detection to appear. Delayed messages with older observation
 timestamps cannot satisfy this requirement.
-Saved-plan execution retains its saved geometry and does not reacquire detections.
-The request cutoff stays fixed through acquisition retries. Planning
-retries and Continue retain object identities, profiles, dimensions, poses, and
-the placement target. Combined PickPlace shares one snapshot through Pick,
+Initial saved-plan execution retains its saved geometry without reacquiring
+detections; explicit Continue refreshes it before replanning.
+The request cutoff stays fixed through acquisition retries. Automatic
+planning retries retain object identities, profiles, dimensions, poses, and
+the placement target. An explicit Continue starts a new acquisition cycle using
+observations captured strictly after Continue is accepted, then freezes the
+replacement snapshot. Missing required observations pause the action again;
+old required detections are never used as a fallback. This is independent of
+`pick_replan_on_target_movement`. Combined PickPlace shares one snapshot through Pick,
 Place, and return; separately submitted Pick and Place capture independently.
 Standalone Pick accepts optional post-request stable table observations;
 Place and combined PickPlace retain their initial table requirements.
@@ -1178,7 +1184,8 @@ pregrasp, approach, and carry paths from measured robot state. Saved PickPlace
 also rebuilds Place/release/return paths before resuming. Replanning uses bounded
 phase retries and Continue; an active trajectory is never interrupted solely
 because a detection changes. Missing, stale, invalid, or changed-profile
-observations are ignored. Other boxes and tables remain frozen. After attachment,
+observations are ignored. Other boxes and tables remain frozen until an explicit
+Continue. After attachment,
 object state comes from robot feedback and the attachment model.
 
 The snapshot is expressed in `planning_frame`. This toggle responds to observed
@@ -1238,13 +1245,11 @@ stages preserve their existing direct and clearance-route searches and controlle
 spline validation. Each segment is checked against current feedback and scene
 before execution.
 
-Post-place retreat, Prepare, Ready, and their retries retain the table
-observation accepted at Place start. They do not require newer tag detections
-between stages or after Continue. Initial table acquisition still requires a
-fresh stable observation and supports cancellation, Reset, and the existing
-retry/pause flow. Boxes and tables remain frozen during return stages. The
-released task box is represented at its selected placement pose and is not
-reacquired from detections during post-place retries.
+Post-place retreat, Prepare, Ready, and their automatic retries retain the
+accepted table observation. Explicit Continue refreshes the surrounding box/table
+scene using post-Continue observations before replanning the unfinished stage.
+The released task box remains at its achieved placement pose and is never
+reacquired from detections. Completed return stages remain completed.
 
 The return-specific defaults are `return_planning_timeout: 30.0` seconds,
 `return_planning_time_per_attempt: 2.0` seconds, and `return_ik_attempts: 8`.
@@ -1669,8 +1674,12 @@ object disposition, and whether Continue is available. Physical
 
 Call `/continue_manipulation` (`ContinueManipulation`) with the current `task_id`
 and `pause_id`. The service signals the retained action worker and starts a new
-retry cycle. Stale or duplicate requests fail. Continue replans the unfinished
-motion from fresh measured positions after confirming stationary arm feedback;
+retry cycle. Stale or duplicate requests fail. Pick, Place, combined PickPlace,
+Reset, and their saved execution acquire observations timestamped after Continue
+is accepted. Required detection timeouts pause the action again with a new pause
+ID; cancellation and Reset can interrupt acquisition. MoveCarryPose remains
+detection-free. Continue replans the unfinished motion from fresh measured
+positions after confirming stationary arm feedback;
 it does not resend a trajectory from its old start. Completed attachment,
 release, retreat, and return-to-prepare checkpoints are preserved. Other motion
 goals are rejected while the task is active or paused. Standard action
@@ -1678,7 +1687,7 @@ cancellation and reset preemption remain available.
 
 Place tracks completed stages separately from the active stage's planned route.
 A failed replan discards its temporary candidate; Continue obtains a new plan only
-for the unfinished stage, retaining the accepted table observation. Reaching
+for the unfinished stage, using the replacement detection snapshot. Reaching
 Prepare completes that checkpoint; Ready is planned and executed afterward
 before reporting success. Failed or empty planning results
 cannot advance a stage or count as completed motion.
@@ -1689,13 +1698,20 @@ operation is not automatically repeated. Collision and closure validation remain
 required before motion. Invalid goals, cancellation, and unexpected exceptions
 do not enter an automatic motion retry loop.
 
-Pick refreshes its selected box scene when confirmed movement invalidates the
-snapshot, including during retries started by Continue. It retains the table
-pose. If a detected box moves while paused, the next plan uses its current pose. Before attachment or release, retries check fresh
-stationary feedback and both hand contacts using the configured
+Continue refreshes the selected Pick target before attachment regardless of the
+automatic movement toggle, and refreshes managed surrounding boxes/tables.
+Attached geometry remains driven by robot feedback; released geometry retains
+the achieved placement pose. A table-derived placement target is recalculated
+from the refreshed table before release. Explicit placement requests keep their
+initially resolved planning-frame pose. Saved execution discards dependent
+remaining trajectories and preserves completed physical checkpoints. Before
+attachment or release, retries check fresh stationary feedback and both hand
+contacts using the configured
 `closed_chain_contact_position_error` and `closed_chain_contact_orientation_error`.
 When contact has moved outside those bounds, the unfinished approach or placement
 is planned again before the physical operation is dispatched.
+Pick also validates joint limits and collisions at attachment against the current
+scene, including refreshed obstacles when the hand contacts have not moved.
 
 Task checkpoint diagnostics are saved beside `state_file` in `state_file.task`.
 The live action worker retains the complete goal and planning context. After a

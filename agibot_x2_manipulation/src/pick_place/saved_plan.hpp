@@ -44,6 +44,9 @@ struct SavedPlan
   Eigen::Isometry3d pick_pose{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d carry_pose{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d place_pose{Eigen::Isometry3d::Identity()};
+  // Empty frame denotes a table-derived request; explicit poses are resolved
+  // once into the planning frame, before adaptive placement corrections.
+  std::optional<geometry_msgs::msg::PoseStamped> placement_request;
   uint8_t carry_target{0};
   moveit_msgs::msg::PlanningSceneWorld world;
   std::vector<SavedStep> steps;

@@ -9,6 +9,33 @@
 namespace agibot_x2_manipulation
 {
 
+TEST(PhaseRetryController, OnlyAcceptedContinuePublishesMetadataBeforeTheNextAttempt)
+{
+  PhaseRetryController controller;
+  controller.begin("task", "pick", "not_attached");
+  int attempts = 0;
+  int accepted = 0;
+  std::string error;
+  EXPECT_TRUE(controller.run("approach", false, 1, 1.0, 0.0,
+    [&](auto, std::string & failure) {
+      ++attempts;
+      if (attempts == 1) {failure = "planning failed"; return false;}
+      EXPECT_EQ(accepted, 1);
+      return true;
+    }, []() {return false;}, [&](const auto & status) {
+      if (status.status != "paused") {return;}
+      std::string detail;
+      const auto metadata = [&]() {++accepted;};
+      EXPECT_FALSE(controller.requestContinue("old-task", status.pause_id, detail, metadata));
+      EXPECT_FALSE(controller.requestContinue("task", status.pause_id + 1, detail, metadata));
+      EXPECT_EQ(accepted, 0);
+      EXPECT_TRUE(controller.requestContinue("task", status.pause_id, detail, metadata));
+      EXPECT_FALSE(controller.requestContinue("task", status.pause_id, detail, metadata));
+      EXPECT_EQ(accepted, 1);
+    }, error));
+  EXPECT_EQ(attempts, 2);
+}
+
 TEST(PhaseRetryController, DeferredMotionDoesNotAdvanceCompletedCheckpoint)
 {
   PhaseRetryController controller;
