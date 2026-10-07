@@ -54,7 +54,7 @@ PersistedManipulationRecord ManipulationStateStore::read() const
     int version = 0;
     std::string label;
     input >> version >> label >> saved;
-    if ((version == 2 || version == 3 || version == 4) && label == "STATE" &&
+    if ((version >= 2 && version <= 5) && label == "STATE" &&
       saved == "HOLDING")
     {
       std::string pose_label;
@@ -85,6 +85,20 @@ PersistedManipulationRecord ManipulationStateStore::read() const
           (carry_b_valid == 0 || readTransform(input, record.held_object.carry_pose_b));
         record.held_object.carry_pose_a_valid = carry_a_ok && carry_a_valid == 1;
         record.held_object.carry_pose_b_valid = carry_b_ok && carry_b_valid == 1;
+      }
+      if (version >= 5 && record.held_object.valid) {
+        std::string frame_label;
+        std::string frame;
+        input >> frame_label >> frame;
+        if (!input || frame_label != "CARRY_FRAME" || frame != "torso_link") {
+          record.held_object.valid = false;
+        }
+      }
+      if (version < 5) {
+        // Historical endpoints are pelvis-relative; their original torso
+        // posture was not recorded. Retain grasp geometry, not stale targets.
+        record.held_object.carry_pose_a_valid = false;
+        record.held_object.carry_pose_b_valid = false;
       }
       if (version >= 4 && record.held_object.valid) {
         std::string instance_label;
@@ -118,7 +132,7 @@ void ManipulationStateStore::write(
     if (!output) {
       throw std::runtime_error("cannot open state file");
     }
-    output << "VERSION 4\nSTATE " <<
+    output << "VERSION 5\nSTATE " <<
       (state == PersistedManipulationState::EMPTY ? "EMPTY\n" : "HOLDING\n");
     if (state != PersistedManipulationState::EMPTY && held_object.valid) {
       output << "POSE ";
@@ -141,6 +155,7 @@ void ManipulationStateStore::write(
       } else {
         output << '\n';
       }
+      output << "CARRY_FRAME torso_link\n";
       output << "INSTANCE_ID " << std::quoted(held_object.instance_id) << '\n';
       output << "PROFILE_ID " << std::quoted(held_object.profile_id) << '\n';
     }

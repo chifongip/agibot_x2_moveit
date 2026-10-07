@@ -24,6 +24,7 @@ struct BoxProfile {
   Eigen::Vector3d tag_to_box_offset{Eigen::Vector3d::Zero()};
   double pregrasp_distance{0.0};
   double contact_height_offset{0.0};
+  // Box-center poses in torso_link, including torso-relative orientation.
   Eigen::Isometry3d carry_pose_a{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d carry_pose_b{Eigen::Isometry3d::Identity()};
   std::vector<int> tag_ids;

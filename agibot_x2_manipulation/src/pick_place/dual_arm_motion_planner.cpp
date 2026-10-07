@@ -1,3 +1,4 @@
+#include "pick_place/carry_pose_frame.hpp"
 #include "agibot_x2_manipulation/planning_budget.hpp"
 #include "pick_place/dual_arm_motion_planner.hpp"
 #include "pick_place/endpoint_reached.hpp"
@@ -1796,13 +1797,28 @@ public:
 
   bool planAdaptiveCarryToPose(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
-    const Eigen::Isometry3d & nominal_target_pose,
-    const Eigen::Isometry3d * preferred_target_pose, bool transition,
+    const Eigen::Isometry3d & torso_nominal_target_pose,
+    const Eigen::Isometry3d * torso_preferred_target_pose, bool transition,
     bool plan_only, const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
     std::string & error, const CancelFunction & canceled,
     std::optional<double> pick_lift_top = std::nullopt)
   {
+    Eigen::Isometry3d planning_to_torso;
+    try {planning_to_torso = carryFrameTransform(start, config_.planning_frame);}
+    catch (const std::exception & exception) {error = exception.what(); return false;}
+    const Eigen::Isometry3d nominal_target_pose = planning_to_torso * torso_nominal_target_pose;
+    const Eigen::Isometry3d preferred = torso_preferred_target_pose ?
+      planning_to_torso * *torso_preferred_target_pose : nominal_target_pose;
+    const Eigen::Isometry3d * preferred_target_pose = torso_preferred_target_pose ? &preferred : nullptr;
+    // Every successful search returns both representations from the same snapshot.
+    bool carry_selected = false;
+    ScopeExit remember_frame([&]() {
+      if (carry_selected) {
+        selected.planning_to_torso = planning_to_torso;
+        selected.torso_pose = planning_to_torso.inverse() * selected.pose;
+      }
+    });
     PoseSegmentCache local_cache;
     auto * previous_cache = segment_cache_;
     segment_cache_ = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE ? &local_cache : nullptr;
@@ -1877,6 +1893,7 @@ public:
         selected.trajectory = std::move(trajectory);
         selected.end_state = std::make_shared<moveit::core::RobotState>(end);
         search_success = true;
+        carry_selected = true;
         error.clear();
         return true;
       }
@@ -1902,8 +1919,10 @@ public:
     const auto precheck_deadline = std::chrono::steady_clock::now() +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(config_.carry_search_timeout * 0.15));
-    for (const auto & pose : carryPoseCandidates(
-        nominal_target_pose, from_pose, preferred_target_pose)) {
+    for (const auto & torso_pose : carryPoseCandidates(
+        torso_nominal_target_pose, planning_to_torso.inverse() * from_pose,
+        torso_preferred_target_pose)) {
+      const Eigen::Isometry3d pose = planning_to_torso * torso_pose;
       if (canceled()) {
         error = search_name + " endpoint precheck canceled";
         return false;
@@ -2061,6 +2080,7 @@ public:
               {"joint_margin", std::to_string(endpoint.margin)},
               {"joint_distance", std::to_string(endpoint.distance)}});
           search_success = true;
+          carry_selected = true;
           error.clear();
           return true;
         } catch (const std::exception & exception) {

@@ -23,7 +23,8 @@ def generate_test_description():
     return make_test_description()
 
 
-def make_test_description(extra_arguments=None):
+def make_test_description(extra_arguments=None, extra_feedback_arguments=None,
+                          extra_feedback_remappings=None):
     share = get_package_share_directory("agibot_x2_manipulation")
     port = 20000 + os.getpid() % 10000
     endpoint = f"tcp://127.0.0.1:{port}"
@@ -54,8 +55,10 @@ def make_test_description(extra_arguments=None):
         package="agibot_x2_ros2_control",
         executable="fake_zmq_joint_states",
         name="dummy_x2_joint_states",
+        remappings=extra_feedback_remappings or [],
         output="screen",
-        arguments=["--endpoint", endpoint, "--initial-pose", "locomanipulation"],
+        arguments=["--endpoint", endpoint, "--initial-pose", "locomanipulation",
+                   *(extra_feedback_arguments or [])],
     )
     return LaunchDescription([feedback, stack, launch_testing.actions.ReadyToTest()])
 

@@ -47,6 +47,8 @@ using CarryRoute = ClosedChainRoute;
 
 struct AdaptiveCarryPlan
 {
+  Eigen::Isometry3d torso_pose{Eigen::Isometry3d::Identity()};
+  Eigen::Isometry3d planning_to_torso{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d pose{Eigen::Isometry3d::Identity()};
   CarryRoute route{CarryRoute::DIRECT};
   std::vector<CartesianSegment> cartesian;
@@ -113,6 +115,7 @@ public:
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     std::string & error, const std::chrono::steady_clock::time_point & deadline,
     const CancelFunction & canceled);
+  // Nominal/preferred carry targets are torso-relative; selected.pose is planning-relative.
   bool planAdaptiveCarry(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & pick_pose,
     const Eigen::Isometry3d & nominal_target_pose, bool plan_only,

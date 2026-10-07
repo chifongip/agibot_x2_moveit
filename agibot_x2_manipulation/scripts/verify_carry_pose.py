@@ -27,6 +27,9 @@ from agibot_x2_manipulation_msgs.action import Pick
 from agibot_x2_manipulation_msgs.msg import BoxState, BoxStateArray
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.time import Time
+from tf2_geometry_msgs import do_transform_pose
+from tf2_ros import Buffer, TransformListener
 from rclpy.utilities import remove_ros_args
 import yaml
 
@@ -385,6 +388,8 @@ def run_replay(arguments, joints, selected_box, requested_pose, profiles_file, w
         os.environ["ROS_DOMAIN_ID"] = str(domain_id)
         rclpy.init(args=sys.argv)
         node = rclpy.create_node(f"verify_carry_pose_{os.getpid()}")
+        tf_buffer = Buffer()
+        tf_listener = TransformListener(tf_buffer, node)
         publisher = node.create_publisher(BoxStateArray, "/box_states", 10)
         client = ActionClient(node, Pick, "/pick_box")
         startup_deadline = time.monotonic() + arguments.startup_timeout
@@ -410,10 +415,21 @@ def run_replay(arguments, joints, selected_box, requested_pose, profiles_file, w
         wrapped = result_future.result()
         result = wrapped.result
         achieved_pose = pose_from_message(result.achieved_pose.pose) if result.success else None
+        achieved_torso_pose = None
+        if achieved_pose is not None:
+            source_frame = result.achieved_pose.header.frame_id
+            transform_deadline = time.monotonic() + 5.0
+            while not tf_buffer.can_transform("torso_link", source_frame, Time()):
+                if time.monotonic() >= transform_deadline:
+                    raise RuntimeError("cannot transform achieved carry pose into torso_link")
+                rclpy.spin_once(node, timeout_sec=0.05)
+            achieved_torso_pose = pose_from_message(do_transform_pose(
+                result.achieved_pose.pose,
+                tf_buffer.lookup_transform("torso_link", source_frame, Time())))
         outcome, position_error, orientation_error = classification(
             result.success and wrapped.status == GoalStatus.STATUS_SUCCEEDED,
             requested_pose,
-            achieved_pose if achieved_pose else requested_pose,
+            achieved_torso_pose if achieved_torso_pose else requested_pose,
             arguments.position_tolerance,
             math.radians(arguments.orientation_tolerance_degrees),
         )
@@ -424,6 +440,9 @@ def run_replay(arguments, joints, selected_box, requested_pose, profiles_file, w
             "error_code": int(result.error_code),
             "message": result.message,
             "achieved_carry_pose": achieved_pose,
+            "achieved_carry_pose_frame": result.achieved_pose.header.frame_id or "base_link",
+            "achieved_carry_torso_pose": achieved_torso_pose,
+            "achieved_carry_torso_pose_frame": "torso_link",
             "position_error_m": position_error,
             "orientation_error_degrees": (
                 math.degrees(orientation_error) if orientation_error is not None else None
@@ -464,7 +483,7 @@ def parse_arguments(argv):
         nargs=7,
         type=float,
         metavar=("X", "Y", "Z", "QX", "QY", "QZ", "QW"),
-        help="Requested carry pose in base_link as [x y z qx qy qz qw].",
+        help="Requested carry pose in torso_link as [x y z qx qy qz qw].",
     )
     parser.add_argument(
         "--instance-id",
@@ -566,10 +585,12 @@ def main(argv=None):
     )
     started = time.monotonic()
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "snapshot": str(Path(arguments.snapshot).resolve()),
         "profile": arguments.profile,
         "requested_carry_pose": requested_pose,
+        "requested_carry_pose_frame": "torso_link",
+        "achieved_carry_pose_frame": "base_link",
         "motion_planning_mode": arguments.motion_planning_mode,
     }
     try:

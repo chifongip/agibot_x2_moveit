@@ -127,6 +127,7 @@ pick_place_server:
     maximum_joint_step: 0.35
     velocity_scaling: 0.10
     acceleration_scaling: 0.10
+    # Carry A/B are box-center poses in torso_link (position and orientation).
     # Legacy-only carry targets for a deployment without box_profiles. When a
     # profile catalog is loaded, each profile must supply carry_pose_a and may
     # supply carry_pose_b; those profile values are used for Pick, recovery,

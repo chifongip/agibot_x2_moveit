@@ -1,3 +1,4 @@
+#include "pick_place/carry_pose_frame.hpp"
 #include "agibot_x2_manipulation/box_geometry.hpp"
 #include "agibot_x2_manipulation/box_profile_registry.hpp"
 #include "agibot_x2_manipulation/reset_coordinator.hpp"
@@ -1623,7 +1624,8 @@ private:
       recovered_pose.linear() =
         left_rotation.slerp(0.5, right_rotation).normalized().toRotationMatrix();
     } else {
-      const auto & nominal_carry_pose = carryPose(MoveCarryPose::Goal::CARRY_A);
+      const auto nominal_carry_pose = carryPoseInPlanningFrame(
+        *current, config_.planning_frame, carryPose(MoveCarryPose::Goal::CARRY_A));
       const auto grasp = computeGraspGeometry(
         nominal_carry_pose, config_.dimensions, 0.0, config_.contact_height_offset);
       if (!check_pose_tolerance(current->getGlobalLinkTransform(config_.left_tcp),
@@ -1933,6 +1935,8 @@ private:
     building_plan_->steps.clear();
     building_plan_->pick_pose = pick;
     building_plan_->carry_pose = carry.pose;
+    building_plan_->carry_torso_pose = carry.torso_pose;
+    building_plan_->carry_frame = carry.planning_to_torso;
     building_plan_->carry_target = MoveCarryPose::Goal::CARRY_A;
     building_plan_->box_to_left = grasp.candidate.box_to_left_contact;
     building_plan_->box_to_right = grasp.candidate.box_to_right_contact;
@@ -1990,6 +1994,10 @@ private:
     {return false;}
     auto current = move_group_.getCurrentState(config_.reset_state_timeout);
     if (!current) {error = "Continue saved-plan feedback unavailable"; return false;}
+    current->update();
+    if (building_plan_ && previous.carry_frame) {
+      building_plan_->carry_frame = carryFrameTransform(*current, config_.planning_frame);
+    }
     geometry_msgs::msg::PoseStamped place = stampedPose(previous.place_pose);
     if (!released && previous.action != "pick" &&
       !refreshPlacementTarget(place, error, canceled)) {return false;}
@@ -2074,13 +2082,15 @@ private:
       AdaptiveCarryPlan carry;
       const double lift_top = (before_attachment ? contact_pose : previous.pick_pose).translation().z() +
         config_.lift_height;
-      if (!motion_planner_.planAdaptiveCarry(start, from, previous.carry_pose, before_attachment,
+      if (!motion_planner_.planAdaptiveCarry(start, from, previous.carry_torso_pose, before_attachment,
           left, right, carry, error, canceled, lift_top))
       {return false;}
       saveMotion("carry", carry.trajectory, start, true, false, false, carry.cartesian);
       start = *carry.end_state;
       from = carry.pose;
       building_plan_->carry_pose = carry.pose;
+      building_plan_->carry_torso_pose = carry.torso_pose;
+      building_plan_->carry_frame = carry.planning_to_torso;
     }
     if (previous.action == "pick") {return !building_plan_->steps.empty();}
     moveit_msgs::msg::RobotTrajectory transport;
@@ -2112,6 +2122,15 @@ private:
     if (state_.load() != (needs_held ? ManipulationState::HOLDING : ManipulationState::EMPTY) ||
       (needs_held && active_box_instance_id_ != plan->instance_id))
     {return outcome(false, kInvalidState, "saved plan manipulation state or held object mismatch");}
+    if (plan->carry_frame) {
+      auto current = move_group_.getCurrentState(config_.reset_state_timeout);
+      if (!current) {return outcome(false, kSafetyAbort, "saved-plan feedback unavailable");}
+      current->update();
+      std::string failure;
+      if (!validateSavedCarryFrame(*plan, *current, failure)) {
+        return outcome(false, kSafetyAbort, failure, held_pose_);
+      }
+    }
     std::string table_error;
     if (!activateTableProfile(plan->table_profile_id, table_error)) {
       return outcome(false, kInvalidGoal, table_error);
@@ -2217,6 +2236,8 @@ private:
           }
           auto current = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!current) {failure = "saved-plan feedback unavailable"; return false;}
+          current->update();
+          if (!validateSavedCarryFrame(*plan, *current, failure)) {return false;}
           RCLCPP_INFO(node_->get_logger(), "Saved plan %s segment %zu/%zu %s; planner_calls=%zu",
             id.c_str(), index + 1, plan->steps.size(), step.name.c_str(), motion_planner_.searchCalls() - searches);
           if (step.kind == SavedStepKind::MOTION) {
@@ -2349,7 +2370,7 @@ private:
     }
     if (!released) {
       held_pose_ = stampedPose(plan->carry_pose);
-      setSelectedCarryPose(plan->carry_target, plan->carry_pose);
+      setSelectedCarryPose(plan->carry_target, plan->carry_torso_pose);
       setState(ManipulationState::HOLDING, "saved plan completed at carry pose");
     } else {setState(ManipulationState::EMPTY, "saved plan completed after release and return");}
     auto task = outcome(true, kSuccess, continued_replanning ?
@@ -2399,12 +2420,14 @@ private:
     }
     const Eigen::Isometry3d & nominal_target_pose = carryPose(target);
     const auto & preferred_target_pose = selectedCarryPose(target);
-    const Eigen::Isometry3d & target_pose = preferred_target_pose ?
+    const Eigen::Isometry3d & torso_target_pose = preferred_target_pose ?
       *preferred_target_pose : nominal_target_pose;
-    const auto target_message = stampedPose(target_pose);
     auto current = move_group_.getCurrentState(config_.reset_state_timeout);
     if (!current) {return outcome(false, kPlanningFailed, "carry state unavailable");}
     current->update();
+    const auto carry_frame = carryFrameTransform(*current, config_.planning_frame);
+    const Eigen::Isometry3d target_pose = carry_frame * torso_target_pose;
+    const auto target_message = stampedPose(target_pose);
     // Virtual planning preserves small requested motions. Physical feedback
     // uses the same accuracy as held-object and attachment verification, and
     // both TCPs must have reached the requested carry pose.
@@ -2420,6 +2443,8 @@ private:
       if (plan_only && building_plan_) {
         capturePlanContext();
         building_plan_->carry_pose = target_pose;
+        building_plan_->carry_torso_pose = torso_target_pose;
+        building_plan_->carry_frame = carry_frame;
         building_plan_->carry_target = target;
         robot_trajectory::RobotTrajectory path(current->getRobotModel(), config_.planning_group);
         path.addSuffixWayPoint(*current, 0.0);
@@ -2469,6 +2494,8 @@ private:
       building_plan_->box_to_left = held_box_to_left_contact_;
       building_plan_->box_to_right = held_box_to_right_contact_;
       building_plan_->carry_pose = carry_plan.pose;
+      building_plan_->carry_torso_pose = carry_plan.torso_pose;
+      building_plan_->carry_frame = carry_plan.planning_to_torso;
       building_plan_->carry_target = target;
       saveMotion("carry", carry_plan.trajectory, *saved_start, true, false, false, carry_plan.cartesian);
       return outcome(true, kSuccess, "carry transition is feasible", selected_target_message);
@@ -2480,7 +2507,7 @@ private:
         false, kRecoveryRequired, "carry transition canceled; object remains held", held_pose_);
     }
     held_pose_ = selected_target_message;
-    setSelectedCarryPose(target, carry_plan.pose);
+    setSelectedCarryPose(target, carry_plan.torso_pose);
     setState(
       ManipulationState::HOLDING,
       "box moved to carry pose " + std::string(carryPoseName(target)));
@@ -2877,7 +2904,7 @@ private:
             !validateRetainedScene(failure, planning_canceled)) {return false;}
           current = move_group_.getCurrentState(config_.reset_state_timeout);
           if (!current) {failure = "carry state unavailable"; return false;}
-          const auto preferred = carry_plan.pose;
+          const auto preferred = carry_plan.torso_pose;
           // Replan the pick lift from measured feedback. Whole-route cache
           // rebasing can alter its Cartesian prefix; free-space segment reuse
           // remains available inside the planner.
@@ -2907,7 +2934,7 @@ private:
       return outcome(false, kRecoveryRequired, "pick canceled; object remains held", held_pose_);
     }
     held_pose_ = stampedPose(carry_plan.pose);
-    setSelectedCarryPose(MoveCarryPose::Goal::CARRY_A, carry_plan.pose);
+    setSelectedCarryPose(MoveCarryPose::Goal::CARRY_A, carry_plan.torso_pose);
     setState(ManipulationState::HOLDING, "box held at carry pose");
     feedback("holding", 1.0F, held_pose_);
     return outcome(true, kSuccess, "box picked and moved to carry pose", held_pose_);

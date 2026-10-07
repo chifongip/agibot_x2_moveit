@@ -191,6 +191,16 @@ def test_rejects_incomplete_or_mismatched_held_object(text):
         MODULE.validate_holding_record(text, "tag:0", "small_carton")
 
 
+def test_version_five_holding_record_preserves_torso_frame():
+    text = holding_record().replace("VERSION 4", "VERSION 5").replace(
+        "INSTANCE_ID", "CARRY_FRAME torso_link\nINSTANCE_ID")
+    assert MODULE.validate_holding_record(text, "tag:0", "small_carton") == text
+    with pytest.raises(ValueError, match="carry frame"):
+        MODULE.validate_holding_record(
+            text.replace("CARRY_FRAME torso_link", "CARRY_FRAME base_link"),
+            "tag:0", "small_carton")
+
+
 def test_place_recording_requires_a_state_file():
     with pytest.raises(SystemExit):
         MODULE.parse_arguments(["capture_task_snapshot", "--output", "/tmp/place.yaml",

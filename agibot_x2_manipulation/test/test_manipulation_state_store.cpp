@@ -54,7 +54,7 @@ TEST_F(ManipulationStateStoreTest, MissingAndLegacyStatesRemainCompatible)
   EXPECT_FALSE(holding.held_object.valid);
 }
 
-TEST_F(ManipulationStateStoreTest, VersionFourHoldingGeometryCarryPosesAndIdentityRoundTrip)
+TEST_F(ManipulationStateStoreTest, VersionFiveHoldingGeometryCarryPosesAndIdentityRoundTrip)
 {
   ManipulationStateStore store(path_.string());
   PersistedHeldObject expected;
@@ -109,6 +109,47 @@ TEST_F(ManipulationStateStoreTest, VersionTwoHoldingGeometryRemainsReadable)
   EXPECT_TRUE(record.held_object.valid);
   EXPECT_FALSE(record.held_object.carry_pose_a_valid);
   EXPECT_FALSE(record.held_object.carry_pose_b_valid);
+}
+
+TEST_F(ManipulationStateStoreTest, OlderCarryEndpointsAreDiscardedButGeometrySurvives)
+{
+  for (int version : {3, 4}) {
+    {
+      std::ofstream output(path_);
+      output << "VERSION " << version << "\nSTATE HOLDING\n"
+             << "POSE 0.35 0 0.41 0 0 0 1\n"
+             << "LEFT_CONTACT 0 0.16 0 0 0 0 1\n"
+             << "RIGHT_CONTACT 0 -0.16 0 0 0 0 1\n"
+             << "CARRY_A 1 0.35 0 0.25 0 0 0 1\n"
+             << "CARRY_B 1 0.25 0 0.05 0 0 0 1\n";
+      if (version == 4) {
+        output << "INSTANCE_ID \"tag:42\"\nPROFILE_ID \"large_carton\"\n";
+      }
+    }
+    const auto record = ManipulationStateStore(path_.string()).read();
+    ASSERT_TRUE(record.held_object.valid);
+    EXPECT_DOUBLE_EQ(record.held_object.pose.translation().z(), 0.41);
+    EXPECT_FALSE(record.held_object.carry_pose_a_valid);
+    EXPECT_FALSE(record.held_object.carry_pose_b_valid);
+    if (version == 4) {
+      EXPECT_EQ(record.held_object.instance_id, "tag:42");
+      EXPECT_EQ(record.held_object.profile_id, "large_carton");
+    }
+  }
+}
+
+TEST_F(ManipulationStateStoreTest, VersionFiveRejectsUnknownCarryFrame)
+{
+  {
+    std::ofstream output(path_);
+    output << "VERSION 5\nSTATE HOLDING\n"
+           << "POSE 0.35 0 0.41 0 0 0 1\n"
+           << "LEFT_CONTACT 0 0.16 0 0 0 0 1\n"
+           << "RIGHT_CONTACT 0 -0.16 0 0 0 0 1\n"
+           << "CARRY_A 0\nCARRY_B 0\nCARRY_FRAME base_link\n"
+           << "INSTANCE_ID \"tag:42\"\nPROFILE_ID \"large_carton\"\n";
+  }
+  EXPECT_FALSE(ManipulationStateStore(path_.string()).read().held_object.valid);
 }
 
 TEST_F(ManipulationStateStoreTest, IncompleteVersionTwoGeometryIsRejected)

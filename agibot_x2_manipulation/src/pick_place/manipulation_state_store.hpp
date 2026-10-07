@@ -22,6 +22,7 @@ struct PersistedHeldObject
   Eigen::Isometry3d pose{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d box_to_left_contact{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d box_to_right_contact{Eigen::Isometry3d::Identity()};
+  // Selected endpoints are torso-relative; held geometry above is unchanged.
   bool carry_pose_a_valid{false};
   Eigen::Isometry3d carry_pose_a{Eigen::Isometry3d::Identity()};
   bool carry_pose_b_valid{false};
