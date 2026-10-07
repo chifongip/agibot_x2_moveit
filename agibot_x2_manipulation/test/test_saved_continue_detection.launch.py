@@ -43,8 +43,11 @@ def generate_test_description():
             "place_offset": [0.0, -0.05], "place_yaw": 0.0}}}}
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as params:
         yaml.safe_dump(profiles, params)
-    return fixture.fixture.make_test_description(params.name, extra_arguments={
-        "phase_retry_attempts": "1", "phase_retry_timeout": "20.0"})
+    # Manual saved PickPlace must also Continue without a table tag. The
+    # automatic Place case below publishes its own required tag10 separately.
+    return fixture.fixture.make_test_description(
+        params.name, publish_table=False, table_profiles_file=params.name,
+        extra_arguments={"phase_retry_attempts": "1", "phase_retry_timeout": "20.0"})
 
 
 class TestSavedContinueDetection(fixture.TestContinueActions):

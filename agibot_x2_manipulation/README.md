@@ -193,6 +193,34 @@ configured only once. Each profile lists its `tag_ids`; tag frames are resolved
 as `box_profiles_tag_frame_prefix` plus the tag ID (the default is `tag0`,
 `tag1`, and so on). Add every physical tag ID to `config/apriltag.yaml` too.
 
+Each box type can optionally reference named navigation approaches:
+
+```yaml
+box_a:
+  docking_profile_ids: [box_a_front, box_a_side]
+  default_docking_profile: box_a_front
+  # Geometry, tag IDs, and grasp/carry calibration follow here.
+box_b:
+  docking_profile_ids: [box_b_front]
+  default_docking_profile: box_b_front
+```
+
+Define each referenced approach under navigation's `docking_profiles` with
+`target_source: box`, its own standoff/lateral/yaw calibration, detection source,
+and undock mode. A box may support several approaches; several boxes may also
+share one. If the default is omitted, the first listed approach is used. Omit
+both fields to preserve standalone manipulation without box-based docking for
+that type. Invalid names, duplicates, or defaults outside the list are rejected.
+The localizer publishes these associations and the actual tag frame in
+`/box_states`, so runtime catalog reloads update the panel and docking eligibility.
+The supplied grey-box type references `grey_box_dock`. The carton retains its
+existing top-tag calibration and does not advertise a box docking approach.
+Mount its tag vertically and recalibrate before associating `small_carton_dock`.
+
+Rebuild and restart all publishers and subscribers of `BoxState`/`BoxStateArray`
+after updating their definitions, including localization, manipulation, navigation,
+and the operator panel. The FineAlign and Undock action clients also need rebuilds.
+
 New profiles should use `tag_to_box_center_pose: [x, y, z, qx, qy, qz, qw]`,
 the measured rigid transform from the tag frame to
 the physical box center. This supports tags on either face and any fixed tag
@@ -485,6 +513,20 @@ local +X, +Y, and +Z aligned to tag +X, -Z, and +Y. The desired box center is
 at tag-frame coordinates `[tabletop_x + place_x,
 tabletop_y + box_height / 2, tabletop_z + place_z]`. At zero yaw, box
 +X, +Y, and +Z align with tag -Z, -X, and +Y, preserving an upright placed box.
+
+An explicit `place_pose` with a nonempty `header.frame_id` bypasses the table-tag
+requirement for Place and PickPlace, including planning and saved-plan replay.
+Pick likewise works with only the box tag. Fresh observed tables remain optional
+collision geometry; absent table observations do not block these actions or
+wait for a previously seen tag to return. No table collision geometry is inferred
+from the box tag or manual place pose. Calibrate the manual target and scene
+for the physical setup before execution. Automatic placement still requires the
+selected table tag.
+
+For a bay without a table tag, dock using the selected box type's named approach
+and vertical tag, then Pick the same `instance_id`. The supplied box approaches
+use timed tag-free undocking
+after pickup; a held box tag cannot serve as a stationary retreat reference.
 
 Leave `place_pose` empty to use this stable tag-derived target. The server
 accepts strictly increasing detections for the selected table tag from

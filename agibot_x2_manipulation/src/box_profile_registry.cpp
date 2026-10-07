@@ -62,6 +62,18 @@ Eigen::Isometry3d poseFromParameter(const std::vector<double> &values,
 }
 
 void validateProfile(const BoxProfile &profile) {
+  std::set<std::string> docking_ids;
+  for (const auto & id : profile.docking_profile_ids) {
+    if (id.empty() || id.find_first_not_of(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos ||
+      !docking_ids.insert(id).second) {
+      throw std::runtime_error("invalid docking profile association for box: " + profile.id);
+    }
+  }
+  if ((!docking_ids.empty() && docking_ids.count(profile.default_docking_profile) == 0) ||
+    (docking_ids.empty() && !profile.default_docking_profile.empty())) {
+    throw std::runtime_error("invalid default docking profile for box: " + profile.id);
+  }
   if (profile.id.empty() || profile.tag_ids.empty() ||
       profile.dimensions.length <= 0.0 || profile.dimensions.width <= 0.0 ||
       profile.dimensions.height <= 0.0 ||
@@ -120,6 +132,16 @@ BoxProfileRegistry::fromParameters(rclcpp::Node &node,
 
     BoxProfile profile;
     profile.id = id;
+    if (node.has_parameter(parameter_prefix + "docking_profile_ids")) {
+      profile.docking_profile_ids = requiredParameter<std::vector<std::string>>(
+        node, parameter_prefix + "docking_profile_ids");
+    }
+    if (node.has_parameter(parameter_prefix + "default_docking_profile")) {
+      profile.default_docking_profile = requiredParameter<std::string>(
+        node, parameter_prefix + "default_docking_profile");
+    } else if (!profile.docking_profile_ids.empty()) {
+      profile.default_docking_profile = profile.docking_profile_ids.front();
+    }
     profile.dimensions = {dimensions[0], dimensions[1], dimensions[2]};
     const std::string center_pose_parameter =
       parameter_prefix + "tag_to_box_center_pose";

@@ -6,7 +6,7 @@ import time
 import unittest
 
 from action_msgs.msg import GoalStatus
-from agibot_x2_manipulation_msgs.action import Pick, Place
+from agibot_x2_manipulation_msgs.action import Pick, PickPlace, Place
 from agibot_x2_manipulation_msgs.msg import BoxState, BoxStateArray
 from apriltag_msgs.msg import AprilTagDetection, AprilTagDetectionArray
 from geometry_msgs.msg import Pose, TransformStamped
@@ -97,8 +97,8 @@ class TestOptionalPickTable(unittest.TestCase):
             objects = wait(scene_client.call_async(req)).scene.world.collision_objects
             return [obj.id for obj in objects]
 
-        def place():
-            state["table"] = True
+        def place(with_table=True):
+            state["table"] = with_table
             spin(0.5)
             goal = Place.Goal()
             goal.place_pose.header.frame_id = "base_link"
@@ -126,6 +126,13 @@ class TestOptionalPickTable(unittest.TestCase):
             req.scene.is_diff = True
             req.scene.world.collision_objects = [stale]
             self.assertTrue(wait(apply_client.call_async(req)).success)
+            manual = PickPlace.Goal(instance_id="tag:0", plan_only=True)
+            manual.place_pose.header.frame_id = "base_link"
+            manual.place_pose.pose.position.x = 0.35
+            manual.place_pose.pose.position.z = 0.17
+            manual.place_pose.pose.orientation.w = 1.0
+            planned = action(PickPlace, "/pick_place", manual)
+            self.assertTrue(planned.plan_id)
             preview = action(Pick, "/pick_box", Pick.Goal(instance_id="tag:0", plan_only=True))
             self.assertTrue(preview.plan_id)
             self.assertNotIn("work_table", world())
@@ -134,7 +141,10 @@ class TestOptionalPickTable(unittest.TestCase):
             failed = action(Place, "/place_box", Place.Goal(plan_only=True), success=False)
             self.assertIn("table tag", failed.message)
             self.assertTrue(failed.object_held)
-            place()
+            place(with_table=False)
+            self.assertNotIn("work_table", world())
+            state["table"] = True
+            spin(0.5)
 
             # Fresh table is modeled; losing it after preview must not block saved Pick.
             preview = action(Pick, "/pick_box", Pick.Goal(instance_id="tag:0", plan_only=True))

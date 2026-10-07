@@ -1,8 +1,13 @@
 import os
 import tempfile
+import time
 import unittest
 
 from agibot_x2_manipulation_msgs.srv import ReloadBoxProfiles
+from agibot_x2_manipulation_msgs.msg import BoxStateArray
+from apriltag_msgs.msg import AprilTagDetection, AprilTagDetectionArray
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import TransformBroadcaster
 from launch import LaunchDescription
 from launch_ros.actions import Node
 import launch_testing
@@ -35,6 +40,8 @@ class TestBoxProfileReload(unittest.TestCase):
     box_profiles_tag_frame_prefix: tag
     box_profiles:
       bottom_container:
+        docking_profile_ids: [box_b_front, box_b_side]
+        default_docking_profile: box_b_side
         tag_ids: [42]
         dimensions: [0.2, 0.3, 0.3]
         tag_to_box_center_pose: [0.0, 0.0, 0.15, 0.0, 0.0, 0.0, 1.0]
@@ -75,3 +82,28 @@ class TestBoxProfileReload(unittest.TestCase):
         self.assertTrue(applied.success, applied.message)
         self.assertEqual(applied.profile_version, 1)
 
+
+        observations = []
+        subscription = self.node.create_subscription(
+            BoxStateArray, "/box_states", observations.append, 10)
+        detections = self.node.create_publisher(AprilTagDetectionArray, "/detections", 10)
+        broadcaster = TransformBroadcaster(self.node)
+        deadline = time.monotonic() + 5.0
+        while not observations and time.monotonic() < deadline:
+            transform = TransformStamped()
+            transform.header.frame_id = "base_link"
+            transform.header.stamp = self.node.get_clock().now().to_msg()
+            transform.child_frame_id = "tag42"
+            transform.transform.translation.x = 0.4
+            transform.transform.rotation.w = 1.0
+            broadcaster.sendTransform(transform)
+            detections.publish(AprilTagDetectionArray(
+                header=transform.header,
+                detections=[AprilTagDetection(id=42, decision_margin=100.0)]))
+            rclpy.spin_once(self.node, timeout_sec=0.05)
+        self.assertTrue(observations, "Reloaded box must publish docking associations")
+        box = observations[-1].boxes[0]
+        self.assertEqual(box.docking_profile_ids, ["box_b_front", "box_b_side"])
+        self.assertEqual(box.default_docking_profile, "box_b_side")
+        self.assertEqual(box.tag_frame, "tag42")
+        self.node.destroy_subscription(subscription)

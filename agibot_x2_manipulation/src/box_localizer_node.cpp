@@ -269,6 +269,9 @@ private:
     state.header.stamp = stamp;
     state.instance_id = instanceId(tag_id);
     state.profile_id = profile.id;
+    state.docking_profile_ids = profile.docking_profile_ids;
+    state.default_docking_profile = profile.default_docking_profile;
+    state.tag_frame = tagFrame(tag_id);
     state.pose.pose.position.x = mean_position.x();
     state.pose.pose.position.y = mean_position.y();
     state.pose.pose.position.z = mean_position.z();

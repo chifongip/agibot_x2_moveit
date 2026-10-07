@@ -958,18 +958,10 @@ private:
     if (tracker.waitForStablePose(0.0, canceled, pose, ignored, {}, detection_request_stamp_)) {
       return true;
     }
-    // Preserve optional acquisition when no fresh observation exists at all.
-    // If a cached table exists, allow it to renew rather than dropping it just
-    // because the first post-request detector callback has not arrived yet.
-    if (!detection_request_stamp_ ||
-      !tracker.waitForStablePose(0.0, canceled, pose, ignored)) {return false;}
-    const double timeout = std::min(config_.tag_reacquisition_timeout,
-      std::max(0.0, std::chrono::duration<double>(
-        phase_deadline_ - std::chrono::steady_clock::now()).count()));
-    return waitForDetections([&](const auto & waiting) {
-        return tracker.waitForStablePose(timeout, canceled, pose, ignored, waiting,
-          detection_request_stamp_);
-      });
+    // Optional geometry may use an already stable, still-fresh observation.
+    // Never wait for a missing tag to renew; required automatic placement uses
+    // waitForStableTableTagPose and its post-request observation requirement.
+    return tracker.waitForStablePose(0.0, canceled, pose, ignored);
   }
 
   bool collectSelectedTable(DetectionSceneSnapshot & observations, std::string & error,
@@ -2143,7 +2135,8 @@ private:
     const auto * profile = profiles_.find(plan->profile_id);
     active_carry_pose_a_ = profile ? profile->carry_pose_a : config_.carry_pose;
     active_carry_pose_b_ = profile ? profile->carry_pose_b : config_.carry_pose_b;
-    auto detection_scope = freezeDetectionScene(action != "pick");
+    auto detection_scope = freezeDetectionScene(action != "pick" &&
+      (!plan->placement_request || plan->placement_request->header.frame_id.empty()));
     detection_boxes_ = plan->boxes;
     detection_table_pose_ = plan->table_tag;
     detection_table_poses_ = plan->table_tags;
@@ -3111,7 +3104,7 @@ private:
     const geometry_msgs::msg::PoseStamped & requested_pose, bool plan_only,
     const FeedbackFunction & feedback, const CancelFunction & canceled)
   {
-    auto detection_scope = freezeDetectionScene();
+    auto detection_scope = freezeDetectionScene(requested_pose.header.frame_id.empty());
     if (canceled()) {
       return outcome(false, kSafetyAbort, "place canceled before validation", held_pose_);
     }
@@ -3343,7 +3336,7 @@ private:
     const std::string & instance_id, const geometry_msgs::msg::PoseStamped & requested_place,
     const CancelFunction & canceled, bool pick_only = false, bool replan_from_current = false)
   {
-    auto detection_scope = freezeDetectionScene();
+    auto detection_scope = freezeDetectionScene(!pick_only && requested_place.header.frame_id.empty());
     if (canceled()) {
       return outcome(false, kSafetyAbort, "PickPlace planning canceled before validation");
     }
@@ -3828,7 +3821,11 @@ private:
         message->table_profile_id = active_table_profile_id_;
         goal->publish_feedback(message);
       });
-    auto table_snapshot_scope = freezeDetectionScene();
+    // Saved execution derives its table requirement from the saved request.
+    // A replay normally supplies only plan_id, leaving place_pose empty.
+    auto table_snapshot_scope = goal->get_goal()->plan_id.empty() ?
+      freezeDetectionScene(goal->get_goal()->place_pose.header.frame_id.empty()) :
+      ScopeExit([]() {});
     auto saved_scope = beginSavedRequest("pick_place", goal->get_goal()->plan_only);
     TaskOutcome task;
     const CancelFunction canceled =

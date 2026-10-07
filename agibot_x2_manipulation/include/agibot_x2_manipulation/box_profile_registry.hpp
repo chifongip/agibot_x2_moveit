@@ -28,6 +28,8 @@ struct BoxProfile {
   Eigen::Isometry3d carry_pose_a{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d carry_pose_b{Eigen::Isometry3d::Identity()};
   std::vector<int> tag_ids;
+  std::vector<std::string> docking_profile_ids;
+  std::string default_docking_profile;
 };
 
 /// A validated catalog of box profiles supplied as ROS parameters.

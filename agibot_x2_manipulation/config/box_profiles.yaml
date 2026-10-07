@@ -7,6 +7,8 @@
     # Carry A/B are box-center poses [x,y,z,qx,qy,qz,qw] in torso_link.
     box_profiles:
       small_carton:
+        # Associate small_carton_dock after mounting the tag vertically and
+        # recalibrating tag_to_box_center_pose. This profile uses a top tag.
         tag_ids: [0]
         dimensions: [0.15, 0.35, 0.32]  # length X, width Y, height Z [m]
         # Measured tag-frame to physical box-center transform.
@@ -18,11 +20,13 @@
         carry_pose_a: [0.35, 0.0, 0.25, 0.0, 0.0, 0.0, 1.0]
         carry_pose_b: [0.25, 0.0, 0.05, 0.0, 0.0, 0.0, 1.0]
       grey_box:
+        docking_profile_ids: [grey_box_dock]
+        default_docking_profile: grey_box_dock
         tag_ids: [180]
         dimensions: [0.30, 0.40, 0.12]
-        # This preserves the existing measured pickup center without applying
-        # its tag-mount calibration to the table placement target.
-        tag_to_box_center_pose: [0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 1.0]
+        # Centered vertical tag: +X right, +Y up, +Z toward the robot.
+        # Box center is 0.15 m behind the tag; box axes align with tag -Z, -X, +Y.
+        tag_to_box_center_pose: [0.0, 0.0, -0.15, -0.5, 0.5, 0.5, 0.5]
         pregrasp_distance: 0.05
         contact_height_offset: 0.04
         # Default migration baseline. Validate this profile on hardware with
