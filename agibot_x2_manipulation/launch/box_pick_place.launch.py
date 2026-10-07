@@ -303,10 +303,10 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "ros2_control_update_rate",
-                default_value="100",
+                default_value="50",
                 description=(
                     "Controller-manager loop rate passed to real_robot.launch.py. "
-                    "The 100 Hz default protects HAL state-delivery headroom."
+                    "The 50 Hz default matches the ZMQ command publish-rate limit."
                 ),
             ),
             DeclareLaunchArgument("use_apriltag", default_value="true"),
