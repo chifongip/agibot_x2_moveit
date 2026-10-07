@@ -191,11 +191,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "ros2_control_update_rate",
-                default_value="100",
+                default_value="50",
                 description=(
-                    "Controller-manager loop rate in Hz. The 100 Hz default leaves "
-                    "headroom for safety-critical HAL state delivery; higher rates "
-                    "also increase command frequency and must be validated on the host."
+                    "Controller-manager loop rate in Hz. The 50 Hz default matches "
+                    "the configured ZMQ command publish-rate limit. Validate higher "
+                    "rates on the deployment host."
                 ),
             ),
             DeclareLaunchArgument(

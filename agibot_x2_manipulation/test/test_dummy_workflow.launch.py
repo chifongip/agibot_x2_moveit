@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+import time
 import unittest
 
 from action_msgs.msg import GoalStatus
@@ -18,6 +20,10 @@ from rclpy.action import ActionClient
 
 @pytest.mark.launch_test
 def generate_test_description():
+    return make_test_description()
+
+
+def make_test_description(extra_arguments=None):
     share = get_package_share_directory("agibot_x2_manipulation")
     port = 20000 + os.getpid() % 10000
     endpoint = f"tcp://127.0.0.1:{port}"
@@ -39,7 +45,9 @@ def generate_test_description():
             "perception_3d_source": "none",
             "allow_execution": "true",
             "motion_planning_mode": "pose_to_pose",
+            "box_profiles_file": str(Path(__file__).parent / "config" / "box_profiles_simulation.yaml"),
             "manipulation_state_file": f"/tmp/x2_dummy_workflow_{os.getpid()}",
+            **(extra_arguments or {}),
         }.items(),
     )
     feedback = Node(
@@ -71,6 +79,7 @@ class TestDummyWorkflow(unittest.TestCase):
         self.assertTrue(send_future.done())
         handle = send_future.result()
         self.assertTrue(handle.accepted)
+        started = time.monotonic()
         result_future = handle.get_result_async()
         rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=timeout)
         self.assertTrue(result_future.done())
@@ -81,6 +90,7 @@ class TestDummyWorkflow(unittest.TestCase):
             wrapped.result.message if wrapped.result else "action returned no result",
         )
         self.assertTrue(wrapped.result.success, wrapped.result.message)
+        print(f"WORKFLOW_TIMING action={name} plan_only={goal.plan_only} seconds={time.monotonic() - started:.3f}", flush=True)
         client.destroy()
         return wrapped.result
 

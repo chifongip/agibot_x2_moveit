@@ -4,7 +4,9 @@
 #include <rclcpp/executors/single_threaded_executor.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <memory>
+#include <limits>
 #include <thread>
 
 namespace agibot_x2_manipulation
@@ -79,6 +81,103 @@ protected:
   std::thread spinner_;
 };
 
+TEST_F(BoxPoseTrackerTest, OptionalMovementCheckIgnoresMissingExpiredAndChangedProfiles)
+{
+  const auto reference = pose("target");
+  TrackedBoxPose latest;
+  std::string detail;
+  EXPECT_FALSE(tracker_->movedStablePose(reference, latest, detail));
+  auto changed = pose("target", 0.1);
+  changed.profile_id = "different";
+  publish({changed});
+  ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, latest, detail));
+  EXPECT_FALSE(tracker_->movedStablePose(reference, latest, detail));
+  EXPECT_TRUE(detail.empty());
+  tracker_->clear();
+  auto stale = pose("target", 0.1);
+  stale.pose.header.stamp = node_->now() - rclcpp::Duration::from_seconds(1.0);
+  publish({stale});
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_FALSE(tracker_->movedStablePose(reference, latest, detail));
+  tracker_->clear();
+  auto future = pose("target", 0.1);
+  future.pose.header.stamp = node_->now() + rclcpp::Duration::from_seconds(1.0);
+  publish({future});
+  EXPECT_FALSE(tracker_->waitForStablePose("target", 0.03, []() {return false;}, latest, detail));
+  EXPECT_FALSE(tracker_->movedStablePose(reference, latest, detail));
+}
+
+TEST_F(BoxPoseTrackerTest, RequestCutoffRejectsCachedAndDelayedOldObservations)
+{
+  auto cached = pose("target", 0.1);
+  publish({cached});
+  TrackedBoxPose latest;
+  std::string error;
+  ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, latest, error));
+  const auto request_stamp = node_->now();
+  EXPECT_FALSE(tracker_->stablePose("target", latest, request_stamp));
+  EXPECT_TRUE(tracker_->freshPoses(request_stamp).empty());
+  const auto reference = pose("target", 0.0);
+  EXPECT_FALSE(tracker_->movedStablePose(reference, latest, error, request_stamp));
+  // A message arriving after the request still has to carry a newer observation timestamp.
+  publish({cached});
+  EXPECT_FALSE(tracker_->waitForStablePose("target", 0.03, []() {return false;}, latest,
+    error, {}, request_stamp));
+  int waits = 0;
+  ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, latest,
+    error, [&]() {++waits; publish({pose("target", 0.2)});}, request_stamp)) << error;
+  EXPECT_EQ(waits, 1);
+  EXPECT_DOUBLE_EQ(latest.pose.pose.pose.position.x, 0.2);
+  EXPECT_GT(rclcpp::Time(latest.pose.header.stamp), request_stamp);
+  EXPECT_EQ(tracker_->freshPoses(request_stamp).size(), 1U);
+  EXPECT_TRUE(tracker_->movedStablePose(reference, latest, error, request_stamp));
+}
+
+TEST_F(BoxPoseTrackerTest, OptionalMovementCheckUsesPositionAndOrientationThresholds)
+{
+  const auto reference = pose("target");
+  TrackedBoxPose latest;
+  std::string detail;
+  auto observe = [&](TrackedBoxPose observation) {
+      tracker_->clear();
+      publish({observation});
+      EXPECT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, latest, detail));
+      return tracker_->movedStablePose(reference, latest, detail);
+    };
+  EXPECT_FALSE(observe(pose("target", 0.019)));
+  EXPECT_TRUE(observe(pose("target", 0.021)));
+  auto rotated = pose("target");
+  rotated.pose.pose.pose.orientation.z = std::sin(0.051);
+  rotated.pose.pose.pose.orientation.w = std::cos(0.051);
+  EXPECT_TRUE(observe(rotated));
+  rotated.pose.pose.pose.orientation.z = std::sin(0.049);
+  rotated.pose.pose.pose.orientation.w = std::cos(0.049);
+  EXPECT_FALSE(observe(rotated));
+}
+
+TEST_F(BoxPoseTrackerTest, OptionalMovementCheckIgnoresInvalidPosesBeyondTranslationTolerance)
+{
+  const auto reference = pose("target");
+  TrackedBoxPose latest;
+  std::string detail;
+  for (const auto invalid : {0.0, std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity()})
+  {
+    auto observation = pose("target", 0.1);
+    observation.pose.pose.pose.orientation.w = invalid;
+    tracker_->clear();
+    publish({observation});
+    ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, latest, detail));
+    EXPECT_FALSE(tracker_->movedStablePose(reference, latest, detail));
+    EXPECT_TRUE(detail.empty());
+  }
+  auto observation = pose("target", std::numeric_limits<double>::infinity());
+  tracker_->clear();
+  publish({observation});
+  ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, latest, detail));
+  EXPECT_FALSE(tracker_->movedStablePose(reference, latest, detail));
+}
+
 TEST_F(BoxPoseTrackerTest, WaitsForFreshDetectionOfTheRequestedInstance)
 {
   auto stale = pose("target");
@@ -125,17 +224,53 @@ TEST_F(BoxPoseTrackerTest, RejectsMovementOrProfileChangesAfterReacquisition)
 {
   const auto reference = pose("target");
   std::string error;
+  bool moved = false;
   EXPECT_FALSE(tracker_->waitForUnchangedPoses({reference}, 1.0, []() {return false;}, error,
-      [&]() {publish({pose("target", 0.1)}); }));
+      [&]() {publish({pose("target", 0.1)}); }, &moved));
+  EXPECT_TRUE(moved);
   EXPECT_NE(error.find("box moved after planning"), std::string::npos);
+  TrackedBoxPose refreshed;
+  ASSERT_TRUE(tracker_->waitForStablePose("target", 1.0, []() {return false;}, refreshed, error));
+  EXPECT_TRUE(tracker_->waitForUnchangedPoses({refreshed}, 1.0, []() {return false;}, error,
+      {}, &moved));
+  EXPECT_FALSE(moved);
   tracker_->clear();
   EXPECT_FALSE(tracker_->waitForUnchangedPoses({reference}, 1.0, []() {return false;}, error,
       [&]() {
         auto changed = pose("target");
         changed.profile_id = "different_box";
         publish({changed});
-      }));
+      }, &moved));
+  EXPECT_FALSE(moved);
   EXPECT_NE(error.find("profile changed"), std::string::npos);
+}
+
+TEST_F(BoxPoseTrackerTest, MovementThresholdsIncludeBoundaryAndReportLimits)
+{
+  const auto reference = pose("target");
+  std::string error;
+  for (const double x : {0.019, 0.02, 0.021}) {
+    tracker_->clear();
+    bool moved = false;
+    const bool accepted = tracker_->waitForUnchangedPoses({reference}, 1.0,
+      []() {return false;}, error, [&]() {publish({pose("target", x)});}, &moved);
+    EXPECT_EQ(accepted, x <= 0.02) << error;
+    EXPECT_EQ(moved, x > 0.02);
+  }
+  EXPECT_NE(error.find("target"), std::string::npos);
+  EXPECT_NE(error.find("limit=0.020000"), std::string::npos);
+  for (const double angle : {0.099, 0.1, 0.101}) {
+    tracker_->clear();
+    bool moved = false;
+    auto observed = pose("target");
+    observed.pose.pose.pose.orientation.w = std::cos(angle / 2);
+    observed.pose.pose.pose.orientation.z = std::sin(angle / 2);
+    const bool accepted = tracker_->waitForUnchangedPoses({reference}, 1.0,
+      []() {return false;}, error, [&]() {publish({observed});}, &moved);
+    EXPECT_EQ(accepted, angle <= 0.1) << error;
+    EXPECT_EQ(moved, angle > 0.1);
+  }
+  EXPECT_NE(error.find("limit=0.100000"), std::string::npos);
 }
 
 TEST_F(BoxPoseTrackerTest, TimesOutOnceForTheEntireSnapshotAndHonorsCancellation)

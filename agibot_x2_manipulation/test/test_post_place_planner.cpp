@@ -1,4 +1,6 @@
 #include "pick_place/post_place_planner.hpp"
+#include "pick_place/endpoint_reached.hpp"
+#include "pick_place/pose_segment_cache.hpp"
 
 #include <gtest/gtest.h>
 #include <srdfdom/model.h>
@@ -58,6 +60,224 @@ moveit::core::RobotModelPtr wristModel()
   srdf->initString(*urdf, R"(<robot name="wrist_test"><group name="arm">
     <joint name="slide"/><joint name="lift"/></group></robot>)");
   return std::make_shared<moveit::core::RobotModel>(urdf, srdf);
+}
+
+TEST(PostPlacePlanner, DirectJointRouteChecksSplineAndHeldGeometryWithoutChangingRejectedOutput)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  PickPlaceConfig config;
+  config.planning_group = "arm";
+  config.return_path_tolerance = 0.01;
+  config.return_validation_joint_step = 0.01;
+  config.velocity_scaling = config.acceleration_scaling = 0.5;
+  moveit::core::RobotState start(robot), target(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", -0.2);
+  start.update();
+  target = start;
+  target.setVariablePosition("slide", 0.2);
+  target.update();
+  moveit_msgs::msg::RobotTrajectory output;
+  std::string error;
+  ASSERT_TRUE(tryDirectJointTrajectory(start, target, scene, config, 0.0, output, error,
+      []() {return false;})) << error;
+  EXPECT_NEAR(output.joint_trajectory.points.front().positions[0], -0.2, 1e-9);
+  EXPECT_NEAR(output.joint_trajectory.points.back().positions[0], 0.2, 1e-9);
+  const auto saved = output;
+  EXPECT_FALSE(tryDirectJointTrajectory(start, target, scene, config, 0.9, output, error,
+      []() {return false;}));
+  EXPECT_EQ(output.joint_trajectory.points, saved.joint_trajectory.points);
+  EXPECT_FALSE(tryDirectJointTrajectory(start, target, scene, config, 0.0, output, error,
+      []() {return true;}));
+  auto invalid = target;
+  invalid.setVariablePosition("slide", std::numeric_limits<double>::quiet_NaN());
+  EXPECT_FALSE(tryDirectJointTrajectory(start, invalid, scene, config, 0.0, output, error,
+      []() {return false;}));
+  scene->getCurrentStateNonConst().attachBody("held_box", Eigen::Isometry3d::Identity(),
+    {std::make_shared<shapes::Box>(0.1, 0.1, 0.1)}, {Eigen::Isometry3d::Identity()},
+    std::set<std::string>{"hand"}, "hand");
+  moveit_msgs::msg::CollisionObject obstacle;
+  obstacle.id = "near_hand_obstacle";
+  obstacle.header.frame_id = "base_link";
+  obstacle.operation = obstacle.ADD;
+  shape_msgs::msg::SolidPrimitive primitive;
+  primitive.type = primitive.BOX;
+  primitive.dimensions = {0.02, 0.02, 0.1};
+  obstacle.primitives.push_back(primitive);
+  geometry_msgs::msg::Pose pose;
+  pose.position.y = 0.055;
+  pose.orientation.w = 1.0;
+  obstacle.primitive_poses.push_back(pose);
+  ASSERT_TRUE(scene->processCollisionObjectMsg(obstacle));
+  // The obstacle misses the hand sphere but intersects its attached box.
+  EXPECT_FALSE(tryDirectJointTrajectory(start, target, scene, config, 0.0, output, error,
+      []() {return false;}));
+  EXPECT_NE(error.find("held_box"), std::string::npos);
+  EXPECT_EQ(output.joint_trajectory.points, saved.joint_trajectory.points);
+}
+
+TEST(PostPlacePlanner, DirectRouteAcceptsMeasuredLimitDiscrepancyAndBoundsPlanningCopy)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  PickPlaceConfig config;
+  config.planning_group = "arm";
+  config.place_start_state_bounds_tolerance = 0.02;
+  config.return_path_tolerance = 0.01;
+  config.return_validation_joint_step = 0.01;
+  config.velocity_scaling = config.acceleration_scaling = 0.5;
+  moveit::core::RobotState measured(robot), target(robot);
+  measured.setToDefaultValues();
+  measured.setVariablePosition("slide", 1.01);
+  measured.update();
+  target = measured;
+  target.setVariablePosition("slide", 0.8);
+  target.update();
+  moveit_msgs::msg::RobotTrajectory output;
+  std::string error;
+  ASSERT_TRUE(tryDirectJointTrajectory(measured, target, scene, config, 0.0, output, error,
+      []() {return false;})) << error;
+  EXPECT_DOUBLE_EQ(measured.getVariablePosition("slide"), 1.01);
+  EXPECT_NEAR(output.joint_trajectory.points.front().positions[0], 1.0, 1e-9);
+  const auto saved = output;
+  measured.setVariablePosition("slide", 1.03);
+  measured.update();
+  EXPECT_FALSE(tryDirectJointTrajectory(measured, target, scene, config, 0.0, output, error,
+      []() {return false;}));
+  EXPECT_EQ(output.joint_trajectory.points, saved.joint_trajectory.points);
+  measured.setVariablePosition("slide", std::numeric_limits<double>::quiet_NaN());
+  EXPECT_FALSE(tryDirectJointTrajectory(measured, target, scene, config, 0.0, output, error,
+      []() {return false;}));
+}
+
+TEST(PostPlacePlanner, PrefixCacheChecksAllVariablesTargetsAndBoundedStorage)
+{
+  const auto robot = model();
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.update();
+  PoseSegmentCache cache;
+  const Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  cache.insert({start, pose, pose, moveit_msgs::msg::RobotTrajectory()});
+  EXPECT_NE(cache.find(start, pose, pose), nullptr);
+  auto moved = start;
+  moved.setVariablePosition("lift", 0.0001);
+  EXPECT_EQ(cache.find(moved, pose, pose), nullptr);
+  Eigen::Isometry3d changed(pose);
+  changed.translation().x() = 0.0001;
+  EXPECT_EQ(cache.find(start, changed, pose), nullptr);
+  EXPECT_EQ(cache.find(start, pose, changed), nullptr);
+  for (int i = 1; i <= 8; ++i) {
+    changed.translation().x() = i;
+    cache.insert({start, changed, changed, moveit_msgs::msg::RobotTrajectory()});
+  }
+  EXPECT_EQ(cache.size(), 8U);
+  EXPECT_EQ(cache.find(start, pose, pose), nullptr);
+  EXPECT_NE(cache.find(start, changed, changed), nullptr);
+}
+
+TEST(PostPlacePlanner, CachedCarryChecksActualAttachmentCollisionMarginAndAccuracy)
+{
+  const auto robot = wristModel();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  PickPlaceConfig config;
+  config.planning_group = "arm";
+  config.left_tcp = config.right_tcp = "hand";
+  config.box_id = "held_box";
+  config.dimensions = {0.1, 0.1, 0.1};
+  config.execution_joint_tolerance = 0.05;
+  config.return_validation_joint_step = 0.01;
+  config.return_path_tolerance = 0.01;
+  config.velocity_scaling = config.acceleration_scaling = 0.5;
+  config.closed_chain_contact_position_error = 0.001;
+  config.closed_chain_contact_orientation_error = 0.001;
+  moveit::core::RobotState planned(robot);
+  planned.setToDefaultValues();
+  planned.setVariablePosition("slide", -0.2);
+  planned.update();
+  auto current = planned;
+  current.attachBody(config.box_id, Eigen::Isometry3d::Identity(),
+    {std::make_shared<shapes::Box>(0.1, 0.1, 0.1)}, {Eigen::Isometry3d::Identity()},
+    std::set<std::string>{"hand"}, "hand");
+  current.update();
+  scene->setCurrentState(current);
+  auto end = current;
+  end.setVariablePosition("slide", 0.2);
+  end.update();
+  robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+  trajectory.addSuffixWayPoint(planned, 0.0);
+  trajectory.addSuffixWayPoint(end, 1.0);
+  moveit_msgs::msg::RobotTrajectory message;
+  trajectory.getRobotTrajectoryMsg(message);
+  const auto original = message;
+  const Eigen::Isometry3d contact = Eigen::Isometry3d::Identity();
+  const Eigen::Isometry3d target = end.getGlobalLinkTransform("hand");
+  std::string error;
+  const auto validate = [&](moveit::core::RobotState & measured, const Eigen::Isometry3d & goal) {
+      return validateReusableCarryTrajectory(message, planned, measured, scene, config,
+        contact, contact, goal, error, []() {return false;});
+    };
+  ASSERT_TRUE(validate(current, target)) << error;
+  auto measured = current;
+  measured.setVariablePosition("slide", -0.18);
+  measured.update();
+  ASSERT_TRUE(validate(measured, target)) << error;
+  EXPECT_EQ(message, original);
+  const auto saved = message;
+  auto wrong_goal = target;
+  wrong_goal.translation().x() += 0.02;
+  EXPECT_FALSE(validate(measured, wrong_goal));
+  EXPECT_NE(error.find("accuracy"), std::string::npos);
+  EXPECT_EQ(message.joint_trajectory.points, saved.joint_trajectory.points);
+  config.minimum_carry_joint_margin = 0.9;
+  EXPECT_FALSE(validate(measured, target));
+  EXPECT_NE(error.find("margin"), std::string::npos);
+  config.minimum_carry_joint_margin = 0.79;
+  auto near_limit = measured;
+  near_limit.setVariablePosition("slide", -0.24);
+  near_limit.update();
+  // A safe cached start cannot conceal a measured margin violation.
+  EXPECT_FALSE(validate(near_limit, target));
+  EXPECT_NE(error.find("measured cached carry start"), std::string::npos);
+  EXPECT_EQ(message, original);
+  config.minimum_carry_joint_margin = 0.0;
+  EXPECT_FALSE(validateReusableCarryTrajectory(message, planned, measured, scene, config,
+      contact, contact, target, error, []() {return true;}));
+  auto wrong_transform = contact;
+  wrong_transform.translation().z() = 0.02;
+  EXPECT_FALSE(validateReusableCarryTrajectory(message, planned, measured, scene, config,
+      wrong_transform, contact, target, error, []() {return false;}));
+  config.dimensions.length = 0.2;
+  EXPECT_FALSE(validate(measured, target));
+  config.dimensions.length = 0.1;
+  moveit_msgs::msg::CollisionObject obstacle;
+  obstacle.id = "carry_obstacle";
+  obstacle.header.frame_id = "base_link";
+  obstacle.operation = obstacle.ADD;
+  shape_msgs::msg::SolidPrimitive primitive;
+  primitive.type = primitive.BOX;
+  primitive.dimensions = {0.02, 0.1, 0.1};
+  obstacle.primitives.push_back(primitive);
+  geometry_msgs::msg::Pose pose;
+  pose.orientation.w = 1.0;
+  obstacle.primitive_poses.push_back(pose);
+  ASSERT_TRUE(scene->processCollisionObjectMsg(obstacle));
+  EXPECT_FALSE(validate(measured, target));
+  EXPECT_EQ(message.joint_trajectory.points, saved.joint_trajectory.points);
+  scene->getWorldNonConst()->removeObject(obstacle.id);
+  measured.clearAttachedBody(config.box_id);
+  // Position-only MoveGroup feedback uses attachment geometry from the synchronized scene.
+  EXPECT_TRUE(validate(measured, target)) << error;
+  // A second equivalent model is how real MoveGroup/scene monitors are instantiated.
+  auto other_scene = std::make_shared<planning_scene::PlanningScene>(wristModel());
+  auto other_state = other_scene->getCurrentState();
+  ASSERT_TRUE(copySceneAttachments(other_state, current));
+  other_scene->setCurrentState(other_state);
+  EXPECT_TRUE(validateReusableCarryTrajectory(message, planned, measured, other_scene, config,
+      contact, contact, target, error, []() {return false;})) << error;
+  scene->getCurrentStateNonConst().clearAttachedBody(config.box_id);
+  EXPECT_FALSE(validate(measured, target));
 }
 
 TEST(PostPlacePlanner, ClearanceUsesTableAxesAndPreservesOrientation)
@@ -134,6 +354,250 @@ TEST(PostPlacePlanner, SceneCloneDoesNotRemoveLiveObstacles)
   hypothetical->getAllowedCollisionMatrixNonConst().setEntry("placed_box", "hand", true);
   collision_detection::AllowedCollision::Type type;
   EXPECT_FALSE(live->getAllowedCollisionMatrix().getEntry("placed_box", "hand", type));
+}
+
+TEST(PostPlacePlanner, CachedPickRequiresMatchingStartAndCompleteTrajectory)
+{
+  auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  PickPlaceConfig config;
+  config.planning_group = "arm";
+  config.left_tcp = "hand";
+  config.right_tcp = "hand";
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", -0.2);
+  start.update();
+  moveit::core::RobotState end(start);
+  end.setVariablePosition("slide", 0.2);
+  end.update();
+  robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+  trajectory.addSuffixWayPoint(start, 0.0);
+  trajectory.addSuffixWayPoint(end, 1.0);
+  moveit_msgs::msg::RobotTrajectory message;
+  trajectory.getRobotTrajectoryMsg(message);
+  std::string error;
+  const auto canceled = []() {return false;};
+  EXPECT_TRUE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
+  moveit::core::RobotState moved(start);
+  moved.setVariablePosition("slide", -0.19);
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, moved, scene, config, error, canceled));
+  EXPECT_NE(error.find("cached Pick start"), std::string::npos);
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, start, scene, config,
+      error, []() {return true;}));
+  message.joint_trajectory.points.back().positions.pop_back();
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
+}
+
+TEST(PostPlacePlanner, CachedPickPreservesTrajectoryWithinExecutionTolerance)
+{
+  auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  PickPlaceConfig config;
+  config.planning_group = "arm";
+  config.left_tcp = "hand";
+  config.right_tcp = "hand";
+  config.execution_joint_tolerance = 0.1;
+  config.place_start_state_bounds_tolerance = 0.02;
+  config.velocity_scaling = 0.5;
+  config.acceleration_scaling = 0.5;
+  config.return_validation_joint_step = 0.01;
+  config.return_path_tolerance = 0.01;
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", -0.2);
+  start.update();
+  moveit::core::RobotState end(start), measured(start);
+  end.setVariablePosition("slide", 0.2);
+  measured.setVariablePosition("slide", -0.18);
+  measured.update();
+  robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+  trajectory.addSuffixWayPoint(start, 0.0);
+  trajectory.addSuffixWayPoint(end, 1.0);
+  moveit_msgs::msg::RobotTrajectory message;
+  trajectory.getRobotTrajectoryMsg(message);
+  const auto original = message;
+  std::string error;
+  ASSERT_TRUE(validateReusablePickTrajectory(message, start, measured, scene, config,
+      error, []() {return false;})) << error;
+  EXPECT_EQ(message, original);
+  // Even tiny feedback differences preserve all positions, derivatives and timing.
+  measured.setVariablePosition("slide", -0.2 + 2e-6);
+  measured.update();
+  ASSERT_TRUE(validateReusablePickTrajectory(message, start, measured, scene, config,
+      error, []() {return false;})) << error;
+  EXPECT_EQ(message, original);
+  // Reuse still validates the measured-to-planned edge against new obstacles.
+  moveit_msgs::msg::CollisionObject obstacle;
+  obstacle.id = "new_obstacle";
+  obstacle.header.frame_id = "base_link";
+  shape_msgs::msg::SolidPrimitive primitive;
+  primitive.type = primitive.BOX;
+  primitive.dimensions = {0.04, 0.1, 0.1};
+  obstacle.primitives.push_back(primitive);
+  geometry_msgs::msg::Pose pose;
+  pose.position.x = -0.17;
+  pose.orientation.w = 1.0;
+  obstacle.primitive_poses.push_back(pose);
+  obstacle.operation = obstacle.ADD;
+  ASSERT_TRUE(scene->processCollisionObjectMsg(obstacle));
+  const auto saved_first = message.joint_trajectory.points.front().positions;
+  measured.setVariablePosition("slide", -0.16);
+  measured.update();
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, measured, scene, config,
+      error, []() {return false;}));
+  EXPECT_EQ(message.joint_trajectory.points.front().positions, saved_first);
+  scene->getWorldNonConst()->removeObject("new_obstacle");
+  // Outside the configured execution window, preserve the cache and replan.
+  const auto first = message.joint_trajectory.points.front().positions;
+  measured.setVariablePosition("slide", -0.05);
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, measured, scene, config,
+      error, []() {return false;}));
+  EXPECT_EQ(message.joint_trajectory.points.front().positions, first);
+  // Encoder feedback uses the configured bounds allowance, not spline precision.
+  config.execution_joint_tolerance = 2.0;
+  measured.setVariablePosition("slide", -1.01);
+  measured.update();
+  ASSERT_TRUE(validateReusablePickTrajectory(message, start, measured, scene, config,
+      error, []() {return false;})) << error;
+  EXPECT_EQ(message, original);
+  measured.setVariablePosition("slide", -1.021);
+  measured.update();
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, measured, scene, config,
+      error, []() {return false;}));
+  EXPECT_NE(error.find("configured bounds tolerance"), std::string::npos);
+  EXPECT_EQ(message.joint_trajectory.points.front().positions, first);
+}
+
+TEST(PostPlacePlanner, ShortPlanGoalCheckUsesPlannerToleranceAndRejectsInvalidTargets)
+{
+  auto robot = model();
+  moveit::core::RobotState current(robot), target(robot);
+  current.setToDefaultValues();
+  target = current;
+  const auto * group = robot->getJointModelGroup("arm");
+  target.setVariablePosition("slide", 0.000125);
+  EXPECT_FALSE(jointEndpointReached(current, target, group, 1e-6));
+  EXPECT_TRUE(jointEndpointReached(current, target, group, 0.001));
+  target.setVariablePosition("lift", 0.002);
+  EXPECT_FALSE(jointEndpointReached(current, target, group, 0.001));
+  EXPECT_FALSE(jointEndpointReached(current, current, group, -0.001));
+  EXPECT_FALSE(jointEndpointReached(current, current, group,
+      std::numeric_limits<double>::quiet_NaN()));
+  target.setVariablePosition("lift", std::numeric_limits<double>::quiet_NaN());
+  EXPECT_FALSE(jointEndpointReached(current, target, group, 0.001));
+}
+
+TEST(PostPlacePlanner, CachedPickChecksNewObstaclesAndControllerOvershoot)
+{
+  auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  PickPlaceConfig config;
+  config.planning_group = "arm";
+  config.left_tcp = "hand";
+  config.right_tcp = "hand";
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", -0.2);
+  start.update();
+  moveit::core::RobotState end(start);
+  end.setVariablePosition("slide", 0.2);
+  end.update();
+  robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+  trajectory.addSuffixWayPoint(start, 0.0);
+  trajectory.addSuffixWayPoint(end, 1.0);
+  moveit_msgs::msg::RobotTrajectory message;
+  trajectory.getRobotTrajectoryMsg(message);
+  std::string error;
+  const auto canceled = []() {return false;};
+  ASSERT_TRUE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
+  moveit_msgs::msg::CollisionObject obstacle;
+  obstacle.id = "work_table";
+  obstacle.header.frame_id = "base_link";
+  shape_msgs::msg::SolidPrimitive primitive;
+  primitive.type = primitive.BOX;
+  primitive.dimensions = {0.04, 0.1, 0.1};
+  obstacle.primitives.push_back(primitive);
+  geometry_msgs::msg::Pose pose;
+  pose.orientation.w = 1.0;
+  obstacle.primitive_poses.push_back(pose);
+  obstacle.operation = obstacle.ADD;
+  ASSERT_TRUE(scene->processCollisionObjectMsg(obstacle));
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
+  EXPECT_NE(error.find("work_table"), std::string::npos);
+  scene->getWorldNonConst()->removeObject("work_table");
+  // Endpoints remain in bounds, but the controller's cubic spline overshoots.
+  message.joint_trajectory.points.front().velocities = {10.0, 0.0};
+  message.joint_trajectory.points.back().velocities = {-10.0, 0.0};
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
+}
+
+TEST(PostPlacePlanner, CachedPickRejectsChangedUncommandedJointAndAttachedObject)
+{
+  auto original = model();
+  auto srdf = std::make_shared<srdf::Model>();
+  ASSERT_TRUE(srdf->initString(*original->getURDF(),
+      R"(<robot name="test"><group name="arm"><joint name="slide"/></group></robot>)"));
+  auto robot = std::make_shared<moveit::core::RobotModel>(original->getURDF(), srdf);
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  PickPlaceConfig config;
+  config.planning_group = "arm";
+  config.left_tcp = "hand";
+  config.right_tcp = "hand";
+  config.execution_joint_tolerance = 0.1;
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.update();
+  robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+  trajectory.addSuffixWayPoint(start, 0.0);
+  trajectory.addSuffixWayPoint(start, 1.0);
+  moveit_msgs::msg::RobotTrajectory message;
+  trajectory.getRobotTrajectoryMsg(message);
+  std::string error;
+  const auto canceled = []() {return false;};
+  ASSERT_TRUE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
+  moveit::core::RobotState moved(start);
+  moved.setVariablePosition("lift", 0.01);
+  EXPECT_TRUE(validateReusablePickTrajectory(message, start, moved, scene, config, error, canceled));
+  moved.setVariablePosition("lift", config.execution_joint_tolerance + 0.05);
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, moved, scene, config, error, canceled));
+  EXPECT_NE(error.find("lift"), std::string::npos);
+  scene->getCurrentStateNonConst().attachBody("held_box", Eigen::Isometry3d::Identity(),
+    {std::make_shared<shapes::Box>(0.1, 0.1, 0.1)}, {Eigen::Isometry3d::Identity()},
+    std::set<std::string>{"hand"}, "hand");
+  EXPECT_FALSE(validateReusablePickTrajectory(message, start, start, scene, config, error, canceled));
+  EXPECT_NE(error.find("empty arms"), std::string::npos);
+}
+
+TEST(PostPlacePlanner, SplineValidationCostDependsOnMotionInsteadOfExecutionDuration)
+{
+  const auto robot = model();
+  const auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  moveit::core::RobotState start(robot), end(robot);
+  start.setToDefaultValues();
+  end = start;
+  end.setVariablePosition("slide", 0.4);
+  TrajectoryValidationStats fast, slow;
+  std::string error;
+  for (const double duration : {1.0, 60.0}) {
+    robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+    trajectory.addSuffixWayPoint(start, 0.0);
+    trajectory.addSuffixWayPoint(end, duration);
+    ASSERT_TRUE(validateTimedReturnTrajectory(trajectory, scene, 0.02, error,
+        []() {return false;}, true, 0.0, {}, duration == 1.0 ? &fast : &slow)) << error;
+  }
+  EXPECT_EQ(fast.spline_samples, slow.spline_samples);
+  EXPECT_LT(slow.collision_checks, 2U * fast.collision_checks);
+  EXPECT_LT(slow.collision_checks, 60U);
+  // Timing resampling of an unmoving robot must not repeat mesh checks.
+  robot_trajectory::RobotTrajectory stationary(robot, "arm");
+  for (int index = 0; index < 1000; ++index) {
+    stationary.addSuffixWayPoint(start, index == 0 ? 0.0 : 0.1);
+  }
+  TrajectoryValidationStats stats;
+  ASSERT_TRUE(validateTimedReturnTrajectory(stationary, scene, 0.02, error,
+      []() {return false;}, true, 0.0, {}, &stats)) << error;
+  EXPECT_EQ(stats.collision_checks, 2U);
 }
 
 TEST(PostPlacePlanner, CoordinatedRetreatUsesGraspPolicyWithoutAllowingEnvironmentContact)
@@ -253,6 +717,45 @@ TEST_F(ReturnSearchTest, AllowsWristContactDuringRetreatButRequiresClearEndpoint
   EXPECT_FALSE(planner.validateSegment(segment, start, scene, error,
       []() {return false;}));
   EXPECT_NE(error.find("retreat endpoint has not cleared"), std::string::npos);
+}
+
+TEST_F(ReturnSearchTest, NoMotionReturnUsesExecutionToleranceAndChecksCollision)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  auto settings = config();
+  settings.motion_planning_mode = MotionPlanningMode::POSE_TO_POSE;
+  auto node = std::make_shared<rclcpp::Node>("return_no_motion_test");
+  PostPlacePlanner planner(node, settings, robot);
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  ASSERT_TRUE(start.setToDefaultValues(robot->getJointModelGroup("arm"), "zero"));
+  start.update();
+  PostPlacePlan output;
+  std::string error;
+  ASSERT_TRUE(planner.planToNamedTarget(start, scene, "zero", output, error,
+      []() {return false;})) << error;
+  ASSERT_EQ(output.segments.size(), 1U);
+  EXPECT_TRUE(output.segments.front().no_motion);
+  EXPECT_FALSE(output.segments.front().name.empty());
+  EXPECT_TRUE(planner.validateSegment(output.segments.front(), start, scene, error,
+      []() {return false;}, true)) << error;
+  auto moved = start;
+  moved.setVariablePosition("slide", 0.2001);
+  moved.update();
+  EXPECT_TRUE(planner.validateSegment(output.segments.front(), moved, scene, error,
+      []() {return false;}, true)) << error;
+  moved.setVariablePosition("slide", 0.21);
+  moved.update();
+  EXPECT_TRUE(planner.validateSegment(output.segments.front(), moved, scene, error,
+      []() {return false;}, true)) << error;
+  moved.setVariablePosition("slide", 0.23);
+  moved.update();
+  EXPECT_FALSE(planner.validateSegment(output.segments.front(), moved, scene, error,
+      []() {return false;}, true));
+  obstacle(scene, 0.2);
+  EXPECT_FALSE(planner.validateSegment(output.segments.front(), start, scene, error,
+      []() {return false;}, true));
 }
 
 TEST_F(ReturnSearchTest, FindsValidatedDetoursInTwentyIndependentTrials)
@@ -491,6 +994,70 @@ TEST_F(ReturnSearchTest, HypotheticalReleaseClearsOnlyItsAttachedBox)
   EXPECT_TRUE(output.segments.empty());
 }
 
+TEST_F(ReturnSearchTest, PreparePlansDespiteReadyCollisionAndReadyReplansAfterTableUpdate)
+{
+  const auto robot = model();
+  for (const auto mode : {MotionPlanningMode::POSE_TO_POSE, MotionPlanningMode::CLOSED_CHAIN}) {
+    auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+    obstacle(scene, -0.3, 0.6);  // Ready is blocked; Prepare and the release state are clear.
+    auto settings = config();
+    settings.motion_planning_mode = mode;
+    settings.post_place_named_target = "ready";
+    auto node = std::make_shared<rclcpp::Node>("independent_prepare_test");
+    PostPlacePlanner planner(node, settings, robot);
+    moveit::core::RobotState start(robot);
+    start.setToDefaultValues();
+    start.setVariablePosition("slide", 0.3);
+    start.update();
+    PostPlacePlan output;
+    std::string error;
+    EXPECT_FALSE(planner.plan(start, {}, scene, false, output, error,
+        []() {return false;}, std::chrono::steady_clock::time_point::max(), "ready", "prepare"));
+    EXPECT_NE(error.find("return named target invalid"), std::string::npos);
+    ASSERT_TRUE(planner.planToNamedTarget(start, scene, "prepare", output, error,
+        []() {return false;})) << error;
+    for (const auto & segment : output.segments) {
+      EXPECT_TRUE(planner.validateSegment(segment, start, scene, error,
+          []() {return false;}, true)) << error;
+      robot_trajectory::RobotTrajectory trajectory(robot, "arm");
+      trajectory.setRobotTrajectoryMsg(start, segment.trajectory);
+      start = trajectory.getLastWayPoint();
+    }
+    EXPECT_NEAR(start.getVariablePosition("slide"), 0.0, 1e-3);
+    EXPECT_NEAR(start.getVariablePosition("lift"), 0.2, 1e-3);
+    EXPECT_FALSE(planner.planToNamedTarget(start, scene, "ready", output, error,
+        []() {return false;}));
+    EXPECT_TRUE(output.segments.empty());
+    obstacle(scene, -0.8);  // A later refreshed scene clears Ready.
+    ASSERT_TRUE(planner.planToNamedTarget(start, scene, "ready", output, error,
+        []() {return false;})) << error;
+    EXPECT_TRUE(planner.validateSegment(output.segments.front(), start, scene, error,
+        []() {return false;}, true)) << error;
+  }
+}
+
+TEST_F(ReturnSearchTest, RejectsCollidingPrepareWithoutCheckingReady)
+{
+  const auto robot = model();
+  auto scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  obstacle(scene, 0.0, 0.6);
+  auto settings = config();
+  settings.post_place_named_target = "missing_ready";
+  auto node = std::make_shared<rclcpp::Node>("independent_prepare_collision_test");
+  PostPlacePlanner planner(node, settings, robot);
+  moveit::core::RobotState start(robot);
+  start.setToDefaultValues();
+  start.setVariablePosition("slide", 0.3);
+  start.update();
+  PostPlacePlan output;
+  std::string error;
+  EXPECT_FALSE(planner.planToNamedTarget(start, scene, "prepare", output, error,
+      []() {return false;}));
+  EXPECT_NE(error.find("return named target invalid: collision"), std::string::npos);
+  EXPECT_EQ(error.find("missing_ready"), std::string::npos);
+  EXPECT_TRUE(output.segments.empty());
+}
+
 TEST_F(ReturnSearchTest, UsesExplicitResetTargetAndRejectsUnreleasedObjects)
 {
   const auto robot = model();
@@ -554,6 +1121,45 @@ TEST_F(ReturnSearchTest, ResetSceneClearsManagedDetectionsAndPreservesExternalOb
     "placed_box_tag_0", "hand", type);
   EXPECT_TRUE(!has_allowance || type == collision_detection::AllowedCollision::NEVER);
   EXPECT_TRUE(scene->getCurrentState().hasAttachedBody("placed_box_tag_0"));
+}
+
+TEST_F(ReturnSearchTest, MultipleTablesAreRetainedAndClearedWithoutRemovingExternalObjects)
+{
+  auto scene = std::make_shared<planning_scene::PlanningScene>(model());
+  obstacle(scene, -0.5);
+  moveit_msgs::msg::CollisionObject external;
+  ASSERT_TRUE(scene->getCollisionObjectMsg(external, "work_table"));
+  external.id = "external_obstacle";
+  external.operation = moveit_msgs::msg::CollisionObject::ADD;
+  ASSERT_TRUE(scene->processCollisionObjectMsg(external));
+  DetectionSceneSnapshot observations;
+  observations.table = SceneBox{"work_table", {0.6, 0.4, 0.6}, Eigen::Isometry3d::Identity()};
+  auto second_pose = Eigen::Isometry3d::Identity();
+  second_pose.translation().x() = 1.0;
+  observations.tables.push_back({"second_work_table", {0.8, 0.5, 0.7}, second_pose});
+  const std::vector<std::string> table_ids{"work_table", "second_work_table"};
+  moveit_msgs::msg::PlanningScene diff;
+  std::string error;
+  ASSERT_TRUE(buildDetectionSceneDiff(scene, "placed_box", "work_table", "base_link",
+    observations, {}, false, diff, error, table_ids)) << error;
+  scene->setPlanningSceneDiffMsg(diff);
+  EXPECT_TRUE(scene->getWorld()->hasObject("work_table"));
+  EXPECT_TRUE(scene->getWorld()->hasObject("second_work_table"));
+  EXPECT_TRUE(scene->getWorld()->hasObject("external_obstacle"));
+  // Switching the selected table must still remove all absent catalog tables.
+  ASSERT_TRUE(buildDetectionSceneDiff(scene, "placed_box", "second_work_table", "base_link",
+    {}, {}, false, diff, error, table_ids)) << error;
+  scene->setPlanningSceneDiffMsg(diff);
+  EXPECT_FALSE(scene->getWorld()->hasObject("work_table"));
+  EXPECT_FALSE(scene->getWorld()->hasObject("second_work_table"));
+  EXPECT_TRUE(scene->getWorld()->hasObject("external_obstacle"));
+  ASSERT_TRUE(buildDetectionSceneDiff(scene, "placed_box", "work_table", "base_link",
+    observations, {}, false, diff, error, table_ids)) << error;
+  scene->setPlanningSceneDiffMsg(diff);
+  ASSERT_TRUE(buildResetSceneDiff(scene, "placed_box", "work_table", diff, error, table_ids));
+  scene->setPlanningSceneDiffMsg(diff);
+  EXPECT_FALSE(scene->getWorld()->hasObject("second_work_table"));
+  EXPECT_TRUE(scene->getWorld()->hasObject("external_obstacle"));
 }
 
 TEST_F(ReturnSearchTest, SharedDetectionUpdateProtectsTaskAndRetainsFreshObstacles)
@@ -632,6 +1238,51 @@ TEST_F(ReturnSearchTest, SharedDetectionUpdatePreservesAttachmentUnlessReleaseCo
   updated->setPlanningSceneDiffMsg(diff);
   EXPECT_FALSE(updated->getCurrentState().hasAttachedBody("placed_box"));
   EXPECT_FALSE(updated->getWorld()->hasObject("placed_box"));
+}
+
+TEST_F(ReturnSearchTest, CarryCleanupRemovesOnlyUnheldPerceptionObstacles)
+{
+  auto scene = std::make_shared<planning_scene::PlanningScene>(model());
+  obstacle(scene, -0.5);
+  moveit_msgs::msg::CollisionObject object;
+  ASSERT_TRUE(scene->getCollisionObjectMsg(object, "work_table"));
+  object.operation = moveit_msgs::msg::CollisionObject::ADD;
+  object.id = "placed_box_other";
+  ASSERT_TRUE(scene->processCollisionObjectMsg(object));
+  object.id = "external_obstacle";
+  ASSERT_TRUE(scene->processCollisionObjectMsg(object));
+  scene->getCurrentStateNonConst().attachBody("placed_box", Eigen::Isometry3d::Identity(),
+    {std::make_shared<shapes::Sphere>(0.05)}, {Eigen::Isometry3d::Identity()},
+    std::set<std::string>{"hand"}, "hand");
+  scene->getAllowedCollisionMatrixNonConst().setEntry("placed_box", "hand", true);
+  moveit_msgs::msg::PlanningScene diff;
+  std::string error;
+  ASSERT_TRUE(buildDetectionSceneDiff(scene, "placed_box", "work_table", "base_link",
+      {}, {"placed_box"}, false, diff, error)) << error;
+  EXPECT_TRUE(diff.robot_state.attached_collision_objects.empty());
+  auto updated = planning_scene::PlanningScene::clone(scene);
+  updated->setPlanningSceneDiffMsg(diff);
+  EXPECT_FALSE(updated->getWorld()->hasObject("work_table"));
+  EXPECT_FALSE(updated->getWorld()->hasObject("placed_box_other"));
+  EXPECT_TRUE(updated->getWorld()->hasObject("external_obstacle"));
+  EXPECT_TRUE(updated->getCurrentState().hasAttachedBody("placed_box"));
+  EXPECT_EQ(updated->getCurrentState().getAttachedBody("placed_box")->getTouchLinks(),
+    scene->getCurrentState().getAttachedBody("placed_box")->getTouchLinks());
+  collision_detection::AllowedCollision::Type type;
+  ASSERT_TRUE(updated->getAllowedCollisionMatrix().getAllowedCollision("placed_box", "hand", type));
+  EXPECT_EQ(type, collision_detection::AllowedCollision::ALWAYS);
+  ASSERT_TRUE(buildDetectionSceneDiff(updated, "placed_box", "work_table", "base_link",
+      {}, {"placed_box"}, false, diff, error)) << error;
+  EXPECT_TRUE(diff.world.collision_objects.empty());
+  // An unheld world object using the target ID is also previous perception.
+  updated->getCurrentStateNonConst().clearAttachedBody("placed_box");
+  object.id = "placed_box";
+  ASSERT_TRUE(updated->processCollisionObjectMsg(object));
+  ASSERT_TRUE(buildDetectionSceneDiff(updated, "placed_box", "work_table", "base_link",
+      {}, {}, false, diff, error)) << error;
+  updated->setPlanningSceneDiffMsg(diff);
+  EXPECT_FALSE(updated->getWorld()->hasObject("placed_box"));
+  EXPECT_TRUE(updated->getWorld()->hasObject("external_obstacle"));
 }
 
 }  // namespace

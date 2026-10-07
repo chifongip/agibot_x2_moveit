@@ -35,6 +35,13 @@ protected:
   }
 };
 
+TEST_F(PickPlaceConfigTest, EnablesOptionalPickTargetReplanning)
+{
+  auto server = node("pick_replanning");
+  server->declare_parameter("pick_replan_on_target_movement", true);
+  EXPECT_TRUE(loadPickPlaceConfig(server).pick_replan_on_target_movement);
+}
+
 TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
 {
   const auto config = loadPickPlaceConfig(node("defaults"));
@@ -49,11 +56,14 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_EQ(config.post_place_named_target, "ready");
   EXPECT_EQ(config.reset_named_target, "ready");
   EXPECT_DOUBLE_EQ(config.tag_reacquisition_timeout, config.table_tag_stability_timeout);
+  EXPECT_FALSE(config.pick_replan_on_target_movement);
   EXPECT_FALSE(config.allow_execution);
   EXPECT_TRUE(config.visible_boxes_as_obstacles);
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, config.reset_state_timeout);
   EXPECT_DOUBLE_EQ(config.execution_joint_tolerance, config.reset_joint_tolerance);
   EXPECT_DOUBLE_EQ(config.place_start_state_bounds_tolerance, 0.02);
+  EXPECT_DOUBLE_EQ(config.cartesian_path_position_tolerance, 0.02);
+  EXPECT_DOUBLE_EQ(config.cartesian_path_orientation_tolerance, 0.0872664626);
   EXPECT_EQ(config.perception_source, Perception3dSource::NONE);
   EXPECT_FALSE(config.use_tag_derived_place_pose);
   EXPECT_EQ(config.table_tag_frame, "tag9");
@@ -75,6 +85,22 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_DOUBLE_EQ(config.posture_zmq_publish_rate_hz, 50.0);
   EXPECT_EQ(config.leg_state_topic, "/aima/hal/joint/leg/state");
   EXPECT_EQ(config.waist_state_topic, "/aima/hal/joint/waist/state");
+}
+
+TEST_F(PickPlaceConfigTest, RejectsInvalidCartesianGeometryParameters)
+{
+  int index = 0;
+  for (const std::string name : {"cartesian_step", "cartesian_path_position_tolerance",
+      "cartesian_path_orientation_tolerance"})
+  {
+    for (const double value : {0.0, -0.01, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()})
+    {
+      const auto test_node = node("cartesian_invalid_" + std::to_string(index++));
+      test_node->declare_parameter<double>(name, value);
+      EXPECT_THROW(loadPickPlaceConfig(test_node), std::runtime_error) << name;
+    }
+  }
 }
 
 TEST_F(PickPlaceConfigTest, UsesDeclaredOverridesAndDependentExecutionDefaults)
@@ -135,6 +161,23 @@ TEST_F(PickPlaceConfigTest, CarriesUseTheGraspMarginWhenNoCarryOverrideIsSet)
 
   EXPECT_DOUBLE_EQ(config.minimum_grasp_joint_margin, 0.03);
   EXPECT_DOUBLE_EQ(config.minimum_carry_joint_margin, 0.03);
+}
+
+TEST_F(PickPlaceConfigTest, LoadsConfigurableControllerSplineBoundsTolerance)
+{
+  EXPECT_DOUBLE_EQ(loadPickPlaceConfig(node("spline_default")).controller_spline_bounds_tolerance, 0.001);
+  for (const double tolerance : {0.0, 0.002, 0.2}) {
+    const auto test_node = node("spline_override");
+    test_node->declare_parameter<double>("controller_spline_bounds_tolerance", tolerance);
+    EXPECT_DOUBLE_EQ(loadPickPlaceConfig(test_node).controller_spline_bounds_tolerance, tolerance);
+  }
+  for (const double tolerance : {-0.001, std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::quiet_NaN()})
+  {
+    const auto test_node = node("spline_invalid");
+    test_node->declare_parameter<double>("controller_spline_bounds_tolerance", tolerance);
+    EXPECT_THROW(loadPickPlaceConfig(test_node), std::runtime_error);
+  }
 }
 
 TEST_F(PickPlaceConfigTest, RejectsUnsafeReturnSearchSettings)
@@ -234,6 +277,133 @@ TEST_F(PickPlaceConfigTest, RejectsInvalidModeAndUnsafeExecutionValues)
   const auto relative_log_directory = node("relative_log_directory");
   relative_log_directory->declare_parameter<std::string>("planning_log_directory", "traces");
   EXPECT_THROW(loadPickPlaceConfig(relative_log_directory), std::runtime_error);
+}
+
+TEST_F(PickPlaceConfigTest, PoseAccuracyOverridesPreserveLegacyFallbacks)
+{
+  auto legacy = node("pose_legacy");
+  legacy->declare_parameter<double>("cartesian_path_position_tolerance", 0.03);
+  legacy->declare_parameter<double>("closed_chain_contact_position_error", 0.07);
+  legacy->declare_parameter<double>("recovery_position_tolerance", 0.09);
+  const auto old = loadPickPlaceConfig(legacy);
+  EXPECT_FALSE(old.planning_position_tolerance);
+  EXPECT_FALSE(old.execution_position_tolerance);
+  EXPECT_DOUBLE_EQ(old.planning_position_limit(), 0.03);
+  EXPECT_DOUBLE_EQ(old.execution_position_limit(old.cartesian_path_position_tolerance), 0.03);
+  EXPECT_DOUBLE_EQ(old.execution_position_limit(old.closed_chain_contact_position_error), 0.07);
+  EXPECT_DOUBLE_EQ(old.execution_position_limit(old.recovery_position_tolerance), 0.09);
+
+  auto overrides = std::make_shared<rclcpp::Node>("pose_overrides",
+    rclcpp::NodeOptions().parameter_overrides({
+      rclcpp::Parameter("planning_position_tolerance", 0.02),
+      rclcpp::Parameter("planning_orientation_tolerance", 0.05),
+      rclcpp::Parameter("execution_position_tolerance", 0.1),
+      rclcpp::Parameter("execution_orientation_tolerance", 0.17)}));
+  const auto config = loadPickPlaceConfig(overrides);
+  EXPECT_DOUBLE_EQ(config.planning_position_limit(), 0.02);
+  EXPECT_DOUBLE_EQ(config.planning_orientation_limit(), 0.05);
+  EXPECT_DOUBLE_EQ(config.execution_position_limit(0.003), 0.1);
+  EXPECT_DOUBLE_EQ(config.execution_orientation_limit(0.01), 0.17);
+  EXPECT_DOUBLE_EQ(config.closed_chain_contact_position_error, 0.002);
+
+  auto partial = std::make_shared<rclcpp::Node>("pose_partial",
+    rclcpp::NodeOptions().parameter_overrides({
+      rclcpp::Parameter("planning_position_tolerance", 0.025),
+      rclcpp::Parameter("execution_position_tolerance", 0.12)}));
+  const auto partial_config = loadPickPlaceConfig(partial);
+  EXPECT_DOUBLE_EQ(partial_config.planning_position_limit(), 0.025);
+  EXPECT_DOUBLE_EQ(partial_config.planning_orientation_limit(),
+    partial_config.cartesian_path_orientation_tolerance);
+  EXPECT_DOUBLE_EQ(partial_config.execution_position_limit(0.003), 0.12);
+  EXPECT_DOUBLE_EQ(partial_config.execution_orientation_limit(0.04), 0.04);
+  EXPECT_DOUBLE_EQ(partial_config.execution_orientation_limit(0.09), 0.09);
+}
+
+TEST_F(PickPlaceConfigTest, RejectsInvalidPoseAccuracyOverrides)
+{
+  for (const auto & name : {"planning_position_tolerance", "planning_orientation_tolerance",
+      "execution_position_tolerance", "execution_orientation_tolerance"})
+  {
+    for (double value : {0.0, -0.1, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()})
+    {
+      auto invalid = std::make_shared<rclcpp::Node>("bad_pose_accuracy",
+        rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter(name, value)}));
+      EXPECT_THROW(loadPickPlaceConfig(invalid), std::runtime_error) << name;
+    }
+    auto wrong_type = std::make_shared<rclcpp::Node>("bad_pose_type",
+      rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter(name, "invalid")}));
+    EXPECT_THROW(loadPickPlaceConfig(wrong_type), std::exception) << name;
+  }
+}
+
+TEST_F(PickPlaceConfigTest, DetectionOverridesPreserveLegacyAndPartialFallbacks)
+{
+  auto legacy = node("detection_legacy");
+  legacy->declare_parameter<double>("grasp_position_tolerance", 0.03);
+  legacy->declare_parameter<double>("grasp_orientation_tolerance", 0.12);
+  legacy->declare_parameter<double>("closed_chain_contact_position_error", 0.07);
+  legacy->declare_parameter<double>("closed_chain_contact_orientation_error", 0.2);
+  const auto old = loadPickPlaceConfig(legacy);
+  EXPECT_FALSE(old.detection_position_tolerance);
+  EXPECT_FALSE(old.detection_orientation_tolerance);
+  EXPECT_DOUBLE_EQ(old.detection_position_limit(old.grasp_position_tolerance), 0.03);
+  EXPECT_DOUBLE_EQ(old.detection_position_limit(old.closed_chain_contact_position_error), 0.07);
+  EXPECT_DOUBLE_EQ(old.detection_orientation_limit(old.grasp_orientation_tolerance), 0.12);
+  EXPECT_DOUBLE_EQ(old.detection_orientation_limit(old.closed_chain_contact_orientation_error), 0.2);
+
+  auto partial = node("detection_partial");
+  partial->declare_parameter<double>("detection_position_tolerance", 0.06);
+  const auto p = loadPickPlaceConfig(partial);
+  EXPECT_DOUBLE_EQ(p.detection_position_limit(p.grasp_position_tolerance), 0.06);
+  EXPECT_DOUBLE_EQ(p.detection_position_limit(p.closed_chain_contact_position_error), 0.06);
+  EXPECT_DOUBLE_EQ(p.detection_orientation_limit(p.grasp_orientation_tolerance), p.grasp_orientation_tolerance);
+  EXPECT_DOUBLE_EQ(p.detection_orientation_limit(p.closed_chain_contact_orientation_error), p.closed_chain_contact_orientation_error);
+}
+
+TEST_F(PickPlaceConfigTest, DetectionOverridesDoNotChangeGraspSearch)
+{
+  auto n = node("detection_independence");
+  n->declare_parameter<double>("detection_position_tolerance", 0.1);
+  n->declare_parameter<double>("detection_orientation_tolerance", 0.17);
+  auto config = loadPickPlaceConfig(n);
+  const auto candidates = [](const PickPlaceConfig & c) {
+      GraspCandidateOptions options;
+      options.position_tolerance = c.grasp_position_tolerance;
+      options.orientation_tolerance = c.grasp_orientation_tolerance;
+      options.maximum_candidates = 64;
+      return generateGraspCandidates(Eigen::Isometry3d::Identity(), {0.15, 0.35, 0.32}, 0.08, 0.0, options);
+    };
+  const auto before = candidates(config);
+  ASSERT_FALSE(before.empty());
+  config.detection_position_tolerance = 0.002;
+  config.detection_orientation_tolerance = 0.01;
+  const auto after = candidates(config);
+  ASSERT_EQ(before.size(), after.size());
+  for (size_t i = 0; i < before.size(); ++i) {
+    EXPECT_TRUE(before[i].grasp.left_contact.matrix().isApprox(after[i].grasp.left_contact.matrix()));
+    EXPECT_TRUE(before[i].grasp.right_contact.matrix().isApprox(after[i].grasp.right_contact.matrix()));
+    EXPECT_DOUBLE_EQ(before[i].correction_cost, after[i].correction_cost);
+  }
+  config.grasp_position_tolerance = 0.3;
+  config.grasp_orientation_tolerance = 0.4;
+  EXPECT_DOUBLE_EQ(config.detection_position_limit(config.grasp_position_tolerance), 0.002);
+  EXPECT_DOUBLE_EQ(config.detection_orientation_limit(config.grasp_orientation_tolerance), 0.01);
+}
+
+TEST_F(PickPlaceConfigTest, RejectsInvalidDetectionOverrides)
+{
+  for (const auto & name : {"detection_position_tolerance", "detection_orientation_tolerance"}) {
+    for (double value : {0.0, -0.1, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()}) {
+      auto invalid = std::make_shared<rclcpp::Node>("invalid_detection",
+        rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter(name, value)}));
+      EXPECT_THROW(loadPickPlaceConfig(invalid), std::runtime_error) << name;
+    }
+    auto invalid = std::make_shared<rclcpp::Node>("invalid_detection_type",
+      rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter(name, "invalid")}));
+    EXPECT_THROW(loadPickPlaceConfig(invalid), std::exception) << name;
+  }
 }
 
 TEST_F(PickPlaceConfigTest, RejectsInvalidSearchBudgetsAndInitialState)

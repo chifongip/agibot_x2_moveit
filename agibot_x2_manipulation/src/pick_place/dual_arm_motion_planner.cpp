@@ -1,5 +1,8 @@
 #include "agibot_x2_manipulation/planning_budget.hpp"
 #include "pick_place/dual_arm_motion_planner.hpp"
+#include "pick_place/endpoint_reached.hpp"
+#include "pick_place/cartesian_motion.hpp"
+#include "pick_place/pose_segment_cache.hpp"
 #include "pick_place/planning_trace_logger.hpp"
 #include "pick_place/post_place_planner.hpp"
 
@@ -23,6 +26,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -34,6 +38,15 @@ namespace agibot_x2_manipulation
 {
 namespace
 {
+
+class ScopeExit
+{
+public:
+  explicit ScopeExit(std::function<void ()> action) : action_(std::move(action)) {}
+  ~ScopeExit() {action_();}
+private:
+  std::function<void ()> action_;
+};
 
 const char * carryRouteName(CarryRoute route)
 {
@@ -144,7 +157,8 @@ public:
   bool setFromDualArmIK(
     moveit::core::RobotState & state, const Eigen::Isometry3d & left_pose,
     const Eigen::Isometry3d & right_pose, bool require_continuity = false,
-    double timeout = -1.0) const
+    double timeout = -1.0, PlanningDeadline deadline = PlanningDeadline::max(),
+    const CancelFunction & canceled = []() {return false;}) const
   {
     const auto * left_group = state.getJointModelGroup(config_.left_group_name);
     const auto * right_group = state.getJointModelGroup(config_.right_group_name);
@@ -152,7 +166,18 @@ public:
       left_group->getVariableCount(), config_.max_joint_step);
     const std::vector<double> right_consistency(
       right_group->getVariableCount(), config_.max_joint_step);
-    const double solve_timeout = timeout > 0.0 ? timeout : config_.ik_timeout;
+    const auto began = std::chrono::steady_clock::now();
+    ++ik_calls_;
+    ScopeExit measure([&]() {
+      ik_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+    });
+    const auto available = [&]() {
+        return std::chrono::duration<double>(std::min(deadline, phase_deadline_) -
+               std::chrono::steady_clock::now()).count();
+      };
+    if (canceled() || available() <= 0.0) {return false;}
+    const double requested_timeout = timeout > 0.0 ? timeout : config_.ik_timeout;
+    const double solve_timeout = std::min(requested_timeout, available() * 0.5);
     state.update();
     const bool left_solved = require_continuity ?
       state.setFromIK(left_group, left_pose, config_.left_tcp, left_consistency, solve_timeout) :
@@ -161,11 +186,13 @@ public:
       return false;
     }
     state.update();
+    if (canceled() || available() <= 0.0) {return false;}
+    const double right_timeout = std::min(requested_timeout, available());
     const bool right_solved = require_continuity ?
       state.setFromIK(
       right_group, right_pose, config_.right_tcp, right_consistency,
-      solve_timeout) :
-      state.setFromIK(right_group, right_pose, config_.right_tcp, solve_timeout);
+      right_timeout) :
+      state.setFromIK(right_group, right_pose, config_.right_tcp, right_timeout);
     if (!right_solved) {
       return false;
     }
@@ -176,7 +203,10 @@ public:
   bool solvePregraspIK(
     const moveit::core::RobotState & seed, const GraspGeometry & grasp,
     int attempts, moveit::core::RobotState & solution, double & joint_limit_margin,
-    double & joint_distance, std::string & error)
+    double & joint_distance, std::string & error,
+    PlanningDeadline deadline = PlanningDeadline::max(),
+    const CancelFunction & canceled = []() {return false;},
+    const moveit::core::RobotState * measured_solution = nullptr, bool skip_measured_seed = false)
   {
     const auto * dual_group = seed.getJointModelGroup(move_group_.getName());
     bool found_ik = false;
@@ -187,11 +217,17 @@ public:
     moveit::core::RobotState best(seed);
 
     for (int attempt = 0; attempt < attempts; ++attempt) {
-      moveit::core::RobotState candidate(seed);
+      if (canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_)) {
+        break;
+      }
+      if (attempt == 0 && skip_measured_seed && !measured_solution) {continue;}
+      moveit::core::RobotState candidate(attempt == 0 && measured_solution ? *measured_solution : seed);
       if (attempt > 0) {
         candidate.setToRandomPositions(dual_group);
       }
-      if (!setFromDualArmIK(candidate, grasp.left_pregrasp, grasp.right_pregrasp)) {
+      if (!(attempt == 0 && measured_solution) &&
+        !setFromDualArmIK(candidate, grasp.left_pregrasp, grasp.right_pregrasp, false,
+          -1.0, deadline, canceled)) {
         continue;
       }
       found_ik = true;
@@ -378,6 +414,7 @@ public:
     bool found_bounds = false;
     for (int attempt = preferred ? -1 : 0; attempt < config_.closed_chain_ik_attempts; ++attempt) {
       moveit::core::RobotState candidate(attempt < 0 ? *preferred : start);
+      if (std::chrono::steady_clock::now() >= phase_deadline_) {break;}
       if (attempt >= 0) {
         if (attempt > 0) {
           candidate.setToRandomPositions(dual_group);
@@ -439,8 +476,10 @@ public:
     moveit::core::RobotState target, const std::string & route,
     const std::string & segment, const CancelFunction & canceled, std::string & error,
     const std::chrono::steady_clock::time_point & deadline =
-    std::chrono::steady_clock::time_point::max(), double minimum_joint_margin = 0.0)
+    std::chrono::steady_clock::time_point::max(), double minimum_joint_margin = 0.0,
+    bool * validated_timing = nullptr)
   {
+    if (validated_timing) {*validated_timing = false;}
     if (canceled()) {
       error = segment + " endpoint planning canceled";
       publishEndpointDiagnostic(route, segment, false, error);
@@ -458,6 +497,56 @@ public:
       publishEndpointDiagnostic(route, segment, false, error);
       return false;
     }
+    const auto * group = state.getJointModelGroup(move_group_.getName());
+    double maximum_joint_distance = 0.0;
+    for (const auto * joint : group->getActiveJointModels()) {
+      maximum_joint_distance = std::max(maximum_joint_distance, joint->distance(
+          state.getJointPositions(joint), target.getJointPositions(joint)));
+    }
+    if (maximum_joint_distance <= 1e-6) {
+      if (!state.satisfiesBounds(group) ||
+        !validateMinimumJointMargin(state, minimum_joint_margin, segment, error) ||
+        !planning_scene_.collisionFree(state, true, false))
+      {
+        error = "already-reached joint endpoint violates bounds, margin, or collision constraints";
+        publishEndpointDiagnostic(route, segment, false, error);
+        return false;
+      }
+      publishEndpointDiagnostic(route, segment, true,
+        "joint endpoint already reached; motion skipped after state validation");
+      return true;
+    }
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+      auto scene = graspContactScene(planning_scene_.snapshot(), config_);
+      moveit_msgs::msg::RobotTrajectory direct;
+      std::string direct_error;
+      const auto interrupted = [&]() {
+          return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
+        };
+      const auto direct_started = std::chrono::steady_clock::now();
+      const bool direct_valid = tryDirectJointTrajectory(state, target, scene, config_,
+        minimum_joint_margin, direct, direct_error, interrupted);
+      writeTrace("direct_joint_route", direct_valid, direct_error,
+        {{"segment", segment}, {"elapsed_seconds", std::to_string(
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - direct_started).count())}});
+      if (direct_valid)
+      {
+        robot_trajectory::RobotTrajectory planned(state.getRobotModel(), move_group_.getName());
+        planned.setRobotTrajectoryMsg(state, direct);
+        if (planned.getWayPointCount() >= 2U) {
+          // The initial sample must carry the derivatives that were spline-validated.
+          if (combined.getWayPointCount() == 1U) {
+            *combined.getFirstWayPointPtr() = planned.getFirstWayPoint();
+          }
+          if (validated_timing) {*validated_timing = true;}
+          combined.append(planned, planned.getWayPointDurationFromPrevious(1), 1);
+          state = planned.getLastWayPoint();
+          state.update();
+          publishEndpointDiagnostic(route, segment, true, "validated direct joint route; OMPL skipped");
+          return true;
+        }
+      }
+    }
     moveit::planning_interface::MoveGroupInterface::Plan plan;
     const double remaining = std::chrono::duration<double>(
       std::min(deadline, phase_deadline_) - std::chrono::steady_clock::now()).count();
@@ -466,7 +555,11 @@ public:
       return false;
     }
     move_group_.setPlanningTime(std::min(config_.planning_time_per_candidate, remaining));
+    const auto ompl_started = std::chrono::steady_clock::now();
+    ++ompl_calls_;
     const auto result = move_group_.plan(plan);
+    ompl_seconds_ += std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - ompl_started).count();
     move_group_.setPlanningTime(10.0);
     if (result != moveit::core::MoveItErrorCode::SUCCESS) {
       error = segment + " joint-space planning failed: " +
@@ -482,7 +575,20 @@ public:
     robot_trajectory::RobotTrajectory planned(state.getRobotModel(), move_group_.getName());
     planned.setRobotTrajectoryMsg(state, plan.trajectory_);
     if (planned.getWayPointCount() < 2U) {
-      error = segment + " joint-space plan contains fewer than two states";
+      // MoveIt may report success with no motion when its joint goal is already
+      // satisfied. Use that same tolerance, not the stricter fast-path epsilon.
+      // Retain the current state: no returned waypoint is executed or assumed.
+      if (jointEndpointReached(state, target, group, move_group_.getGoalJointTolerance()) &&
+        state.satisfiesBounds(group) &&
+        validateMinimumJointMargin(state, minimum_joint_margin, segment, error) &&
+        planning_scene_.collisionFree(state, true, false))
+      {
+        publishEndpointDiagnostic(route, segment, true,
+          "short MoveIt result accepted; current state satisfies joint goal and safety checks");
+        return true;
+      }
+      error = segment + " joint-space plan contains fewer than two states; maximum joint error=" +
+        std::to_string(maximum_joint_distance);
       publishEndpointDiagnostic(route, segment, false, error);
       return false;
     }
@@ -495,6 +601,14 @@ public:
         return false;
       }
     }
+    const auto interrupted = [&]() {
+        return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
+      };
+    if (!validateTimedReturnTrajectory(planned, graspContactScene(planning_scene_.snapshot(), config_),
+        config_.return_validation_joint_step, error, interrupted, true, minimum_joint_margin, {}, nullptr,
+        config_.controller_spline_bounds_tolerance)) {return false;}
+    if (combined.getWayPointCount() == 1U) {*combined.getFirstWayPointPtr() = planned.getFirstWayPoint();}
+    if (validated_timing) {*validated_timing = true;}
     combined.append(
       planned, planned.getWayPointDurationFromPrevious(1), 1);
     state = planned.getLastWayPoint();
@@ -511,8 +625,13 @@ public:
     const CancelFunction & canceled, std::string & error,
     const std::chrono::steady_clock::time_point & deadline =
     std::chrono::steady_clock::time_point::max(), double minimum_joint_margin = 0.0,
-    const moveit::core::RobotState * preferred_endpoint = nullptr)
+    const moveit::core::RobotState * preferred_endpoint = nullptr,
+    bool * validated_segment_timing = nullptr)
   {
+    cartesian_segments_.clear();
+    std::size_t motion_segments = 0;
+    bool all_segments_timed = true;
+    if (validated_segment_timing) {*validated_segment_timing = false;}
     if (!validateMinimumJointMargin(
         state, minimum_joint_margin, route + " route start", error))
     {
@@ -526,8 +645,89 @@ public:
       }
       const auto grasp = graspFromBoxToTcp(
         controls[index].pose, box_to_left_contact, box_to_right_contact, 0.0);
-      moveit::core::RobotState target(state);
+      // An already-reached intermediate endpoint needs no IK or MoveIt request.
+      // Keep the actual state, and validate it with the same contact policy as
+      // other endpoints rather than accepting arbitrary short planner results.
+      state.update();
+      if (endpointReached(state.getGlobalLinkTransform(config_.left_tcp),
+          state.getGlobalLinkTransform(config_.right_tcp),
+          grasp.left_contact, grasp.right_contact))
+      {
+        if (!state.satisfiesBounds(state.getJointModelGroup(move_group_.getName())) ||
+          !validateMinimumJointMargin(state, minimum_joint_margin,
+            controls[index].segment + " already-reached endpoint", error) ||
+          !planning_scene_.collisionFree(state, true, false))
+        {
+          if (error.empty()) {error = "already-reached endpoint violates bounds or collision constraints";}
+          publishEndpointDiagnostic(route, controls[index].segment, false, error);
+          return false;
+        }
+        publishEndpointDiagnostic(route, controls[index].segment, true,
+          "endpoint already reached; motion skipped after state validation");
+        continue;
+      }
+      if (isCartesianPickSegment(controls[index].segment)) {
+        auto scene = graspContactScene(planning_scene_.snapshot(), config_);
+        moveit_msgs::msg::RobotTrajectory message;
+        moveit::core::RobotState end(state);
+        const auto cartesian_started = std::chrono::steady_clock::now();
+        const bool planned = planCartesianMotion(state, {grasp.left_contact, grasp.right_contact},
+          scene, config_, message, end, error, canceled, std::min(deadline, phase_deadline_),
+          minimum_joint_margin);
+        writeTrace("cartesian_segment", planned, error, {{"segment", controls[index].segment},
+          {"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - cartesian_started).count())}});
+        if (!planned) {return false;}
+        robot_trajectory::RobotTrajectory cartesian(state.getRobotModel(), config_.planning_group);
+        cartesian.setRobotTrajectoryMsg(state, message);
+        if (trajectory.getWayPointCount() == 1U) {*trajectory.getFirstWayPointPtr() = cartesian.getFirstWayPoint();}
+        const auto first = trajectory.getWayPointCount() - 1U;
+        const HandPosePair from{state.getGlobalLinkTransform(config_.left_tcp),
+          state.getGlobalLinkTransform(config_.right_tcp)};
+        trajectory.append(cartesian, cartesian.getWayPointDurationFromPrevious(1), 1);
+        cartesian_segments_.push_back({first, trajectory.getWayPointCount() - 1U,
+          from, {grasp.left_contact, grasp.right_contact}});
+        state = end;
+        ++motion_segments;
+        continue;
+      }
       const auto * preferred = index + 1 == controls.size() ? preferred_endpoint : nullptr;
+      if (segment_cache_) {
+        const auto * entry = segment_cache_->find(state, grasp.left_contact, grasp.right_contact);
+        if (entry) {
+          const auto validation_started = std::chrono::steady_clock::now();
+          auto scene = graspContactScene(planning_scene_.snapshot(), config_);
+          // Preserve the live attached geometry, even when hypothetical starts have no attached body.
+          moveit::core::RobotState reference(state);
+          const bool attachments_valid = copySceneAttachments(reference, scene->getCurrentState());
+          robot_trajectory::RobotTrajectory cached(state.getRobotModel(), move_group_.getName());
+          cached.setRobotTrajectoryMsg(reference, entry->trajectory);
+          std::string cache_error;
+          const auto interrupted = [&]() {
+              return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
+            };
+          const bool branch_matches = !preferred ||
+            jointEndpointReached(cached.getLastWayPoint(), *preferred, cached.getGroup(), 1e-6);
+          const bool valid = attachments_valid && branch_matches && cached.getWayPointCount() >= 2U &&
+            validateTimedReturnTrajectory(cached, scene, config_.return_validation_joint_step,
+              cache_error, interrupted, true, minimum_joint_margin, {}, nullptr,
+              config_.controller_spline_bounds_tolerance);
+          writeTrace("pose_prefix_reuse", valid, cache_error,
+            {{"segment", controls[index].segment}, {"validation_seconds", std::to_string(
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - validation_started).count())}});
+          if (valid) {
+            if (trajectory.getWayPointCount() == 1U) {*trajectory.getFirstWayPointPtr() = cached.getFirstWayPoint();}
+            ++motion_segments;
+            trajectory.append(cached, cached.getWayPointDurationFromPrevious(1), 1);
+            state = cached.getLastWayPoint();
+            continue;
+          }
+        }
+      }
+      const moveit::core::RobotState segment_start(state);
+      const auto original_count = trajectory.getWayPointCount();
+      bool segment_timing = false;
+      moveit::core::RobotState target(state);
       if (!solveDualArmEndpoint(
           state, grasp.left_contact, grasp.right_contact, true, target, error, preferred))
       {
@@ -537,7 +737,7 @@ public:
       }
       if (!appendJointSpacePlan(
           trajectory, state, target, route, controls[index].segment, canceled, error, deadline,
-          minimum_joint_margin))
+          minimum_joint_margin, &segment_timing))
       {
         // A valid prechecked IK branch may still be disconnected from this
         // segment's start. Try the original seed-based branch before rejecting
@@ -549,11 +749,29 @@ public:
             state, grasp.left_contact, grasp.right_contact, true, target, error) ||
           !appendJointSpacePlan(
             trajectory, state, target, route, controls[index].segment, canceled, error, deadline,
-            minimum_joint_margin))
+            minimum_joint_margin, &segment_timing))
         {
           return false;
         }
       }
+      if (trajectory.getWayPointCount() > original_count) {
+        ++motion_segments;
+        all_segments_timed = all_segments_timed && segment_timing;
+      }
+      if (segment_cache_ && trajectory.getWayPointCount() > original_count) {
+        robot_trajectory::RobotTrajectory suffix(state.getRobotModel(), move_group_.getName());
+        suffix.addSuffixWayPoint(trajectory.getWayPoint(original_count - 1U), 0.0);
+        for (std::size_t waypoint = original_count; waypoint < trajectory.getWayPointCount(); ++waypoint) {
+          suffix.addSuffixWayPoint(trajectory.getWayPoint(waypoint),
+            trajectory.getWayPointDurationFromPrevious(waypoint));
+        }
+        moveit_msgs::msg::RobotTrajectory message;
+        suffix.getRobotTrajectoryMsg(message);
+        segment_cache_->insert({segment_start, grasp.left_contact, grasp.right_contact, std::move(message)});
+      }
+    }
+    if (validated_segment_timing) {
+      *validated_segment_timing = motion_segments > 0U && all_segments_timed;
     }
     return true;
   }
@@ -936,38 +1154,16 @@ public:
     std::chrono::steady_clock::time_point outer_deadline =
     std::chrono::steady_clock::time_point::max())
   {
-    if (!retreat_scene && config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
-      moveit::core::RobotState endpoint(start);
-      if (!solveDualArmEndpoint(
-          start, target.left_contact, target.right_contact, true, endpoint, error))
-      {
-        publishEndpointDiagnostic("approach", "contact", false, error);
-        return false;
-      }
-      moveit_msgs::msg::CollisionObject saved_box;
-      if (!planning_scene_.removeWorldBoxTemporarily(saved_box, error)) {
-        publishEndpointDiagnostic("approach", "contact", false, error);
-        return false;
-      }
-      robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
-      trajectory.addSuffixWayPoint(start, 0.0);
-      moveit::core::RobotState state(start);
-      const bool planned = appendJointSpacePlan(
-        trajectory, state, endpoint, "approach", "contact", canceled, error);
-      std::string restore_error;
-      const bool restored = planning_scene_.restoreWorldBox(saved_box, restore_error);
-      if (!restored) {
-        error = restore_error;
-        RCLCPP_ERROR(node_->get_logger(), "%s", restore_error.c_str());
-        return false;
-      }
-      if (!planned) {
-        RCLCPP_WARN(node_->get_logger(), "%s", error.c_str());
-        return false;
-      }
-      trajectory.getRobotTrajectoryMsg(output);
-      end_state = state;
-      return true;
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+      const auto scene = retreat_scene ? retreat_scene : graspContactScene(planning_scene_.snapshot(), config_);
+      const auto cartesian_started = std::chrono::steady_clock::now();
+      const bool planned = planCartesianMotion(start, {target.left_contact, target.right_contact},
+        scene, config_, output, end_state, error, canceled, std::min(outer_deadline, phase_deadline_));
+      writeTrace("cartesian_segment", planned, error,
+        {{"segment", retreat_scene ? "retreat" : "approach"},
+          {"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - cartesian_started).count())}});
+      return planned;
     }
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
     trajectory.addSuffixWayPoint(start, 0.0);
@@ -1357,13 +1553,23 @@ public:
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     std::string & error, const std::chrono::steady_clock::time_point & deadline,
     const CancelFunction & canceled,
-    const moveit::core::RobotState * preferred_endpoint = nullptr)
+    const moveit::core::RobotState * preferred_endpoint = nullptr,
+    std::optional<double> pick_lift_top = std::nullopt)
   {
+    bool validated_segment_timing = false;
+    planning_scene::PlanningScenePtr route_scene;
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
-    trajectory.addSuffixWayPoint(start, 0.0);
     moveit::core::RobotState state(start);
-    Eigen::Isometry3d lift = pick_pose;
-    lift.translation().z() += config_.lift_height;
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+      !normalizePlanningStart(state, state.getJointModelGroup(move_group_.getName()),
+        config_.place_start_state_bounds_tolerance))
+    {
+      error = "route start exceeds configured position bounds tolerance";
+      return false;
+    }
+    trajectory.addSuffixWayPoint(state, 0.0);
+    // A resumed lift targets its original height, even after partial execution.
+    const Eigen::Isometry3d lift = pickLiftTarget(pick_pose, config_.lift_height, pick_lift_top);
     std::vector<ClosedChainWaypoint> controls{{pick_pose, false, "pick_lift"}};
     const auto add = [&controls](const Eigen::Isometry3d & pose, const char * segment) {
         controls.push_back({pose, true, segment});
@@ -1376,7 +1582,10 @@ public:
       low.translation().z() = pick_pose.translation().z();
       low.linear() = pick_pose.linear();
       add(low, "low_xy_translation");
-      add(target_pose, "lift_after_translation");
+      Eigen::Isometry3d lifted = target_pose;
+      lifted.linear() = low.linear();
+      add(lifted, "lift_after_translation");
+      add(target_pose, "carry_rotation");
     } else if (route == CarryRoute::LIFT_THEN_XY) {
       Eigen::Isometry3d high_target = target_pose;
       high_target.translation().z() = lift.translation().z();
@@ -1410,13 +1619,14 @@ public:
     }
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       moveit_msgs::msg::CollisionObject saved_box;
-      if (plan_only && !planning_scene_.beginVirtualAttachment(saved_box, error)) {
+      if (plan_only && !planning_scene_.beginVirtualAttachment(saved_box, error, &box_to_left_contact)) {
         return false;
       }
       const bool planned = appendPoseToPoseObjectPath(
         trajectory, state, controls, box_to_left_contact, box_to_right_contact,
         carryRouteName(route), canceled, error, deadline, config_.minimum_carry_joint_margin,
-        preferred_endpoint);
+        preferred_endpoint, &validated_segment_timing);
+      route_scene = graspContactScene(planning_scene_.snapshot(), config_);
       std::string restore_error;
       const bool restored = !plan_only || planning_scene_.endVirtualAttachment(
         saved_box,
@@ -1440,7 +1650,7 @@ public:
       return false;
     }
     trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization;
-    if (!time_parameterization.computeTimeStamps(
+    if (!validated_segment_timing && !time_parameterization.computeTimeStamps(
         trajectory, config_.velocity_scaling, config_.acceleration_scaling))
     {
       error = "carry time parameterization failed";
@@ -1449,6 +1659,24 @@ public:
     if (canceled()) {
       error = "carry time parameterization canceled";
       return false;
+    }
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE && !validated_segment_timing) {
+      auto scene = route_scene;
+      auto reference = trajectory.getFirstWayPoint();
+      if (!copySceneAttachments(reference, scene->getCurrentState())) {
+        error = "route attachment model unavailable";
+        return false;
+      }
+      moveit_msgs::msg::RobotTrajectory message;
+      trajectory.getRobotTrajectoryMsg(message);
+      robot_trajectory::RobotTrajectory checked(start.getRobotModel(), move_group_.getName());
+      checked.setRobotTrajectoryMsg(reference, message);
+      const auto interrupted = [&]() {
+          return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
+        };
+      if (!validateTimedReturnTrajectory(checked, scene, config_.return_validation_joint_step,
+          error, interrupted, true, config_.minimum_carry_joint_margin, {}, nullptr,
+          config_.controller_spline_bounds_tolerance)) {return false;}
     }
     trajectory.getRobotTrajectoryMsg(output);
     end_state = state;
@@ -1465,9 +1693,18 @@ public:
     const CancelFunction & canceled,
     const moveit::core::RobotState * preferred_endpoint = nullptr)
   {
+    bool validated_segment_timing = false;
+    planning_scene::PlanningScenePtr route_scene;
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
-    trajectory.addSuffixWayPoint(start, 0.0);
     moveit::core::RobotState state(start);
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+      !normalizePlanningStart(state, state.getJointModelGroup(move_group_.getName()),
+        config_.place_start_state_bounds_tolerance))
+    {
+      error = "route start exceeds configured position bounds tolerance";
+      return false;
+    }
+    trajectory.addSuffixWayPoint(state, 0.0);
     const auto controls = makeCarryTransitionWaypoints(
       from_pose, target_pose, config_.lift_height, config_.carry_search_y_range, route);
     const std::string route_name = std::string("carry_transition_") + carryRouteName(route);
@@ -1475,7 +1712,7 @@ public:
       if (!appendPoseToPoseObjectPath(
           trajectory, state, controls, box_to_left_contact, box_to_right_contact,
           route_name, canceled, error, deadline, config_.minimum_carry_joint_margin,
-          preferred_endpoint))
+          preferred_endpoint, &validated_segment_timing))
       {
         return false;
       }
@@ -1485,12 +1722,15 @@ public:
     {
       return false;
     }
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+      route_scene = graspContactScene(planning_scene_.snapshot(), config_);
+    }
     if (canceled()) {
       error = "carry transition time parameterization canceled";
       return false;
     }
     trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization;
-    if (!time_parameterization.computeTimeStamps(
+    if (!validated_segment_timing && !time_parameterization.computeTimeStamps(
         trajectory, config_.velocity_scaling, config_.acceleration_scaling))
     {
       error = "carry transition time parameterization failed";
@@ -1500,9 +1740,58 @@ public:
       error = "carry transition time parameterization canceled";
       return false;
     }
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE && !validated_segment_timing) {
+      auto scene = route_scene;
+      auto reference = trajectory.getFirstWayPoint();
+      if (!copySceneAttachments(reference, scene->getCurrentState())) {
+        error = "route attachment model unavailable";
+        return false;
+      }
+      moveit_msgs::msg::RobotTrajectory message;
+      trajectory.getRobotTrajectoryMsg(message);
+      robot_trajectory::RobotTrajectory checked(start.getRobotModel(), move_group_.getName());
+      checked.setRobotTrajectoryMsg(reference, message);
+      const auto interrupted = [&]() {
+          return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
+        };
+      if (!validateTimedReturnTrajectory(checked, scene, config_.return_validation_joint_step,
+          error, interrupted, true, config_.minimum_carry_joint_margin, {}, nullptr,
+          config_.controller_spline_bounds_tolerance)) {return false;}
+    }
     trajectory.getRobotTrajectoryMsg(output);
     end_state = state;
     return true;
+  }
+
+  // A single measured-state IK seed is cheap; retain the ranked search below
+  // when this endpoint or its direct route is not feasible.
+  bool fastEndpoint(
+    const moveit::core::RobotState & start, const Eigen::Isometry3d & pose,
+    const Eigen::Isometry3d & left, const Eigen::Isometry3d & right,
+    bool virtual_box, double minimum_margin, moveit::core::RobotState & endpoint,
+    std::string & error, const CancelFunction & canceled)
+  {
+    if (canceled()) {error = "endpoint search canceled"; return false;}
+    endpoint = start;
+    const auto grasp = graspFromBoxToTcp(pose, left, right, 0.0);
+    if (!setFromDualArmIK(endpoint, grasp.left_contact, grasp.right_contact, false, 0.02)) {
+      error = "fast endpoint IK failed";
+      return false;
+    }
+    endpoint.update();
+    const auto * group = endpoint.getJointModelGroup(config_.planning_group);
+    if (!endpoint.satisfiesBounds(group) ||
+      endpoint.getMinDistanceToPositionBounds(group).first + 1e-12 < minimum_margin)
+    {
+      error = "fast endpoint violates bounds or joint margin";
+      return false;
+    }
+    if (canceled()) {error = "endpoint search canceled"; return false;}
+    const bool valid = virtual_box ?
+      planning_scene_.collisionFreeWithBox(endpoint, pose, true, &error) :
+      planning_scene_.collisionFree(endpoint, true, false, &error);
+    if (!valid) {error = "fast endpoint collision: " + error;}
+    return valid;
   }
 
   bool planAdaptiveCarryToPose(
@@ -1511,14 +1800,34 @@ public:
     const Eigen::Isometry3d * preferred_target_pose, bool transition,
     bool plan_only, const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
-    std::string & error, const CancelFunction & canceled)
+    std::string & error, const CancelFunction & canceled,
+    std::optional<double> pick_lift_top = std::nullopt)
   {
+    PoseSegmentCache local_cache;
+    auto * previous_cache = segment_cache_;
+    segment_cache_ = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE ? &local_cache : nullptr;
+    ScopeExit release_cache([&]() {segment_cache_ = previous_cache;});
+    bool search_success = false;
+    const auto metrics_started = std::chrono::steady_clock::now();
+    const auto initial_ik_calls = ik_calls_;
+    const auto initial_ompl_calls = ompl_calls_;
+    const double initial_ik_seconds = ik_seconds_, initial_ompl_seconds = ompl_seconds_;
+    ScopeExit metrics([&]() {
+      writeTrace("pose_search_summary", search_success, search_success ? "search accepted" : error,
+        {{"search", "planAdaptiveCarryToPose"},
+          {"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - metrics_started).count())},
+          {"ik_calls", std::to_string(ik_calls_ - initial_ik_calls)},
+          {"ik_seconds", std::to_string(ik_seconds_ - initial_ik_seconds)},
+          {"ompl_calls", std::to_string(ompl_calls_ - initial_ompl_calls)},
+          {"ompl_seconds", std::to_string(ompl_seconds_ - initial_ompl_seconds)}});
+    });
     const std::string search_name = transition ?
       "adaptive carry transition" : "adaptive carry";
-    const std::chrono::steady_clock::time_point deadline =
-      std::chrono::steady_clock::now() +
+    const auto search_started = std::chrono::steady_clock::now();
+    const auto deadline = std::min(phase_deadline_, search_started +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-      std::chrono::duration<double>(config_.carry_search_timeout));
+      std::chrono::duration<double>(config_.carry_search_timeout)));
     const std::array<CarryRoute, 7> routes = transition ?
       std::array<CarryRoute, 7>{
       CarryRoute::DIRECT, CarryRoute::ROTATE_BEFORE_TRANSLATION,
@@ -1529,6 +1838,49 @@ public:
       CarryRoute::DIRECT, CarryRoute::LOW_XY_THEN_LIFT, CarryRoute::LIFT_THEN_XY,
       CarryRoute::ROTATE_BEFORE_TRANSLATION, CarryRoute::ROTATE_AFTER_TRANSLATION,
       CarryRoute::DOGLEG_NEGATIVE_Y, CarryRoute::DOGLEG_POSITIVE_Y};
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+      const Eigen::Isometry3d & target = preferred_target_pose ?
+        *preferred_target_pose : nominal_target_pose;
+      moveit::core::RobotState endpoint(start), end(start);
+      moveit_msgs::msg::RobotTrajectory trajectory;
+      std::string fast_error;
+      bool planned = false;
+      try {
+        // Finish Cartesian prefix validation within the configured search
+        // budget instead of repeatedly interrupting it at a 20% fast-path slice.
+        const auto fast_deadline = deadline;
+        ScopedPlanningDeadline fast_scope(phase_deadline_, fast_deadline);
+        const CancelFunction fast_canceled = [&]() {
+            return canceled() || std::chrono::steady_clock::now() >= fast_deadline;
+          };
+        if (std::chrono::steady_clock::now() < fast_deadline && fastEndpoint(
+            start, target, box_to_left_contact, box_to_right_contact,
+            !transition && plan_only, config_.minimum_carry_joint_margin,
+            endpoint, fast_error, fast_canceled))
+        {
+          planned = transition ? buildCarryTransitionRoute(
+            start, from_pose, target, CarryRoute::DIRECT, box_to_left_contact,
+            box_to_right_contact, trajectory, end, fast_error, fast_deadline, fast_canceled, &endpoint) :
+            buildCarryRoute(start, from_pose, target, nominal_target_pose, CarryRoute::DIRECT,
+            plan_only, box_to_left_contact, box_to_right_contact, trajectory, end,
+            fast_error, fast_deadline, fast_canceled, &endpoint, pick_lift_top);
+        }
+      } catch (const std::exception & exception) {fast_error = exception.what();}
+      writeTrace("adaptive_carry_fast_path", planned, fast_error,
+        {{"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - search_started).count())},
+          {"transition", transition ? "true" : "false"}});
+      if (planned && !canceled()) {
+        selected.pose = target;
+        selected.route = CarryRoute::DIRECT;
+        selected.cartesian = cartesian_segments_;
+        selected.trajectory = std::move(trajectory);
+        selected.end_state = std::make_shared<moveit::core::RobotState>(end);
+        search_success = true;
+        error.clear();
+        return true;
+      }
+    }
     struct Endpoint
     {
       Eigen::Isometry3d pose;
@@ -1669,10 +2021,7 @@ public:
           return false;
         }
         try {
-          const std::chrono::steady_clock::time_point route_deadline = std::min(
-            deadline, std::chrono::steady_clock::now() +
-            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-              std::chrono::duration<double>(3.25)));
+          const auto route_deadline = deadline;
           moveit_msgs::msg::RobotTrajectory trajectory;
           moveit::core::RobotState end(start);
           std::string candidate_error;
@@ -1684,7 +2033,7 @@ public:
             buildCarryRoute(
             start, from_pose, endpoint.pose, nominal_target_pose, route, plan_only,
             box_to_left_contact, box_to_right_contact,
-            trajectory, end, candidate_error, route_deadline, canceled, &endpoint.state);
+            trajectory, end, candidate_error, route_deadline, canceled, &endpoint.state, pick_lift_top);
           if (!planned)
           {
             last_error = candidate_error;
@@ -1692,6 +2041,7 @@ public:
           }
           selected.pose = endpoint.pose;
           selected.route = route;
+          selected.cartesian = cartesian_segments_;
           selected.trajectory = std::move(trajectory);
           selected.end_state = std::make_shared<moveit::core::RobotState>(end);
           RCLCPP_INFO(
@@ -1710,6 +2060,8 @@ public:
               {"selected_pose", formatPose(endpoint.pose)},
               {"joint_margin", std::to_string(endpoint.margin)},
               {"joint_distance", std::to_string(endpoint.distance)}});
+          search_success = true;
+          error.clear();
           return true;
         } catch (const std::exception & exception) {
           last_error = exception.what();
@@ -1733,11 +2085,12 @@ public:
     const Eigen::Isometry3d & nominal_target_pose, bool plan_only,
     const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
-    std::string & error, const CancelFunction & canceled)
+    std::string & error, const CancelFunction & canceled,
+    std::optional<double> pick_lift_top = std::nullopt)
   {
     return planAdaptiveCarryToPose(
       start, pick_pose, nominal_target_pose, nullptr, false, plan_only,
-      box_to_left_contact, box_to_right_contact, selected, error, canceled);
+      box_to_left_contact, box_to_right_contact, selected, error, canceled, pick_lift_top);
   }
 
   bool planAdaptiveCarryTransition(
@@ -1763,21 +2116,31 @@ public:
     const CancelFunction & canceled,
     const moveit::core::RobotState * preferred_endpoint = nullptr)
   {
+    bool validated_segment_timing = false;
+    planning_scene::PlanningScenePtr route_scene;
     robot_trajectory::RobotTrajectory trajectory(start.getRobotModel(), move_group_.getName());
-    trajectory.addSuffixWayPoint(start, 0.0);
     moveit::core::RobotState state(start);
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+      !normalizePlanningStart(state, state.getJointModelGroup(move_group_.getName()),
+        config_.place_start_state_bounds_tolerance))
+    {
+      error = "route start exceeds configured position bounds tolerance";
+      return false;
+    }
+    trajectory.addSuffixWayPoint(state, 0.0);
     const auto controls = makePlaceRouteWaypoints(
       held_pose, place_pose, config_.lift_height, config_.carry_search_y_range, from_pick, route);
 
     const std::string route_name = std::string("place_") + carryRouteName(route);
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       moveit_msgs::msg::CollisionObject saved_box;
-      if (ignore_box && !planning_scene_.beginVirtualAttachment(saved_box, error)) {
+      if (ignore_box && !planning_scene_.beginVirtualAttachment(saved_box, error, &box_to_left_contact)) {
         return false;
       }
       const bool planned = appendPoseToPoseObjectPath(
         trajectory, state, controls, box_to_left_contact, box_to_right_contact,
-        route_name, canceled, error, deadline, 0.0, preferred_endpoint);
+        route_name, canceled, error, deadline, 0.0, preferred_endpoint, &validated_segment_timing);
+      route_scene = graspContactScene(planning_scene_.snapshot(), config_);
       std::string restore_error;
       const bool restored = !ignore_box || planning_scene_.endVirtualAttachment(
         saved_box,
@@ -1800,7 +2163,7 @@ public:
       return false;
     }
     trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization;
-    if (!time_parameterization.computeTimeStamps(
+    if (!validated_segment_timing && !time_parameterization.computeTimeStamps(
         trajectory, config_.velocity_scaling, config_.acceleration_scaling))
     {
       error = "place time parameterization failed";
@@ -1809,6 +2172,23 @@ public:
     if (canceled()) {
       error = "place time parameterization canceled";
       return false;
+    }
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE && !validated_segment_timing) {
+      auto scene = route_scene;
+      auto reference = trajectory.getFirstWayPoint();
+      if (!copySceneAttachments(reference, scene->getCurrentState())) {
+        error = "route attachment model unavailable";
+        return false;
+      }
+      moveit_msgs::msg::RobotTrajectory message;
+      trajectory.getRobotTrajectoryMsg(message);
+      robot_trajectory::RobotTrajectory checked(start.getRobotModel(), move_group_.getName());
+      checked.setRobotTrajectoryMsg(reference, message);
+      const auto interrupted = [&]() {
+          return canceled() || std::chrono::steady_clock::now() >= std::min(deadline, phase_deadline_);
+        };
+      if (!validateTimedReturnTrajectory(checked, scene, config_.return_validation_joint_step,
+          error, interrupted, true, 0.0, {}, nullptr, config_.controller_spline_bounds_tolerance)) {return false;}
     }
     trajectory.getRobotTrajectoryMsg(output);
     end_state = state;
@@ -1863,11 +2243,69 @@ public:
     Eigen::Isometry3d & selected_pose, std::string & error,
     const CancelFunction & canceled, const PlaceContinuation & continuation)
   {
-    const std::chrono::steady_clock::time_point deadline =
-      std::chrono::steady_clock::now() +
+    PoseSegmentCache local_cache;
+    auto * previous_cache = segment_cache_;
+    segment_cache_ = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE ? &local_cache : nullptr;
+    ScopeExit release_cache([&]() {segment_cache_ = previous_cache;});
+    bool search_success = false;
+    const auto metrics_started = std::chrono::steady_clock::now();
+    const auto initial_ik_calls = ik_calls_;
+    const auto initial_ompl_calls = ompl_calls_;
+    const double initial_ik_seconds = ik_seconds_, initial_ompl_seconds = ompl_seconds_;
+    ScopeExit metrics([&]() {
+      writeTrace("pose_search_summary", search_success, search_success ? "search accepted" : error,
+        {{"search", "planAdaptivePlace"},
+          {"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - metrics_started).count())},
+          {"ik_calls", std::to_string(ik_calls_ - initial_ik_calls)},
+          {"ik_seconds", std::to_string(ik_seconds_ - initial_ik_seconds)},
+          {"ompl_calls", std::to_string(ompl_calls_ - initial_ompl_calls)},
+          {"ompl_seconds", std::to_string(ompl_seconds_ - initial_ompl_seconds)}});
+    });
+    const auto search_started = std::chrono::steady_clock::now();
+    const auto deadline = std::min(phase_deadline_, search_started +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(config_.carry_search_timeout +
-        (continuation ? config_.return_planning_timeout : 0.0)));
+        (continuation ? config_.return_planning_timeout : 0.0))));
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+      moveit::core::RobotState endpoint(start), end(start);
+      moveit_msgs::msg::RobotTrajectory trajectory;
+      std::string fast_error;
+      bool planned = false;
+      try {
+        const double remaining = std::chrono::duration<double>(deadline - search_started).count();
+        const auto endpoint_count = makePlaceRouteWaypoints(from_pose, requested_pose,
+          config_.lift_height, config_.carry_search_y_range, from_pick, CarryRoute::DIRECT).size() - 1U;
+        const auto fast_deadline = std::min(deadline, search_started +
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(fastAttemptTimeout(remaining, endpointRouteTimeout(
+              remaining, config_.planning_time_per_candidate, endpoint_count)))));
+        ScopedPlanningDeadline fast_scope(phase_deadline_, fast_deadline);
+        const CancelFunction fast_canceled = [&]() {
+            return canceled() || std::chrono::steady_clock::now() >= fast_deadline;
+          };
+        if (std::chrono::steady_clock::now() < fast_deadline && fastEndpoint(
+            start, requested_pose, box_to_left_contact, box_to_right_contact,
+            ignore_box, 0.0, endpoint, fast_error, fast_canceled))
+        {
+          planned = buildPlaceRoute(start, from_pose, requested_pose, from_pick,
+            CarryRoute::DIRECT, ignore_box, box_to_left_contact, box_to_right_contact,
+            trajectory, end, fast_error, fast_deadline, fast_canceled, &endpoint);
+          if (planned && continuation) planned = continuation(end, requested_pose, fast_error, fast_deadline);
+        }
+      } catch (const std::exception & exception) {fast_error = exception.what();}
+      writeTrace("adaptive_place_fast_path", planned, fast_error,
+        {{"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - search_started).count())}});
+      if (planned && !canceled()) {
+        output = std::move(trajectory);
+        end_state = end;
+        selected_pose = requested_pose;
+        search_success = true;
+        error.clear();
+        return true;
+      }
+    }
     const auto * dual_group = start.getJointModelGroup(move_group_.getName());
     struct Endpoint
     {
@@ -1976,7 +2414,7 @@ public:
             last_error = candidate_error;
             continue;
           }
-          if (continuation && !continuation(candidate_end, endpoint.pose, candidate_error)) {
+          if (continuation && !continuation(candidate_end, endpoint.pose, candidate_error, deadline)) {
             last_error = "post-place continuation failed: " + candidate_error;
             continue;
           }
@@ -1990,6 +2428,8 @@ public:
             endpoint.pose.translation().y() - requested_pose.translation().y(),
             endpoint.pose.translation().z() - requested_pose.translation().z(),
             carryRouteName(route));
+          search_success = true;
+          error.clear();
           return true;
         } catch (const std::exception & exception) {
           last_error = exception.what();
@@ -2124,6 +2564,21 @@ public:
     PlannedGrasp & selected, const ContinuationFunction & continuation, std::string & error,
     const CancelFunction & canceled, const moveit::core::RobotState * supplied_start)
   {
+    bool search_success = false;
+    const auto metrics_started = std::chrono::steady_clock::now();
+    const auto initial_ik_calls = ik_calls_;
+    const auto initial_ompl_calls = ompl_calls_;
+    const double initial_ik_seconds = ik_seconds_, initial_ompl_seconds = ompl_seconds_;
+    ScopeExit metrics([&]() {
+      writeTrace("pose_search_summary", search_success, search_success ? "search accepted" : error,
+        {{"search", "planPickPath"},
+          {"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - metrics_started).count())},
+          {"ik_calls", std::to_string(ik_calls_ - initial_ik_calls)},
+          {"ik_seconds", std::to_string(ik_seconds_ - initial_ik_seconds)},
+          {"ompl_calls", std::to_string(ompl_calls_ - initial_ompl_calls)},
+          {"ompl_seconds", std::to_string(ompl_seconds_ - initial_ompl_seconds)}});
+    });
     auto current = supplied_start ? std::make_shared<moveit::core::RobotState>(*supplied_start) :
       move_group_.getCurrentState(2.0);
     if (!current) {
@@ -2151,67 +2606,69 @@ public:
     int bounds_rejected = 0;
     int collision_rejected = 0;
     int margin_rejected = 0;
-    const auto deadline = std::chrono::steady_clock::now() +
-      std::chrono::duration<double>(config_.grasp_search_timeout);
-    for (const auto & candidate : candidates) {
-      if (canceled()) {
-        error = "coordinated grasp search canceled";
+    const bool incremental = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE;
+    const auto planning_started = std::chrono::steady_clock::now();
+    double collection_seconds = 0.0;
+    std::size_t candidate_cursor = 0;
+    std::optional<moveit::core::RobotState> nominal_solution;
+    bool nominal_seed_attempted = false;
+    const auto planning_elapsed = [&]() {
+        return std::max(0.0, std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - planning_started).count() - collection_seconds);
+      };
+    const auto collect_candidates = [&]() {
+      const auto began = std::chrono::steady_clock::now();
+      ScopeExit measure([&]() {
+        collection_seconds += std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - began).count();
+      });
+      if (std::chrono::steady_clock::now() >= phase_deadline_) {
+        error = "grasp collection phase deadline exhausted";
         return false;
       }
-      if (std::chrono::steady_clock::now() >= deadline) {
-        break;
-      }
-      moveit::core::RobotState pregrasp_goal(*current);
-      double margin = 0.0;
-      double distance = 0.0;
-      std::string candidate_error;
-      if (!solvePregraspIK(
-          *current, candidate.grasp, config_.ik_attempts_per_candidate, pregrasp_goal,
-          margin, distance, candidate_error))
-      {
-        if (candidate_error.find("bounds") != std::string::npos) {
-          ++bounds_rejected;
-        } else if (candidate_error.find("collision") != std::string::npos) {
-          ++collision_rejected;
-        } else {
-          ++ik_rejected;
-        }
-        continue;
-      }
-      if (margin < config_.minimum_grasp_joint_margin) {
-        ++margin_rejected;
-        continue;
-      }
-      feasible.push_back({PlannedGrasp{candidate, margin, distance}, pregrasp_goal});
-    }
-    if (feasible.empty()) {
-      error = "no feasible coordinated pregrasp candidate (IK=" +
-        std::to_string(ik_rejected) + ", bounds=" + std::to_string(bounds_rejected) +
-        ", collision=" + std::to_string(collision_rejected) + ", joint_margin=" +
-        std::to_string(margin_rejected) + ")";
-      return false;
-    }
-    std::stable_sort(
-      feasible.begin(), feasible.end(),
-      [](const FeasibleCandidate & lhs, const FeasibleCandidate & rhs) {
-        if (std::abs(
-          lhs.grasp.candidate.correction_cost - rhs.grasp.candidate.correction_cost) > 1e-12)
+      const double remaining = config_.grasp_search_timeout - collection_seconds;
+      if (remaining <= 0.0 || candidate_cursor == candidates.size()) {return true;}
+      const auto deadline = std::min(phase_deadline_, began +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(remaining)));
+      const auto tier_end = incremental ? graspCostTierEnd(candidates, candidate_cursor) : candidates.size();
+      const auto first_new = feasible.size();
+      while (candidate_cursor < tier_end) {
+        if (canceled()) {error = "coordinated grasp search canceled"; return false;}
+        if (std::chrono::steady_clock::now() >= deadline) {break;}
+        const auto index = candidate_cursor;
+        const auto & candidate = candidates[index];
+        ++candidate_cursor;
+        moveit::core::RobotState pregrasp_goal(*current);
+        double margin = 0.0, distance = 0.0;
+        std::string candidate_error;
+        if (!solvePregraspIK(*current, candidate.grasp, config_.ik_attempts_per_candidate,
+            pregrasp_goal, margin, distance, candidate_error, deadline, canceled,
+            index == 0 && nominal_solution ? &*nominal_solution : nullptr,
+            index == 0 && nominal_seed_attempted))
         {
-          return lhs.grasp.candidate.correction_cost < rhs.grasp.candidate.correction_cost;
+          if (candidate_error.find("bounds") != std::string::npos) {++bounds_rejected;}
+          else if (candidate_error.find("collision") != std::string::npos) {++collision_rejected;}
+          else {++ik_rejected;}
+          continue;
         }
-        if (std::abs(lhs.grasp.joint_limit_margin - rhs.grasp.joint_limit_margin) > 1e-12) {
-          return lhs.grasp.joint_limit_margin > rhs.grasp.joint_limit_margin;
-        }
-        return lhs.grasp.joint_distance < rhs.grasp.joint_distance;
-      });
+        if (margin < config_.minimum_grasp_joint_margin) {++margin_rejected; continue;}
+        feasible.push_back({PlannedGrasp{candidate, margin, distance}, pregrasp_goal});
+      }
+      // Previously attempted tiers keep stable indices for adaptive retries.
+      std::stable_sort(feasible.begin() + first_new, feasible.end(),
+        [](const FeasibleCandidate & lhs, const FeasibleCandidate & rhs) {
+          if (std::abs(lhs.grasp.candidate.correction_cost - rhs.grasp.candidate.correction_cost) > 1e-12) {
+            return lhs.grasp.candidate.correction_cost < rhs.grasp.candidate.correction_cost;
+          }
+          if (std::abs(lhs.grasp.joint_limit_margin - rhs.grasp.joint_limit_margin) > 1e-12) {
+            return lhs.grasp.joint_limit_margin > rhs.grasp.joint_limit_margin;
+          }
+          return lhs.grasp.joint_distance < rhs.grasp.joint_distance;
+        });
+      return true;
+    };
 
-    const std::size_t planning_count = std::min(
-      feasible.size(), static_cast<std::size_t>(config_.maximum_planning_candidates));
-    const auto planning_started = std::chrono::steady_clock::now();
-    const auto planning_elapsed = [&planning_started]() {
-        return std::chrono::duration<double>(
-          std::chrono::steady_clock::now() - planning_started).count();
-      };
     std::vector<std::size_t> retry_candidates;
     std::map<int32_t, int> motion_error_codes;
     int initial_motion_rejected = 0;
@@ -2229,7 +2686,12 @@ public:
         &approach, &contact_end, &motion_error_codes, &target_rejected,
         &approach_rejected, &continuation_rejected,
         &last_continuation_error,
-        &continuation, &canceled](std::size_t index, double timeout, const char * phase) {
+        &continuation, &canceled](std::size_t index, double timeout, const char * phase,
+        PlanningDeadline deadline, std::string & failure) {
+        ScopedPlanningDeadline scope(phase_deadline_, deadline);
+        const CancelFunction attempt_canceled = [&]() {
+            return canceled() || std::chrono::steady_clock::now() >= phase_deadline_;
+          };
         active_grasp_id_ = "candidate_" + std::to_string(index + 1U);
         publishGraspMarkers(box_message, feasible[index].grasp.candidate.grasp);
         RCLCPP_INFO(
@@ -2249,6 +2711,7 @@ public:
             move_group_reported_bounds, target_error))
         {
           ++target_rejected;
+          failure = target_error;
           RCLCPP_WARN(
             node_->get_logger(), "Candidate %zu joint target rejected: %s",
             index + 1U, target_error.c_str());
@@ -2271,14 +2734,43 @@ public:
         moveit::planning_interface::MoveGroupInterface::Plan candidate_plan;
         const double phase_remaining = std::chrono::duration<double>(
           phase_deadline_ - std::chrono::steady_clock::now()).count();
-        if (phase_remaining <= 0.0) {return CandidateAttempt::OMPL_REJECTED;}
+        if (phase_remaining <= 0.0 || canceled()) {
+          failure = "pregrasp attempt canceled or deadline exhausted";
+          return CandidateAttempt::OMPL_REJECTED;
+        }
         move_group_.setPlanningTime(std::min(timeout, phase_remaining));
         const auto attempt_started = std::chrono::steady_clock::now();
-        const auto plan_result = move_group_.plan(candidate_plan);
+        bool direct = false;
+        if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
+          std::string direct_error;
+          direct = tryDirectJointTrajectory(*current, feasible[index].state,
+            planning_scene_.snapshot(), config_, 0.0, candidate_plan.trajectory_,
+            direct_error, attempt_canceled);
+          writeTrace("pregrasp_direct_joint_route", direct, direct_error,
+            {{"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - attempt_started).count())}});
+        }
+        moveit::core::MoveItErrorCode plan_result(moveit::core::MoveItErrorCode::SUCCESS);
+        if (!direct) {
+          const double remaining = std::chrono::duration<double>(
+            phase_deadline_ - std::chrono::steady_clock::now()).count();
+          if (remaining <= 0.0 || canceled()) {
+            move_group_.setPlanningTime(10.0);
+            failure = "pregrasp direct route exhausted attempt deadline";
+            return CandidateAttempt::OMPL_REJECTED;
+          }
+          move_group_.setPlanningTime(std::min(timeout, remaining));
+          const auto ompl_started = std::chrono::steady_clock::now();
+          ++ompl_calls_;
+          plan_result = move_group_.plan(candidate_plan);
+          ompl_seconds_ += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - ompl_started).count();
+        }
         const double attempt_elapsed = std::chrono::duration<double>(
           std::chrono::steady_clock::now() - attempt_started).count();
         move_group_.setPlanningTime(10.0);
         if (plan_result != moveit::core::MoveItErrorCode::SUCCESS) {
+          failure = "pregrasp OMPL: " + moveit::core::error_code_to_string(plan_result);
           ++motion_error_codes[plan_result.val];
           RCLCPP_WARN(
             node_->get_logger(),
@@ -2292,23 +2784,29 @@ public:
         auto candidate_contact_end = pregrasp_end;
         if (!buildApproach(
             pregrasp_end, feasible[index].grasp.candidate.grasp,
-            candidate_approach, candidate_contact_end, target_error, canceled))
+            candidate_approach, candidate_contact_end, target_error, attempt_canceled))
         {
+          failure = target_error;
           ++approach_rejected;
           RCLCPP_WARN(
             node_->get_logger(),
-            "Candidate %zu reached pregrasp but its Cartesian approach was rejected", index + 1U);
+            "Candidate %zu Cartesian approach rejected: %s", index + 1U, target_error.c_str());
           return CandidateAttempt::APPROACH_REJECTED;
         }
         std::string continuation_error;
         if (continuation &&
-          !continuation(candidate_contact_end, feasible[index].grasp, continuation_error))
+          !continuation(candidate_contact_end, feasible[index].grasp, continuation_error, phase_deadline_))
         {
+          failure = continuation_error;
           ++continuation_rejected;
           last_continuation_error = continuation_error;
           RCLCPP_WARN(
-            node_->get_logger(), "Candidate %zu rejected by closed-chain continuation: %s",
+            node_->get_logger(), "Candidate %zu rejected by carry/place continuation: %s",
             index + 1U, continuation_error.c_str());
+          return CandidateAttempt::CONTINUATION_REJECTED;
+        }
+        if (attempt_canceled()) {
+          failure = "pregrasp attempt canceled or deadline exhausted after continuation";
           return CandidateAttempt::CONTINUATION_REJECTED;
         }
         pregrasp_plan = std::move(candidate_plan);
@@ -2318,7 +2816,9 @@ public:
         return CandidateAttempt::SUCCESS;
       };
 
-    const auto report_success = [this, &selected, &box_message]() {
+    const auto report_success = [this, &selected, &box_message, &search_success, &error]() {
+        search_success = true;
+        error.clear();
         publishGraspMarkers(box_message, selected.candidate.grasp);
         RCLCPP_INFO(
           node_->get_logger(),
@@ -2332,9 +2832,46 @@ public:
           selected.joint_distance);
       };
 
-    for (std::size_t index = 0; index < planning_count; ++index) {
+    if (incremental && !candidates.empty()) {
+      moveit::core::RobotState nominal_goal(*current);
+      double margin = 0.0, distance = 0.0;
+      std::string fast_error;
+      const auto started = std::chrono::steady_clock::now();
+      const double remaining = std::min(config_.pregrasp_planning_timeout,
+        std::chrono::duration<double>(phase_deadline_ - started).count());
+      const auto fast_deadline = started + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(std::max(0.0, remaining)));
+      bool success = false;
+      nominal_seed_attempted = !canceled() && started < fast_deadline;
+      if (nominal_seed_attempted) {
+        const bool solved = solvePregraspIK(*current, candidates.front().grasp, 1,
+          nominal_goal, margin, distance, fast_error, fast_deadline, canceled);
+        collection_seconds += std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - started).count();
+        if (solved) {nominal_solution = nominal_goal;}
+        if (solved && margin >= config_.minimum_grasp_joint_margin) {
+          feasible.push_back({PlannedGrasp{candidates.front(), margin, distance}, nominal_goal});
+          success = attempt_candidate(0, config_.planning_time_per_candidate, "nominal-fast",
+            fast_deadline, fast_error) == CandidateAttempt::SUCCESS;
+        } else if (solved) {fast_error = "nominal grasp joint margin below minimum";}
+      }
+      writeTrace("pregrasp_fast_path", success, fast_error,
+        {{"elapsed_seconds", std::to_string(std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - started).count())}});
+      if (success) {report_success(); return true;}
+      feasible.clear();
+    }
+    std::size_t index = 0;
+    while (index < static_cast<std::size_t>(config_.maximum_planning_candidates)) {
+      while (index == feasible.size() && candidate_cursor < candidates.size() &&
+        collection_seconds < config_.grasp_search_timeout)
+      {
+        if (!collect_candidates()) {return false;}
+      }
+      if (index == feasible.size()) {break;}
       if (canceled()) {
-        error = "pregrasp planning canceled";
+        error = std::chrono::steady_clock::now() >= phase_deadline_ ?
+          "pregrasp phase deadline reached" : "pregrasp planning canceled";
         return false;
       }
       const double remaining = config_.pregrasp_planning_timeout - planning_elapsed();
@@ -2342,9 +2879,12 @@ public:
         break;
       }
       const auto result = attempt_candidate(
-        index, std::min(config_.planning_time_per_candidate, remaining), "initial");
+        index, std::min(config_.planning_time_per_candidate, remaining), "initial",
+        std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(remaining)), error);
       if (canceled()) {
-        error = "pregrasp planning canceled";
+        error = std::chrono::steady_clock::now() >= phase_deadline_ ?
+          "pregrasp phase deadline reached" : "pregrasp planning canceled";
         return false;
       }
       if (result == CandidateAttempt::SUCCESS) {
@@ -2355,6 +2895,7 @@ public:
         ++initial_motion_rejected;
         retry_candidates.push_back(index);
       }
+      ++index;
     }
 
     const std::size_t retry_count = std::min(
@@ -2370,7 +2911,9 @@ public:
         break;
       }
       const auto result = attempt_candidate(
-        retry_candidates[retry], timeout, "adaptive-retry");
+        retry_candidates[retry], timeout, "adaptive-retry",
+        std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(config_.pregrasp_planning_timeout - planning_elapsed())), error);
       if (canceled()) {
         error = "pregrasp retry planning canceled";
         return false;
@@ -2384,6 +2927,12 @@ public:
       }
     }
 
+    if (feasible.empty()) {
+      error = "no feasible coordinated pregrasp candidate (IK=" + std::to_string(ik_rejected) +
+        ", bounds=" + std::to_string(bounds_rejected) + ", collision=" +
+        std::to_string(collision_rejected) + ", joint_margin=" + std::to_string(margin_rejected) + ")";
+      return false;
+    }
     const double elapsed = planning_elapsed();
     std::ostringstream details;
     bool first_code = true;
@@ -2442,7 +2991,7 @@ public:
         dual_group, config_.place_start_state_bounds_tolerance))
     {
       const auto [margin, joint] = current->getMinDistanceToPositionBounds(dual_group);
-      error = "current robot state exceeds position bounds before Place";
+      error = "current robot state exceeds position bounds during held-object validation";
       if (joint) {
         error += " at " + joint->getName() + " (margin=" + std::to_string(margin) +
           " rad, tolerance=" + std::to_string(config_.place_start_state_bounds_tolerance) +
@@ -2454,19 +3003,14 @@ public:
       current->getGlobalLinkTransform(config_.left_tcp) * held_box_to_left_contact_.inverse();
     const Eigen::Isometry3d right_estimate =
       current->getGlobalLinkTransform(config_.right_tcp) * held_box_to_right_contact_.inverse();
-    const double position_error =
-      (left_estimate.translation() - right_estimate.translation()).norm();
-    const double orientation_error = poseAngularError(left_estimate, right_estimate);
-    if (position_error > config_.closed_chain_contact_position_error ||
-      orientation_error > config_.closed_chain_contact_orientation_error)
-    {
-      error = "left/right TCPs disagree on held box pose (position_error=" +
-        std::to_string(position_error) + ", orientation_error=" +
-        std::to_string(orientation_error) + ")";
-      return false;
-    }
-    if (!planning_scene_.collisionFree(*current, true, false)) {
-      error = "current held-object state is in collision before Place";
+    if (!check_pose_tolerance(left_estimate, right_estimate, left_estimate, left_estimate,
+        config_.execution_position_limit(config_.closed_chain_contact_position_error),
+        config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+        "execution held-object closure", error)) {return false;}
+    std::string collision_pairs;
+    if (!planning_scene_.collisionFree(*current, true, false, &collision_pairs)) {
+      error = "current held-object state is in collision during held-object validation: " +
+        collision_pairs;
       return false;
     }
     Eigen::Isometry3d estimated = left_estimate;
@@ -2501,6 +3045,12 @@ private:
     std::chrono::steady_clock::time_point::max()};
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;
   std::unique_ptr<PlanningTraceLogger> planning_trace_;
+  std::vector<CartesianSegment> cartesian_segments_;
+  PoseSegmentCache * segment_cache_{nullptr};
+  mutable std::size_t ik_calls_{0};
+  mutable double ik_seconds_{0.0};
+  std::size_t ompl_calls_{0};
+  double ompl_seconds_{0.0};
 };
 
 DualArmMotionPlanner::DualArmMotionPlanner(
@@ -2533,6 +3083,13 @@ bool DualArmMotionPlanner::buildApproach(
   std::string & error, const CancelFunction & canceled)
 {
   return impl_->buildApproach(start, target, output, end_state, error, canceled);
+}
+
+void DualArmMotionPlanner::traceReuse(
+  const std::string & stage, bool reused, const std::string & reason, double seconds)
+{
+  impl_->writeTrace("execution_plan_reuse", reused, reason,
+    {{"stage", stage}, {"validation_seconds", std::to_string(seconds)}});
 }
 
 void DualArmMotionPlanner::setPhaseDeadline(std::chrono::steady_clock::time_point deadline)
@@ -2626,11 +3183,11 @@ bool DualArmMotionPlanner::planAdaptiveCarry(
   const Eigen::Isometry3d & nominal_target_pose, bool plan_only,
   const Eigen::Isometry3d & box_to_left_contact,
   const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
-  std::string & error, const CancelFunction & canceled)
+  std::string & error, const CancelFunction & canceled, std::optional<double> pick_lift_top)
 {
   return impl_->planAdaptiveCarry(
     start, pick_pose, nominal_target_pose, plan_only, box_to_left_contact, box_to_right_contact,
-    selected, error, canceled);
+    selected, error, canceled, pick_lift_top);
 }
 
 bool DualArmMotionPlanner::planAdaptiveCarryTransition(
@@ -2687,6 +3244,16 @@ bool DualArmMotionPlanner::validateHeldClosure(std::string & error)
 void DualArmMotionPlanner::clearGraspMarkers()
 {
   impl_->clearGraspMarkers();
+}
+
+std::vector<CartesianSegment> DualArmMotionPlanner::cartesianSegments() const
+{
+  return impl_->cartesian_segments_;
+}
+
+std::size_t DualArmMotionPlanner::searchCalls() const
+{
+  return impl_->ik_calls_ + impl_->ompl_calls_;
 }
 
 }  // namespace agibot_x2_manipulation

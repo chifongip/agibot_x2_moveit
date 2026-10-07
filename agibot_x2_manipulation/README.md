@@ -60,8 +60,9 @@ the 14 arm joints. Use `command_transport:=ros_topic` only when this process is
 intended to publish `/aima/hal/joint/*/command`; use the configured ZMQ endpoint
 for the ZMQ transport.
 
-The launch defaults to `ros2_control_update_rate:=100` and `use_rviz:=false`.
-These defaults leave scheduling headroom for the independent 100 ms RoboJuDo
+The launch defaults to `ros2_control_update_rate:=50` and `use_rviz:=false`.
+The controller rate matches the configured 50 Hz ZMQ command publish-rate
+limit. These defaults leave scheduling headroom for the independent 100 ms RoboJuDo
 and ros2_control state watchdogs. Enable RViz or request a higher controller
 rate only after monitoring the joint and torso-IMU streams on the target host.
 
@@ -245,9 +246,10 @@ as holding is refused rather than using different geometry.
 
 With `visible_boxes_as_obstacles:=true` (the default), every other fresh,
 configured instance is added to MoveIt as a collision obstacle for Pick,
-PickPlace, Place, and carry transitions. The server rechecks the visible-box
-set before each execution segment and rejects the motion if an obstacle appears,
-disappears, changes profile, or moves beyond the configured pose tolerance.
+PickPlace, and Place. Standalone carry transitions clear the previous table and
+unheld perception boxes, then check the remaining collision scene without
+detections. For Pick/Place saved execution, the server rechecks the visible-box set before each segment and rejects
+the motion if an obstacle appears, disappears, changes profile, or moves beyond the configured pose tolerance.
 Do not disable this on hardware when more than one box can be in the workspace.
 Each tag currently identifies one physical box; multiple tags on one box require
 an explicit tag-fusion configuration before they can be treated as one instance.
@@ -286,6 +288,132 @@ so planner and localizer catalogs stay aligned. A failed request keeps the
 active catalog unchanged. For a new physical calibration, run a `plan_only:
 true` pick/place after a successful reload before enabling execution.
 
+## Recording the state before Pick/Place
+
+Keep the robot and objects stationary until recording succeeds, then send the
+action. On the robot in ROS domain 20, record **before Pick** with:
+
+```bash
+ROS_DOMAIN_ID=20 ros2 run agibot_x2_manipulation capture_task_snapshot \
+  --output /home/agi/workspace/x2_ws/capture_task_snapshot/small_carton_pick_v2.yaml \
+  --task-kind pick
+```
+
+Use a new output filename for each capture; existing files are never overwritten.
+`pick` checks that the manipulation state is `EMPTY`. A `scene` capture can also
+start a complete simulated Pick-to-Place sequence, but skips this state check.
+
+The recorder exits successfully only after it receives all 31 finite X2 joint
+positions, a fresh localized `tag:0` object pose, and `base_link -> tag0` and
+`base_link -> tag9` transforms. It first queries TF at the joint-state timestamp;
+when delayed/sparse camera updates cannot interpolate that time, it uses the
+latest available transform within `--max-age` of both the current ROS time and
+the joint sample. The YAML records the lookup mode and original timestamps.
+Fully static transforms are exempt from the timestamp freshness check. It waits
+up to 30 seconds; missing or stale data produces a nonzero exit without a
+snapshot. Start the task after this command succeeds. It sends no commands,
+ignores action status, and refuses to overwrite existing files. Ctrl-C cancels
+without saving. Joint and object stamps must be within `--max-age` (default
+1 second) of the recorder's ROS clock; use matching `use_sim_time` settings.
+
+The output filename does not select the object. The recorder defaults to
+`--object-id tag:0` (small carton) and requires tags 0 and 9. For another object,
+set `--object-id` to its `/box_states` instance ID and repeat `--tag-id` for its
+box tag and the table tag. Supplying `--tag-id` replaces the default tag list.
+The current profiles map `small_carton` to tag 0 and `grey_box` to tag 180;
+tag 9 is the table reference.
+
+For example, record **before picking the grey box** with:
+
+```bash
+ROS_DOMAIN_ID=20 ros2 run agibot_x2_manipulation capture_task_snapshot \
+  --output /home/agi/workspace/x2_ws/capture_task_snapshot/grey_box_pick.yaml \
+  --task-kind pick \
+  --object-id tag:180 \
+  --tag-id 180 --tag-id 9
+```
+
+Use the same `--object-id tag:180 --tag-id 180 --tag-id 9` options for grey-box
+`scene` or `place` captures. Place also requires `--manipulation-state-file`, as
+shown below. For a pickup-only scene without a table tag, require only the box
+tag: `--tag-id 0` for the small carton or `--tag-id 180` for the grey box.
+Topic names, planning frame, tag-frame prefix, timeout, and maximum age have CLI
+options. `--robot-pose-parent-frame odom` additionally records the robot base
+transform. The saved YAML includes joint positions, localized object poses and
+profile IDs, full tag quaternions, detection metadata, and timestamps.
+
+For a complete Place starting state, keep the robot holding the box and inspect
+the server's recovery-file path in the same ROS domain:
+
+```bash
+ROS_DOMAIN_ID=20 ros2 param get /pick_place_server state_file
+```
+
+The robot reports `/home/agi/.ros/agibot_x2_manipulation_state`. Record
+**before Place** with:
+
+```bash
+ROS_DOMAIN_ID=20 ros2 run agibot_x2_manipulation capture_task_snapshot \
+  --output /home/agi/workspace/x2_ws/capture_task_snapshot/small_carton_place_v2.yaml \
+  --task-kind place \
+  --manipulation-state-file /home/agi/.ros/agibot_x2_manipulation_state
+```
+
+If the parameter query reports a different path, use that returned path. Adjust
+the domain and workspace paths for other deployments.
+
+Place recording requires the latched manipulation state to be `HOLDING` and a
+complete VERSION 4 recovery record matching the box instance and profile. It
+saves the held pose, both box-to-TCP contact transforms, carry targets, and box
+identity verbatim. Missing/mismatched records prevent capture. `--task-kind pick`
+also checks that manipulation state is `EMPTY`. The default `scene` mode remains
+compatible with earlier commands and records the manipulation state when
+available, but does not promise a complete Place starting state.
+
+Replay in a separate ROS domain from the robot and other running stacks:
+
+```bash
+ROS_DOMAIN_ID=96 ros2 launch agibot_x2_manipulation \
+  recorded_task_snapshot.launch.py \
+  snapshot:=/home/agi/workspace/x2_ws/capture_task_snapshot/small_carton_pick_v2.yaml \
+  use_rviz:=false
+```
+
+This starts fake HAL joint feedback from the capture, holds the measured arm
+configuration during controller startup, and republishes the saved
+tag transforms/detections with current timestamps. Detections are published on
+both `/detections` and the configured table detector topic so the table tracker
+can reconstruct its stable pose and collision geometry. The localizer reconstructs
+objects using the current box profiles. The replay disables posture control and
+defaults to `allow_execution:=false`; send actions with `plan_only: true`. For a
+capture containing only pickup tags, add `disable_table_collision:=true`.
+Default ZMQ ports are the same as the existing recorded replay (8559); if that
+port is in use, set both `zmq_endpoint` and `fake_zmq_endpoint` to a free local
+port. Run the replay on an offline host.
+
+For a new Place capture, the launch copies its saved recovery record into a
+fresh replay-only file. Once the server is ready, restore the simulated attached
+box through the existing recovery service in the **same offline domain**:
+
+```bash
+ROS_DOMAIN_ID=96 ros2 service call /recover_manipulation_state \
+  agibot_x2_manipulation_msgs/srv/RecoverManipulationState "{requested_state: 1}"
+```
+
+Proceed with a plan-only Place only after this service reports success. Recovery
+checks measured TCP consistency before restoring the attached collision object
+and `HOLDING` state. Existing captures without grasp geometry can still replay
+joints and tag poses, but must be recaptured with `--task-kind place` to restore a
+Place session. A filename containing `place` is not sufficient to infer holding.
+
+The snapshot reproduces a stationary robot configuration and tag-based scene,
+plus the held-object recovery record when explicitly requested. It does not
+save sensor streams, arbitrary collision objects, or the action goal. Reuse the same task goal, robot description, box profiles,
+and manipulation/MoveIt configuration when comparing tests. The optional
+world-to-base transform is saved for inspection; this local planning replay
+uses `base_link` and does not restore navigation/world localization. Captures
+are runtime data and should be stored outside the source repository.
+
 ## Recording a failed manipulation state
 
 Start the passive recorder before reproducing a failure. It listens for aborted
@@ -310,6 +438,43 @@ analysis. It never overwrites an existing output path.
 
 ## Table-tag placement calibration
 
+Named physical tables are configured through `table_profiles_file` (default:
+`config/table_profiles.yaml`). The reserved `default` profile retains the
+existing `table_*` calibration in `box_manipulation.yaml`; no tuned values are
+moved or replaced. Declare additional names in `table_profile_names`, choose
+`default_table_profile`, and supply all seven fields under
+`table_profiles.<name>`: `tag_id`, `tag_frame`, `tabletop_center` (three coordinates in meters),
+`dimensions` (length/depth/height in meters), `place_offset` (tag X/Z meters),
+`place_yaw` (radians), and `collision_id`. See the commented example in the
+catalog; replace illustrative geometry with measured calibration.
+
+Names contain ASCII letters, digits, or underscores. Each table must have a
+unique tag-ID/frame pair and collision object ID; IDs cannot overlap the managed
+box namespace. Profiles are immutable at startup, including legacy calibration
+parameters. Restart after editing the catalog; restart invalidates saved plans.
+Perception thresholds, detection topic, and collision/placement enable switches
+remain shared. Configure every new tag's ID, frame, and measured marker size in
+the shared AprilTag detector; a table profile does not configure a detector.
+
+`Pick`, `Place`, and `PickPlace` accept `table_profile_id` and report the resolved
+name in feedback and results. Empty selection uses the configured default;
+unknown names return `INVALID_GOAL`. Empty selection with `plan_id` retains the
+saved table. Explicit saved-plan selection must match its stored profile and
+catalog version. Source box identity and held-box calibration remain independent
+of the destination table.
+
+Each table has independent perception stability. All freshly observed tables
+enter the action's collision snapshot with distinct IDs, even when another table
+is selected for placement. Snapshots and saved plans preserve those table
+observations; a newly detected table or changed observed table invalidates saved
+motion. An optional table observation in standalone Pick remains optional.
+Reset and carry cleanup remove all managed table objects while preserving
+external collision objects. `/table_markers` shows each table independently;
+the default retains its existing marker namespace.
+
+Validation commands, results, and the stock MoveIt shutdown limitation are
+documented in [table profile validation](test/table_profiles_validation.md).
+
 The default launch derives an empty action `place_pose` and a MoveIt table
 collision object from `tag9`. The tag is configured as a vertical table
 reference: +X points right, +Y points upward, and +Z points toward the robot,
@@ -322,21 +487,19 @@ tabletop_y + box_height / 2, tabletop_z + place_z]`. At zero yaw, box
 +X, +Y, and +Z align with tag -Z, -X, and +Y, preserving an upright placed box.
 
 Leave `place_pose` empty to use this stable tag-derived target. The server
-accepts only three strictly increasing tag-9 detections from
-`/front_center_rectify/detections`, each paired with the latest fresh `tag9`
-transform. This requires the robot, including every joint in the camera-to-base
-TF chain, and the table/tag to remain stationary during measurement.
-Consecutive samples must be no more than
-`table_tag_maximum_sample_gap` apart (2.5 seconds by default), and their
-derived placement poses must be within 5 mm and 3 degrees of their mean. A
-long detector outage therefore requires three new samples before placement can
-resume. Once accepted, that `base_link` target is frozen for the complete
-PickPlace operation. Set
-`table_tag_place_offset: [x, z]` to move the target from the calibrated table
-center in the table plane, and
-keep an explicit action `place_pose` when a caller must override the calibrated
-target. The server waits up to `table_tag_stability_timeout` (6 seconds by
-default) for a fresh stable table-tag pose before rejecting the goal.
+accepts strictly increasing detections for the selected table tag from
+`/front_center_rectify/detections`, paired with TF at the detection timestamp.
+A bounded queue retries delayed TF for up to 0.5 seconds (64 pending samples);
+zero, future, and stale detection timestamps are rejected. The checked-in YAML
+requires two stable samples; the code fallback is three. Consecutive samples
+must be no more than `table_tag_maximum_sample_gap` apart (2.5 seconds), with
+5 mm / 3 degree maximum spread. An outage resets the stability window.
+Once accepted, placement and collision geometry are frozen through the action,
+including the complete PickPlace operation and Continue/retries.
+`table_tag_place_offset: [x, z]` moves the target within the tabletop plane.
+An explicit action `place_pose` overrides placement while retaining table
+collision geometry. The checked-in stability timeout is 10 seconds (the code
+fallback is 6 seconds); `tag_reacquisition_timeout` controls action waits.
 The table-tag transform is independent of the pickup tag calibration. It
 always targets the physical box center, using the active profile's height and
 the table geometry. Therefore changing a pickup tag from top-mounted to
@@ -347,9 +510,11 @@ Set `table_collision_enabled: true` to include a currently fresh, stable table-t
 pose in Pick, Place, PickPlace, carry, and reset scene updates. These actions use
 one validated detection snapshot and one scene diff to replace managed obstacles.
 Stale/invisible boxes and the configured table model are removed; unrelated
-external obstacles remain. Missing table detections do not block planning with
-an explicit target, but a tag-derived placement target still requires a fresh
-stable table pose. Selected, held, and released task boxes are protected during
+external obstacles remain. Standalone Pick uses a fresh stable table observation
+when available, without waiting for one; the selected box detection is still
+required. Place and combined PickPlace retain their table acquisition requirements,
+and a tag-derived placement target requires a fresh stable table pose.
+Selected, held, and released task boxes are protected during
 their manipulation stages. Empty-action cleanup reconciles fresh obstacles and
 removes task contact allowances rather than erasing every managed box.
 Existing pre-execution checks remain; no continuous motion monitoring is added.
@@ -359,8 +524,16 @@ Each fresh stable Tag 9 measurement also publishes a translucent cube on the
 latched `/table_markers` `visualization_msgs/MarkerArray` topic. This updates
 continuously while the detector is running, independently of task acceptance;
 it does not change the MoveIt collision scene until a task begins planning.
-Add a MarkerArray display for that topic in RViz to inspect the same pose and
-dimensions used for collision checking.
+Add a MarkerArray display for that topic in RViz. Its `detected_table` namespace
+visualizes accepted detections independently of the collision scene; the previous
+`collision_table` namespace is explicitly deleted. Box and table marker lifetimes
+use the observation's remaining validity, bounded by `maximum_pose_age` and
+`maximum_table_tag_pose_age` respectively (currently 2.5 seconds). Repeated TF
+observation timestamps do not refresh markers or count as new stability samples.
+Expired table markers also publish DELETE and replace the latched ADD so late
+subscribers cannot revive them. Carry preparation clears the table visualization;
+new fresh detections can display it again without rebuilding collision geometry.
+The attached box remains visible through MoveIt's robot model while carrying.
 The bundled dummy/replay launches disable this model because they publish only
 the pickup tag; supply a simulated Tag 9 stream before enabling it there.
 `box_pick_place.launch.py` starts the front-center tag9 pipeline at 1 Hz by
@@ -383,6 +556,26 @@ both contacts up/down or along the face by 15 mm, rotate the mirrored wrists by
 box tilt while keeping the measured tag top-center and yaw fixed. Near a box
 diagonal, it can also try the other face pair. The selected rigid box-to-TCP
 geometry is retained through approach, carry, split Pick/Place, and retreat.
+`grasp_position_tolerance` and `grasp_orientation_tolerance` control coordinated
+grasp candidate search. The independent `detection_position_tolerance` and
+`detection_orientation_tolerance` check detected box movement against the planned
+snapshot when optional Pick target replanning is enabled. Tables remain frozen. The shipped detection
+limits are 0.1 m / 0.1745329252 rad (10 degrees), preserving the previous movement
+thresholds. Changing detection limits does not change grasp candidates; changing
+grasp search limits does not change detection checks when detection limits are
+explicitly configured.
+
+Legacy configurations remain supported per component. An absent detection
+position/orientation setting falls back to the corresponding grasp tolerance
+for boxes. Saved execution does not validate live table detections.
+Explicit detection values must be finite, positive doubles. Startup logs report
+effective box/table limits; optional target movement logs identify the instance
+and report errors and limits. Only initial acquisition requires fresh detections.
+Restart the server after tolerance changes and create new previews. The Pick
+replanning toggle can be changed at runtime and is latched for each new action.
+See [detection tolerance validation](test/detection_tolerance_validation.md)
+for regression and captured-simulation results.
+
 Tune `grasp_*_tolerance`, `maximum_grasp_candidates`, and the search/planning
 timeouts in `config/box_manipulation.yaml`; keep tolerances conservative on
 hardware. These parameters improve geometric feasibility but do not provide
@@ -424,7 +617,6 @@ For a remote host, use the integrated latest-frame decoder and detector:
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/ubuntu/x2_ws/install/setup.bash
-unset RMW_IMPLEMENTATION
 
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   command_transport:=zmq \
@@ -434,11 +626,10 @@ ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   camera_info:=/aima/hal/sensor/rgbd_head_front/rgb_camera_info
 ```
 
-The decoder runs with Cyclone DDS only (`image_decompress_rmw` defaults to
-`rmw_cyclonedds_cpp`). AprilTag, MoveIt, `ros2_control`, action clients, and
-action servers retain the launch process's default Fast DDS. Do **not** export
-`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` globally: doing so can make the action
-server fail when it receives incompatible DDS data.
+The decoder, AprilTag, MoveIt, `ros2_control`, and action clients/servers
+inherit the launch environment's middleware. Neither camera launch overrides
+`RMW_IMPLEMENTATION`; keep it consistent with the robot (for example,
+`rmw_fastrtps_cpp` for a Fast DDS robot).
 
 The decoder keeps only the newest compressed frame, decodes it in a worker, and
 publishes `/x2/rgb_image_decompressed` as a raw `sensor_msgs/msg/Image`. Its
@@ -519,22 +710,21 @@ straight-arm pose; it can make coordinated dual-arm OMPL planning much harder.
 Do not launch `box_pick_place.launch.py` merely to check perception: it starts
 the controller manager. Run the decoder and detector separately instead.
 
-On a remote computer, run the decoder in its own terminal with Cyclone DDS:
+On a remote computer, run the decoder in its own terminal using the same
+middleware environment as the robot:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/ubuntu/x2_ws/install/setup.bash
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 run agibot_x2_manipulation best_effort_image_decompressor --ros-args \
   -p max_rate_hz:=10.0
 ```
 
-In a second terminal, use the default RMW for AprilTag:
+In a second terminal, use the same middleware environment for AprilTag:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/ubuntu/x2_ws/install/setup.bash
-unset RMW_IMPLEMENTATION
 ros2 run apriltag_ros apriltag_node --ros-args \
   --params-file /home/ubuntu/x2_ws/install/agibot_x2_manipulation/share/agibot_x2_manipulation/config/apriltag.yaml \
   -r /image_rect:=/x2/rgb_image_decompressed \
@@ -618,8 +808,17 @@ ros2 action send_goal /place_box agibot_x2_manipulation_msgs/action/Place \
 `/move_carry_pose` uses `MoveCarryPose`: `target_pose: 0` is Carry A and
 `target_pose: 1` is Carry B. It is accepted only while the server is
 `HOLDING`; it retains the current attached-box contact transforms and plans an
-adaptive collision-checked transition from the measured box pose. It first
-uses a previously selected endpoint for that carry pose (for example Carry A′
+adaptive collision-checked transition from the measured box pose. Planning,
+ordinary execution, and saved-plan execution require no fresh box/table detections.
+Before collision validation, they remove the server-managed table and unheld
+perception boxes left by the previous task. This also applies to plan-only
+previews, no-motion requests, retries, and Continue; these previews update the
+shared scene even though they execute no trajectory. The held object stays
+attached, and self-collision checks, external obstacles, and their scene updates
+remain active. These transport actions no longer provide collision protection
+against the removed perception objects. Pick/Place reconstruct those objects
+from fresh detections at their next acquisition. Carry planning first uses a
+previously selected endpoint for that carry pose (for example Carry A′
 selected during Pick), then searches the configured local carry envelope around
 the nominal pose when that endpoint is unavailable. A successful executed move
 remembers its selected A′/B′ endpoint, so the reverse move returns to that same
@@ -658,12 +857,122 @@ The server defaults to `motion_planning_mode:=closed_chain`, which samples and
 validates rigid box/TCP waypoints throughout approach, carry, and placement.
 After release, both modes use coordinated TCP retreat, followed by the dedicated
 clearance-search planner for the named joint target.
-For endpoint-only arm motion while carrying, select:
+For endpoint-based free-space transfers with Cartesian contact motions, select:
 
 ```bash
 ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
   motion_planning_mode:=pose_to_pose allow_execution:=false
 ```
+
+### Execute a saved complete plan
+
+Successful `plan_only: true` goals for Pick, Place, PickPlace, and MoveCarryPose
+return `plan_id` and `planning_mode`. Submit the same action with
+`plan_only: false, plan_id: '<returned ID>'` to execute its saved sequence.
+The saved target, selected box/profile, grasp geometry, detection snapshot,
+and ordered trajectories are authoritative; other goal target fields are ignored.
+PickPlace retains prepare → pregrasp → approach → attach → carry → place →
+release → retreat → prepare → ready. Pick, Place, and carry goals retain their
+complete corresponding portions. Attach/release remain explicit physical
+checkpoints between trajectories. The operator panel exposes **Execute saved
+plan**, with the normal physical-motion unlock and per-command confirmation.
+
+An empty `plan_id` preserves the ordinary behavior. Both `pose_to_pose` and
+`closed_chain` remain available; this feature does not select a different mode.
+The server stores one successful plan per action type in memory. A newer
+successful plan of that type replaces it. Claiming a plan consumes its ID and
+invalidates other saved plans. Ordinary physical manipulation, posture changes,
+reset, recovery, and profile reload invalidate saved plans. Restarting the server
+also clears them. `plan_only: true` with a nonempty ID is invalid.
+
+With `pick_replan_on_target_movement: false` (the default), saved execution
+performs no IK or OMPL search. It accepts measured start error
+within `execution_joint_tolerance` and preserves the saved trajectory; timing
+changes only when enabled model motion limits require slowdown. The scene
+monitor retains a parent scene so full MoveIt snapshots honor obstacle removals
+as well as additions when Continue refreshes the scene. Before every segment,
+it waits for settled feedback and checks the complete robot start, current scene,
+attachment geometry, joint bounds, controller spline, and the applicable Cartesian
+or closed-chain constraints. Saved box/table geometry is restored once without
+checking current detections.
+Missing detections, newly detected boxes/tables, and detector movement do not
+block execution or replace the snapshot. With optional Pick target replanning
+enabled, only selected-target movement before attachment can replace dependent
+saved trajectories; saved PickPlace rebuilds its remaining complete sequence.
+Standalone MoveCarryPose skips detection verification and
+clears previous perception obstacles before checking the live collision scene,
+without restoring old saved obstacle geometry.
+A measured-start discrepancy within `execution_joint_tolerance` executes the
+saved trajectory directly, keeping its first waypoint and derivatives unchanged.
+No alignment or additional measured-to-saved transition is constructed or
+validated. This explicitly accepts a small initial command discrepancy, bounded
+per joint by the configured tolerance. A start discrepancy beyond tolerance
+pauses before dispatch. Current scene, collision, measured joint bounds, and
+applicable execution Cartesian/closed-chain checks remain active. The original
+saved trajectory still passes its strict planning and controller-spline checks.
+A one-point no-motion step within tolerance needs no alignment.
+
+If enabled model velocity/acceleration limits require it, only the saved main
+trajectory is uniformly stretched by the necessary factor and revalidated;
+positions and spline geometry remain unchanged. Disabled model limits remain
+disabled for saved motion. Neither the accepted start discrepancy nor nonzero
+saved starting derivatives trigger alignment or timing slowdown. The stored
+plan is never modified. Motion-limit checks allow only a relative `1e-9`
+numerical rounding margin. Measured feedback slightly outside joint limits
+still uses `place_start_state_bounds_tolerance`; saved planned waypoints retain
+the existing model-bound requirements. No limits or tuned parameters change.
+
+A validation failure pauses immediately. Continue revalidates the same unfinished
+segment and never replans or repeats completed checkpoints. Failure after motion
+or attachment/release dispatch stops the sequence and requires recovery; it never
+replays a partly executed trajectory. Logs identify the plan, segment, alignment,
+and new planner-call count. Validate with fake feedback before hardware execution.
+Saved-motion logs include measured-start deviation, zero alignment duration,
+and `timing_scale` (1 for unchanged timing). Motion-limit diagnostics identify
+the joint and calculated derivative peaks/limits.
+Attach/release checkpoint failures identify attachment-copy errors, joint-limit
+violations (joint, measured position, limits, excess, and configured
+`place_start_state_bounds_tolerance`), or colliding link/object pairs.
+Attach/release checkpoints use the same measured-state bounds allowance as
+held-object validation and saved-start verification (currently 0.02 rad). This accepts
+small feedback discrepancies without changing planned trajectory limits or
+`execution_joint_tolerance`, which checks deviation from the saved start.
+Saved-step warnings include
+the step name and index; failed action results also include the plan ID and step.
+Checkpoint start mismatches report measured/expected joint positions and the
+execution tolerance. Collision checks and retry behavior remain active.
+
+The new action fields require rebuilding `agibot_x2_manipulation_msgs` and all
+clients that use these four actions. For captured simulation validation:
+
+```bash
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+ros2 run agibot_x2_manipulation time_saved_simulation \
+  --capture-dir /home/ubuntu/x2_ws/capture_task_snapshot \
+  --output-dir /tmp/x2-saved-plan-results \
+  --saved-plan --exercise-carry --mode pose_to_pose \
+  --domain-id 118 --port-base 19961
+```
+
+The output directory must be new. The harness checks saved execution and rejects
+missing/consumed IDs; use `--mode closed_chain` to exercise that existing mode,
+add `--exercise-start-alignment --saved-plan` to inject a 0.001-rad joint offset
+after previews using the existing fake controller and verify automatic alignment,
+add `--exercise-pause` to inject/remove an external obstacle and verify Continue,
+or omit `--saved-plan` to check ordinary execution. Add
+`--exercise-carry-no-detections --workflow sequence` to stop the snapshot replay,
+wait beyond configured detection freshness limits, inject a stale table overlapping
+a hand, and verify carry A/B/A previews and execution clear that table and unheld
+perception boxes while retaining attachment and an external obstacle. Stale
+objects are also reinserted between preview and execution to check both paths.
+With `--exercise-pause`, this also tests collision rejection and Continue during carry while detections remain stopped.
+See [carry without detection validation](test/carry_without_detection_validation.md).
+See [saved-plan validation](test/saved_plan_validation.md) for captured results
+and the remaining closed-chain standalone Place limitation.
+The versioned [simulation task helper](scripts/send_simulation_task.sh) also
+supports `--saved-plan` to preview and execute in one command, or `--plan-id ID`
+to execute an earlier preview. The workspace `tools/send_simulation_task.sh`
+copy provides the same interactive menu and command-line options.
 
 Pick and Place use the dual-arm SRDF state `prepare` as an empty-arm intermediate
 (`prepare_named_target: prepare`). Pick plans current state → prepare → pregrasp
@@ -676,69 +985,275 @@ the existing return retries, and measured-start checks before execution.
 Missing, out-of-bounds, or colliding prepare states fail planning; the named
 state is never silently skipped. Reset continues to use its explicit reset target.
 
-In `pose_to_pose` mode, the server retains the same pregrasp, contact, lift,
-carry, place, retreat, and idle endpoints. It solves dual-arm IK at each
-carry/place endpoint, then asks MoveIt for a collision-checked joint-space plan
-to the next endpoint. Retreat always uses coordinated interpolation rather than
-endpoint-only free-space planning. Joint bounds, obstacle avoidance, attached-box collision geometry,
-execution feedback, and recovery handling remain active. This mode does not
-guarantee straight TCP motion or continuous rigid two-hand closure between
-endpoints, so validate with `plan_only: true` and fake-ZMQ simulation before
-enabling robot motion.
+In `pose_to_pose` mode, Prepare → Pregrasp, general carry/transfer, motion above
+the placement target, and named-pose returns remain joint-space moves. They first
+test a direct joint-space route, then fall back to MoveIt within the remaining
+budget. These free-space moves do not guarantee straight TCP motion or continuous
+rigid two-hand closure between endpoints.
+
+Pregrasp → Contact, pick lift, final placement descent, and post-release retreat
+use synchronized Cartesian samples with standard MoveIt IK. Approach and retreat
+allow the hand separation to change; lifts/descent preserve the target box
+orientation. A pick route that lifts after lateral translation separates its
+rotation from that lift. General carry transitions retain joint-space planning.
+Cartesian failures cannot fall back to an unrestricted joint-space segment.
+
+`cartesian_step` (0.01 m) controls the paired waypoint spacing.
+`planning_position_tolerance` (0.02 m) and
+`planning_orientation_tolerance` (0.0872664626 rad, 5 degrees) bound
+geometric deviation at synchronized progress along both tip paths, including
+the generated, timed controller spline. `execution_position_tolerance` (0.1 m)
+and `execution_orientation_tolerance` (0.1745329252 rad, 10 degrees) apply to
+measured Cartesian starts/alignment, attachment/contact confirmation,
+held-object consistency, and HOLDING recovery. These settings do not add
+continuous TCP tracking or new endpoint checks to every motion segment.
+
+Saved Cartesian trajectories retain planning validation; their measured
+starts use execution tolerance. Collision, bounds, motion limits,
+and the existing joint-feedback admission checks still apply. Both planning
+modes remain available, and closed-chain solver/planned contact limits remain
+unchanged. Grasp search ranges and box/table detection-movement thresholds are
+also unchanged.
+
+Legacy parameters remain supported. If a new parameter is absent, the check
+uses its original value: Cartesian checks use `cartesian_path_*_tolerance`,
+contact/attachment/closure use `closed_chain_contact_*_error`, and recovery uses
+`recovery_*_tolerance`. Each explicitly configured new parameter overrides only
+its corresponding position or orientation component. Values must be finite
+and positive. Startup logs report the effective planning and execution limits;
+saved plans retain their captured configuration. The shipped configuration
+deliberately broadens measured Cartesian admission from 2 cm/5 degrees to
+10 cm/10 degrees while keeping generated-path accuracy at 2 cm/5 degrees.
+No runtime tolerance-update support is added; restart the server after changing
+configuration, then create new previews.
+See [tolerance validation](test/tolerance_validation.md) for regression and
+captured-simulation results.
+
+Joint continuity uses `maximum_joint_step`; Cartesian
+timing uses MoveIt's iterative parabolic time parameterization with velocity and
+acceleration scaling, preserving IK waypoints instead of TOTG path fitting.
+Controller interpolation may exceed model position bounds by
+`controller_spline_bounds_tolerance` (default 0.001 rad for revolute joints;
+meters for prismatic joints). Set it to 0 for strict checking with the existing
+numerical epsilon. This allowance applies to timed spline validation, including
+cache reuse, for Cartesian and free-space routes that enforce bounds. Planned
+waypoints must still satisfy model bounds; collision checks, Cartesian geometry,
+minimum joint margins, and execution tolerances are unchanged. Changing the
+parameter requires restarting the manipulation server.
+Cartesian timing that exceeds this allowance first receives local derivative
+repair at its original timestamps. Only affected joints' endpoint derivatives
+are reduced, with neighboring intervals rechecked. If necessary, local intervals
+receive rest-to-rest motion and additional time under the configured scaled
+velocity/acceleration limits. Complete Cartesian, collision, bounds, and minimum
+margin checks remain active. The final fallback stops at every waypoint and can
+slow the full segment. All repairs preserve planned waypoint positions. Logs
+report the strategy, original/final duration, and affected joints and intervals.
+Segment timing is preserved across route concatenation to avoid smoothing away the
+Cartesian path. Pick lift is replanned from measured feedback instead of rebasing
+and retiming a cached whole carry route; free-space segment reuse remains active.
+Retries retain the original lift height and preserve measured XY/orientation,
+so a partially executed lift does not gain another full lift height on Continue.
+Approach cache reuse still validates the original Cartesian path and checks the
+measured start with execution tolerance.
+Retries and Continue use the same stage policy. Joint bounds, collision geometry,
+execution feedback, and recovery handling remain active. Validate with
+`plan_only: true` and fake-ZMQ simulation before enabling robot motion.
+
+Controller-spline validation samples by joint travel rather than a fixed 20 ms
+interval. Collision checks accumulate spatial travel across timing waypoints,
+using `return_validation_joint_step`; endpoints, spline excursions, bounds, and
+Cartesian deviation remain checked. Slow execution and stationary timing samples
+do not multiply full collision checks. Cartesian carry attempts can use the full
+configured search budget, without the former 20% fast-path or 3.25 s route cutoff.
+No existing configured search timeout or joint limit is increased by this change.
+
+For `pose_to_pose`, Pick first tries the nominal grasp with one measured-seed IK
+attempt and validates its pregrasp, approach, and carry continuation. When this
+fast path fails, Pick collects and ranks one correction-cost tier at a time,
+trying its feasible candidates before solving IK for later tiers. Candidate
+counts, seed attempts, joint-margin ranking within a tier, and adaptive retries
+retain their configured limits. IK collection and motion planning have separate
+elapsed-time budgets, both bounded by the phase deadline. Adaptive carry
+and placement first try a single measured-seed
+IK endpoint and the existing direct route at the requested pose (or the previously
+selected carry pose). Successful routes skip the full endpoint ranking pass.
+Failure falls back to the existing candidate/route search with the same phase
+deadline, collision policy, joint-margin limits, and continuation checks.
+The fast attempt's entire IK, route, and continuation check shares a deadline
+capped at 20% of the effective remaining search/phase budget and the normal
+direct-route allowance, whichever is smaller. It can finish earlier. The 20%
+cap is a scheduling heuristic that reserves fallback time, not a change to
+collision validation or a measured optimal percentage. Nested fast attempts
+restore their caller's deadline before fallback.
+Planning traces record `adaptive_carry_fast_path` and `adaptive_place_fast_path`
+and `pregrasp_fast_path` with elapsed seconds.
+
+Carry and Place searches keep at most eight successful endpoint segments in a
+local FIFO cache. Reuse requires the same complete robot state and TCP targets,
+then rechecks attached geometry, joint bounds/margins, and the timed controller
+spline against the current scene. The cache lasts for one search. Segments retain
+their validated timing and derivatives when joined, preserving Cartesian paths.
+Searches remain serial and create no
+additional planner workers or sampling threads.
+
+Pose-to-pose carry/place routes accept measured starts within
+`place_start_state_bounds_tolerance` (0.02 rad in the hardware configuration).
+They normalize a planning copy into the model limits before generating and
+validating trajectories, following MoveIt's start-state correction behavior.
+Original feedback remains unchanged and execution-start matching still uses
+`execution_joint_tolerance`. Starts beyond the configured allowance are rejected;
+planned endpoints and controller splines remain subject to model joint limits
+and collision checks. No-motion return checkpoints also use
+`execution_joint_tolerance` for fresh feedback, rather than requiring microradian
+agreement. No joint limits, calibration transforms, or YAML tolerances changed
+from `6955ed9`.
+
+The small numerical tolerances below compare calculated states to decide whether
+to skip planning or reuse a cache entry. They are not hardware tracking
+requirements; a mismatch causes planning or cache rejection followed by planning.
+
+The shared pose-to-pose object-route planner skips intermediate waypoints already
+reached by both TCPs (within 0.0001 m and 0.001 rad), or matching validated joint
+targets within 0.000001 rad/m. The planning state must still
+pass joint bounds, minimum joint margin, and the usual collision checks. This
+avoids treating a no-motion MoveIt response as a failed route, particularly when
+the carry pose is already the placement approach pose. Other short planner
+responses outside the planner's goal tolerance remain failures; requested motions
+beyond the skip limits still go through planning.
+After a successful MoveIt response, a short result is also accepted when the
+current joints satisfy MoveIt's configured joint goal tolerance and pass the
+same state safety checks. The current state is retained rather than replaced
+by an unexecuted returned waypoint.
+
+Pick also reuses its preflight pregrasp/approach trajectories when fresh stationary
+feedback matches robot variables within `execution_joint_tolerance`, and complete
+trajectory validation passes against the current scene, including controller
+spline interpolation and joint bounds. Feedback within the configured start
+tolerance preserves every planned waypoint, derivative, and timestamp; small
+encoder differences do not rebase or retime the path. The measured start uses
+`place_start_state_bounds_tolerance`, and the measured-to-planned edge is still
+checked for collisions. Validation failure falls back to replanning. Reuse preserves the box/wrist/hand contact
+policy without allowing environment contact. Execution failure consumes the cache;
+retries replan from measured positions. A mismatch or changed obstacle also triggers
+replanning. In pose-to-pose mode, Pick replans its lift from fresh stationary
+feedback after attachment acknowledgement. The lift's Cartesian timing is retained
+when joining free-space carry segments. Free-space segment cache entries remain
+available after current-scene validation. Moved-box updates, execution attempts,
+and failure consume or invalidate the task-local grasp cache.
+The closed-chain search, measured-start recovery rules for return, and
+configured search limits are preserved. Simulation workflow tests use a separate
+box profile so hardware calibration does not determine their feasibility.
 
 ### Waiting for tag detections
 
-`tag_reacquisition_timeout: 10.0` seconds is the shared wait limit for fresh box
-selection, planned visible-box checks, and stable table-tag acquisition in Pick,
-Place, PickPlace, and MoveCarryPose. Actions publish `waiting_for_detection`
-feedback while waiting before the next motion, retain the current held-object
-state, and respond to cancellation/reset requests. All boxes in a planned
-snapshot share one deadline. The held box is excluded from visible-box checks;
-its state continues to come from robot feedback and attachment tracking.
+Pick, Place, PickPlace, and their plan-only requests accept a box/table
+snapshot before planning, retaining it until an explicit Continue replaces it.
+Initial acquisition must complete before motion. Planning
+uses observations timestamped strictly after the action worker starts (after
+request acceptance), rather than a still-fresh cached detection. Required box
+and table acquisition waits for such a result within `tag_reacquisition_timeout`;
+optional boxes/tables with only pre-request observations are excluded.
+Previously visible optional obstacles get a bounded initial opportunity to
+renew their observations before being excluded; an absent optional table does
+not require a detection to appear. Delayed messages with older observation
+timestamps cannot satisfy this requirement.
+Initial saved-plan execution retains its saved geometry without reacquiring
+detections; explicit Continue refreshes it before replanning.
+The request cutoff stays fixed through acquisition retries. Automatic
+planning retries retain object identities, profiles, dimensions, poses, and
+the placement target. An explicit Continue starts a new acquisition cycle using
+observations captured strictly after Continue is accepted, then freezes the
+replacement snapshot. Missing required observations pause the action again;
+old required detections are never used as a fallback. This is independent of
+`pick_replan_on_target_movement`. Combined PickPlace shares one snapshot through Pick,
+Place, and return; separately submitted Pick and Place capture independently.
+Standalone Pick accepts optional post-request stable table observations;
+Place and combined PickPlace retain their initial table requirements.
+A new ordinary action acquires fresh observations. Cancellation and exceptions
+release the local retention scope. Completion does not reacquire detections.
+Detection tracking and table visualization remain live.
 
-Freshness remains controlled by `maximum_box_pose_age` and
-`maximum_table_tag_pose_age`; waiting does not make an old observation valid.
-Fresh observations must retain the planned instance/profile and stay within the
-existing movement tolerances. A moved box invalidates the existing plan rather
-than resuming motion toward an old target. Exhausted waits report an error.
-These checks run between motions, so a tag dropout alone does not interrupt an
-executing trajectory. Controller faults and collision validation remain active.
+`pick_replan_on_target_movement: false` is the default. Set the ROS parameter or
+launch argument to `true` to allow **only the selected pickup box** to update
+before physical attachment. The value is latched when each action starts,
+including saved execution; changes during an action apply to the next action.
+At stationary motion boundaries, fresh stable same-profile observations are
+compared to the last accepted target using `detection_position_tolerance` and
+`detection_orientation_tolerance` (with the existing legacy fallbacks when unset).
+Exceeding either threshold updates the target and replans dependent paths from
+measured robot state. Before Approach, this can rebuild Pregrasp and select a new
+grasp. During Approach or an unfinished attachment, recovery preserves the
+selected box-relative contacts and plans Cartesian motion directly from measured
+hand poses to the updated contact poses. Saved PickPlace
+also rebuilds Place/release/return paths before resuming. Replanning uses bounded
+phase retries and Continue; an active trajectory is never interrupted solely
+because a detection changes. Missing, stale, invalid, or changed-profile
+observations are ignored. Other boxes and tables remain frozen until an explicit
+Continue. After attachment,
+object state comes from robot feedback and the attachment model.
+
+The snapshot is expressed in `planning_frame`. This toggle responds to observed
+relative target displacement; it does not estimate base motion or compensate
+other retained objects for base movement. Cancel/restart to acquire an entirely
+new scene after repositioning.
+
+Standalone MoveCarryPose clears prior managed perception obstacles once at entry
+and retains the resulting managed scene, without acquiring detections. Reset
+captures once after preemption and authorized attachment cleanup, retaining the
+scene through retries and Continue. Explicit attach/release and virtual planning
+transitions still update the manipulated box; the released box uses its commanded
+pose. External planning-scene objects and OctoMap remain live, and collision,
+controller-spline, joint-limit, and attachment checks remain active.
+
+`tag_reacquisition_timeout` bounds initial box selection and required stable
+table acquisition, with `waiting_for_detection` feedback and cancellation support.
+Initial freshness remains controlled by `maximum_box_pose_age` and
+`maximum_table_tag_pose_age`; accepted snapshots do not expire mid-action.
+Optional target checks run between motions; a tag dropout does not interrupt
+an executing trajectory. Controller faults and collision validation remain active.
 
 When `tag_reacquisition_timeout` is not set, it inherits the legacy
 `table_tag_stability_timeout` value. Explicitly set the shared parameter to tune
-all action detection waits together. Reset retains its existing optional scene
-refresh behavior and does not require reacquiring tags that are absent.
+initial action detection waits together. Reset captures optional detections once
+and does not reacquire them during retries.
+
+Validation commands and results are recorded in
+[object retention validation](test/object_retention_validation.md).
 
 ### Post-place return planning
 
-Place and PickPlace feasibility checks include release, retreat, and return to
-the exact `post_place_named_target` joint configuration via `prepare_named_target`.
-Before placement motion,
-the server checks this continuation on an independent scene snapshot with the
-box released at the selected placement pose. The live collision scene is not
-changed by this check. If the continuation fails, adaptive placement may try
-another candidate inside its existing pose tolerances.
-Candidate continuation checks share one return budget per adaptive placement
-search, including time already spent generating the placement candidate.
+Place and PickPlace `plan_only` feasibility checks include release, retreat,
+Prepare, and return to the exact `post_place_named_target` joint configuration.
+They compose the same stage planners using hypothetical endpoints on an
+independent released-box scene snapshot. Ordinary execution checks placement
+feasibility before moving, then plans post-place stages after physical release.
 
-After physical release, the server searches again from measured feedback. It
-plans an outward retreat using the existing coordinated approach search in
-reverse, with actual release TCPs as its interpolation start. Only this retreat
-uses the existing grasp touch allowances for the task box (hand pads, TCPs, and
-wrist links); tables and other obstacles remain collision-checked. The box stays
-in the snapshot throughout retreat planning and validation. The retreat endpoint
-must be collision-free with all task-box touch allowances disabled.
-If that endpoint has no valid named-target continuation, the server also tries
-retreat distances of 1.5 and 2 times `pregrasp_distance`, dividing the remaining
-shared budget between attempts. This changes no configured grasp parameters.
-The dedicated named-target planner then tries a direct return; if direct return fails, it
-searches paired hand poses above and toward the robot from the table. These are
-pose endpoints connected by whole-dual-arm RRTConnect plans, not straight
-Cartesian hand paths. Both segments of a clearance route must pass before any
-segment executes. The table, placed box, visible obstacles, and octomap remain
-present. Named-target return and reset never inherit retreat touch allowances.
-Wrist collisions with the table are always checked. Both the retreat and named
-continuation must be feasible before any post-place segment executes.
+Post-place execution plans and executes each stage independently: Retreat →
+`prepare_named_target` → `post_place_named_target`. An empty Prepare target skips
+that stage. A colliding Ready target does not block a feasible Retreat or Prepare.
+Each completed stage is checkpointed; failures pause the active stage after its
+configured retries. Continue replans that unfinished stage from measured state
+without repeating completed stages. If part of a clearance route executed before
+failure, its cached remainder is discarded and the same stage target is replanned
+from current feedback. Cancellation does not mark the interrupted stage complete.
+The action succeeds only after the final named target completes.
+
+Retreat starts at measured TCP poses and retains the placed box as a world
+obstacle. Pose-to-pose mode uses Cartesian disengagement; coordinated mode uses
+the approach search in reverse and may try 1.5 and 2 times `pregrasp_distance`
+when the nominal Retreat itself is infeasible. Only Retreat uses task-box touch
+allowances for hand pads, TCPs, and wrist links. Its endpoint must be collision-free
+with those allowances disabled. Tables and other obstacles remain checked;
+Prepare, Ready, and Reset never inherit Retreat touch allowances. Named-target
+stages preserve their existing direct and clearance-route searches and controller
+spline validation. Each segment is checked against current feedback and scene
+before execution.
+
+Post-place retreat, Prepare, Ready, and their automatic retries retain the
+accepted table observation. Explicit Continue refreshes the surrounding box/table
+scene using post-Continue observations before replanning the unfinished stage.
+The released task box remains at its achieved placement pose and is never
+reacquired from detections. Completed return stages remain completed.
 
 The return-specific defaults are `return_planning_timeout: 30.0` seconds,
 `return_planning_time_per_attempt: 2.0` seconds, and `return_ik_attempts: 8`.
@@ -763,6 +1278,22 @@ Before execution, measured start agreement and the latest collision scene are
 checked again. At most two replans are permitted for changed feedback or scenes,
 each with a fresh bounded search budget.
 
+Pose-to-pose return and prepare segments whose calculated planning start matches
+the exact target within 0.000001 rad/m keep a no-motion checkpoint. Bounds, collision,
+and measured-start checks still run, but OMPL and ExecuteTrajectory are skipped.
+Feedback outside joint limits still follows the existing recovery path. Execution
+plans the return after release and reuses its remaining segments with the existing
+measured-feedback validation; candidate feasibility does not trigger extra return
+searches during execution.
+
+Carry-pose switching accepts an already-reached physical target when both TCPs
+meet `execution_position_tolerance` and `execution_orientation_tolerance`, after
+the usual held-state bounds, closure and collision checks. Unset settings retain
+the contact-error limits as fallbacks. Plan-only previews and hypothetical route
+waypoints retain tight identity checks so small lift, retreat, or clearance motions
+are still planned. Numerical epsilons used for spline extrema, calculated waypoint
+bounds, pose-cache identity and rotation validity are not hardware accuracy limits.
+
 Planning traces include `post_place_return` events for geometric and processed
 validation, rejected candidates, selected clearance poses, seeds, and budget
 exhaustion. If no valid route is found after release, the action reports failure
@@ -771,10 +1302,11 @@ cannot guarantee a route through an obstructed scene. Validate in simulation
 before allowing hardware execution; these parameters do not replace accurate
 collision geometry or calibration.
 
-Final validation also samples the joint trajectory controller's cubic/quintic
-interpolation at 100 Hz or finer, with additional subdivision from the joint
-motion bound. This detects spline overshoot even when its endpoints and their
-straight joint-space connection are clear.
+Final validation samples the joint trajectory controller's cubic/quintic
+interpolation by joint travel and endpoint derivatives, with quarter-interval
+checks for excursions. Collision checks follow accumulated spatial travel;
+validation density does not increase merely because execution takes longer.
+Spline overshoot is checked even when endpoints are clear.
 
 Pregrasp planning first tests up to `maximum_planning_candidates` candidates
 for `planning_time_per_candidate` seconds each. If none succeeds, the best
@@ -848,9 +1380,10 @@ ros2 service call /recover_manipulation_state \
 The state file records the last adaptive box pose and both rigid box-to-TCP
 transforms. On restart, `CONFIRM_HOLDING` independently reconstructs the box
 pose from the measured left and right TCP transforms and requires the two
-estimates to agree within `recovery_position_tolerance` and
-`recovery_angular_tolerance`. Legacy state files fall back to the configured
-carry pose. These tolerances do not check the tag pose or compare raw joint
+estimates to agree within `execution_position_tolerance` and
+`execution_orientation_tolerance`. When these settings are absent, recovery
+retains `recovery_position_tolerance` and `recovery_angular_tolerance` as its
+legacy fallbacks. Legacy state files fall back to the configured carry pose. These tolerances do not check the tag pose or compare raw joint
 values directly.
 
 For a fault recovery after the operator has stopped the base and verified that
@@ -1011,6 +1544,43 @@ results are published on `/pick_place/planned_box_path`,
 with per-route failure classification and budget data on
 `/pick_place/planning_diagnostics`.
 
+### Measuring execution time in the terminal
+
+Start the passive timing monitor before sending a manipulation goal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run agibot_x2_manipulation measure_execution_time
+```
+
+Use the same `ROS_DOMAIN_ID` as the running robot or simulation. The monitor
+prints one `CONTROLLER` line per dual-arm trajectory, one `MOVEIT` line per
+ExecuteTrajectory goal, and one `TASK` line per manipulation task. Every line
+includes elapsed seconds and terminal status. Controller/MoveIt goal IDs are
+distinct; the task and phase labels use the serialized server's latest status.
+
+`CONTROLLER` measures observed executing-to-terminal controller status transitions,
+including the controller's goal-tolerance handling. `MOVEIT` includes its execution
+coordination. These intervals overlap, so do not add them together. `TASK` includes
+planning, attachment operations, retries/operator pauses, and fresh-feedback
+settling. Its non-controller time is not a pure planning measurement. Status
+delivery latency affects precision; these measurements do not detect the exact
+first/last encoder motion.
+
+The script writes no files and disables its own ROS file logging. Ctrl-C prints
+any unfinished intervals as `status=incomplete`. A missed start is marked
+`partial=true`, and historical terminal goals are ignored. Existing server trace
+settings are unchanged. To use namespaced endpoints, set `--controller-action`,
+`--moveit-action`, and `--task-topic`, for example:
+
+```bash
+ros2 run agibot_x2_manipulation measure_execution_time \
+  --controller-action /robot/dual_arm_controller/follow_joint_trajectory \
+  --moveit-action /robot/execute_trajectory \
+  --task-topic /robot/manipulation_task_status
+```
+
 ### Persisting planning traces
 
 Planning tracing is enabled by default. Each planner-server start creates a
@@ -1031,6 +1601,35 @@ absolute path; it takes precedence over `planning_log_directory`. The trace
 may contain measured poses and joint-planning diagnostics; treat it as robot
 operational data and do not commit it.
 
+`pose_search_summary` records elapsed time, dual-arm IK calls/time, and MoveGroup
+OMPL calls/time. `direct_joint_route`, `pregrasp_direct_joint_route`,
+`pose_prefix_reuse`, and `execution_plan_reuse` record accepted/rejected shortcuts
+and their validation time. Return planning has its own `post_place_return` events.
+`cartesian_segment` records the selected Cartesian stage, success, and failure
+reason, including IK, joint continuity, and timed path deviation failures.
+These counters cover calls made by the dual-arm planner; they exclude the dedicated
+post-place OMPL pipeline.
+
+For a serial simulation benchmark on an idle host, run:
+
+```bash
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ROS_DOMAIN_ID=103 ROS_LOG_DIR=/tmp/x2-pose-benchmark \
+  /usr/bin/python3 -m launch_testing.launch_test \
+  src/agibot_x2_moveit/agibot_x2_manipulation/test/benchmark_pose_to_pose.launch.py \
+  --junit-xml=/tmp/x2-pose-benchmark.xml
+```
+
+The manual fixture uses fake feedback, two warmups and ten measured plan-only
+samples each for Pick, PickPlace, carry B, carry A, and Place. It also executes one
+fake-feedback workflow. `POSE_BENCHMARK` JSON rows include wall time, summed CPU
+seconds for the planner server and MoveGroup, and the sum of their process peak
+RSS values. Run baseline and changed binaries separately under the same fixture;
+this benchmark does not replace the launch tests' shutdown assertions.
+See [the measured comparison](test/pose_to_pose_benchmark.md) for results and limitations.
+
 Each non-plan-only motion also requires a settled physical endpoint before the
 server begins its next phase. It waits for direct HAL arm feedback received
 after controller execution, then requires consecutive samples within
@@ -1044,11 +1643,6 @@ merely to pass an approach or reset.
 
 ## To do
 
-- Replace the current stationary-table `TimePointZero` lookup with a bounded
-  retry queue for the exact detection timestamp before supporting table-tag
-  measurements while the base or head moves. The retry must retain the source
-  timestamp, wait briefly for its matching TF, and reject it on timeout rather
-  than falling back to a transform from another image.
 - Extend Place beyond its current local X/Y/Z/yaw correction window with a
   runtime placement-region search. Given a detected support surface and an
   allowed placement region, it should sample and rank collision-free,
@@ -1084,12 +1678,23 @@ object disposition, and whether Continue is available. Physical
 
 Call `/continue_manipulation` (`ContinueManipulation`) with the current `task_id`
 and `pause_id`. The service signals the retained action worker and starts a new
-retry cycle. Stale or duplicate requests fail. Continue replans the unfinished
-motion from fresh measured positions after confirming stationary arm feedback;
+retry cycle. Stale or duplicate requests fail. Pick, Place, combined PickPlace,
+Reset, and their saved execution acquire observations timestamped after Continue
+is accepted. Required detection timeouts pause the action again with a new pause
+ID; cancellation and Reset can interrupt acquisition. MoveCarryPose remains
+detection-free. Continue replans the unfinished motion from fresh measured
+positions after confirming stationary arm feedback;
 it does not resend a trajectory from its old start. Completed attachment,
 release, retreat, and return-to-prepare checkpoints are preserved. Other motion
 goals are rejected while the task is active or paused. Standard action
 cancellation and reset preemption remain available.
+
+Place tracks completed stages separately from the active stage's planned route.
+A failed replan discards its temporary candidate; Continue obtains a new plan only
+for the unfinished stage, using the replacement detection snapshot. Reaching
+Prepare completes that checkpoint; Ready is planned and executed afterward
+before reporting success. Failed or empty planning results
+cannot advance a stage or count as completed motion.
 
 Attachment/release failures known to occur before dispatch may retry. An
 uncertain result after dispatch requires explicit recovery; the physical
@@ -1097,9 +1702,120 @@ operation is not automatically repeated. Collision and closure validation remain
 required before motion. Invalid goals, cancellation, and unexpected exceptions
 do not enter an automatic motion retry loop.
 
+Continue refreshes the selected Pick target before attachment regardless of the
+automatic movement toggle, and refreshes managed surrounding boxes/tables.
+Attached geometry remains driven by robot feedback; released geometry retains
+the achieved placement pose. A table-derived placement target is recalculated
+from the refreshed table before release. Explicit placement requests keep their
+initially resolved planning-frame pose. Saved execution discards dependent
+remaining trajectories and preserves completed physical checkpoints. Before
+attachment or release, retries check fresh stationary feedback and both hand
+contacts using the configured
+`closed_chain_contact_position_error` and `closed_chain_contact_orientation_error`.
+When contact has moved outside those bounds, the unfinished approach or placement
+is planned again before the physical operation is dispatched.
+Pick also validates joint limits and collisions at attachment against the current
+scene, including refreshed obstacles when the hand contacts have not moved.
+
+Approach and attachment recovery never fall back to free-space Pregrasp planning.
+If contacts remain within tolerance at attachment, no repeated approach is needed.
+Otherwise, the remaining Cartesian approach and carry continuation must be valid
+before motion. A failed Cartesian recovery stays paused for another Continue,
+cancellation, or Reset. Saved execution rebuilds its dependent remaining paths
+using the same recovery policy.
+
+The selected box remains present during Cartesian Approach planning. Only its
+designated hand, TCP, and wrist contacts are allowed; collisions with other robot
+links, tables, other boxes, and external obstacles remain checked. Lift and Place
+use the attached box's touch links. Retreat permits disengagement contact but
+requires a clear endpoint before strict Prepare/Ready motion. These contact rules
+apply during ordinary execution and recovery, without globally disabling box
+collisions or changing the live scene's allowed collision matrix.
+
 Task checkpoint diagnostics are saved beside `state_file` in `state_file.task`.
 The live action worker retains the complete goal and planning context. After a
 server restart, that worker is gone: the last active checkpoint is published as
 `interrupted` with Continue disabled, and the existing physical-state recovery
 controls must be used. Browser reconnection while the server remains running can
 resume the same paused task.
+
+## Optimized standalone camera pipelines
+
+The perception-only launch below leaves the existing camera and manipulation
+launch files unchanged. It starts one C++ preprocessor and one AprilTag detector
+per enabled camera, without starting robot control or shared state:
+
+```bash
+ros2 launch agibot_x2_manipulation optimized_camera_apriltag.launch.py
+```
+
+Stop other detectors for these cameras first to avoid duplicate detections and
+TF publishers. Both cameras use a 640×480 bounding box without upsampling and
+preserve aspect ratio (for example, 1920×1080 becomes 640×360). RGBD defaults to
+10 Hz and front-center to 1 Hz. The preprocessors drop superseded compressed
+frames before decoding, decode reduced-resolution grayscale JPEGs, and rectify
+at the output resolution using cached maps. They publish only `mono8` images
+and scaled rectified calibration with identical source timestamps/frame IDs.
+The input calibration is cached between updates; its frame ID and effective
+ROI/binning dimensions must agree with the JPEG. Missing/invalid calibration,
+unsupported distortion models, and malformed JPEGs are dropped with diagnostics.
+Supported distortion models are `plumb_bob`, `rational_polynomial`, and
+`equidistant`. Pinhole models accept OpenCV coefficient layouts of 0, 4, 5, 8,
+12, or 14 values, preserving all coefficients. This includes HAL calibration
+labelled `plumb_bob` with eight rational coefficients; fisheye requires four.
+An empty pinhole distortion vector means zero distortion, but valid intrinsics
+are still required. This optimization does not reduce camera encoding or network traffic.
+
+RGBD subscribes to `/camera/color/image_raw/compressed` with calibration from
+`/camera/color/camera_info`. Front-center subscribes to
+`/aima/hal/sensor/rgb_head_front_center/rgb_image/compressed` with calibration
+from `/aima/hal/sensor/rgb_head_front_center/camera_info`.
+
+| Camera | Image output | Paired calibration | Detection output |
+| --- | --- | --- | --- |
+| RGBD | `/x2/optimized/rgbd/image_rect` | `/x2/optimized/rgbd/camera_info` | `/detections` |
+| Front-center | `/x2/optimized/front_center/image_rect` | `/x2/optimized/front_center/camera_info` | `/front_center_rectify/detections` |
+
+Use `enable_rgbd:=false` or `enable_front_center:=false` for a single camera.
+Each camera exposes `<camera>_compressed_image`, `<camera>_camera_info`,
+`<camera>_output_image`, `<camera>_output_camera_info`, `<camera>_max_rate_hz`,
+`<camera>_width`, `<camera>_height`, `<camera>_input_reliability`, and
+`<camera>_apriltag_config`, where `<camera>` is `rgbd` or `front_center`.
+Compressed-input reliability defaults to `reliable`; calibration subscriptions
+use best-effort sensor QoS to accept either publisher reliability. Output QoS
+is best-effort, volatile, depth one. All preprocessors and detectors inherit
+the launch environment's middleware; there is no camera-specific override. Disable `publish_front_center_static_tf` if an existing
+publisher already supplies `rgb_head_center -> rgb_head_front_center`.
+
+To use these external detectors with the unchanged manipulation launch:
+
+```bash
+ros2 launch agibot_x2_manipulation box_pick_place.launch.py \
+  use_apriltag:=false \
+  start_table_tag_detector:=false \
+  use_image_decompressor:=false \
+  use_raw_image_throttler:=false
+```
+
+That second command starts the normal manipulation/control stack. Validate
+perception independently, and use simulated control or plan-only goals when
+validating manipulation. Shared robot TF must still come from the existing
+state bringup. To return to the original workflow, stop this optimized launch
+and start the existing launches with their usual options.
+
+For CPU validation, replay the same recording into each pipeline independently,
+match actual output dimensions/rates and detector parameters, and measure the
+sum of CPU across all preprocessing and detector processes. Repeat runs and
+compare memory, frame latency, detections, and pose variability. Smaller source
+images may need no JPEG reduction; small/distant tags must be checked at the
+chosen resolution. Automated synthetic tests establish transport/geometry
+behavior; representative recorded-camera CPU and pose comparisons are still
+required before adopting the optimized pipeline on a robot.
+
+Local validation: the focused build and camera/launch/configuration tests pass,
+including a synthetic tag0 pose comparison within 2 mm per translation axis.
+A three-run, 30-frame-per-run synthetic 1920×1080 JPEG benchmark (640×360
+output, one OpenCV thread) measured approximately 15.25 ms CPU/frame for full
+color decode + resize + grayscale versus 10.17 ms for reduced grayscale decode
++ resize, a 33% reduction for these stages. This excludes DDS, rectification,
+and AprilTag and is not a measurement of total camera-pipeline CPU savings.

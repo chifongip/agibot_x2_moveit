@@ -3,7 +3,9 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from launch import LaunchContext
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.utilities import perform_substitutions
+import pytest
 import yaml
 from sensor_msgs.msg import CameraInfo, Image
 
@@ -56,6 +58,29 @@ def load_launch_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_pick_replan_launch_default_respects_yaml(monkeypatch, enabled):
+    module = load_launch_module()
+    original_load = module.yaml.safe_load
+
+    def configured_load(stream):
+        data = original_load(stream)
+        if isinstance(data, dict) and "pick_place_server" in data:
+            data["pick_place_server"]["ros__parameters"]["pick_replan_on_target_movement"] = enabled
+        return data
+
+    monkeypatch.setattr(module.yaml, "safe_load", configured_load)
+    description = module.generate_launch_description()
+    argument = next(action for action in description.entities
+                    if isinstance(action, DeclareLaunchArgument) and
+                    action.name == "pick_replan_on_target_movement")
+    context = LaunchContext()
+    assert perform_substitutions(context, argument.default_value) == str(enabled).lower()
+    context.launch_configurations[argument.name] = str(not enabled).lower()
+    argument.execute(context)
+    assert context.launch_configurations[argument.name] == str(not enabled).lower()
 
 
 def test_launch_controls_perception_source_selection():
@@ -228,7 +253,8 @@ def test_late_visible_box_detections_do_not_interrupt_a_planned_task():
         Path(__file__).parents[1] / "src" / "pick_place" / "box_pose_tracker.cpp"
     ).read_text(encoding="utf-8")
 
-    assert "box_pose_tracker_.waitForUnchangedPoses(expected" in server_source
+    assert "box_pose_tracker_.waitForUnchangedPoses(" not in server_source
+    assert "box_pose_tracker_.movedStablePose(*reference, latest, detail, detection_request_stamp_)" in server_source
     assert "if (actual.size() != expected.size())" not in server_source
     assert "for (const auto & reference : references)" in tracker_source
     assert "changed before motion:" in tracker_source
@@ -262,7 +288,7 @@ def test_detailed_planning_trace_file_is_automatic_and_launch_configurable():
     assert "adaptive_carry_selected" in planner_source
 
 
-def test_empty_operations_reconcile_detections_and_restart_cleanup_remains_available():
+def test_empty_operations_keep_retained_scene_and_restart_cleanup_remains_available():
     scene_source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
     server_source = (
         Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
@@ -274,7 +300,10 @@ def test_empty_operations_reconcile_detections_and_restart_cleanup_remains_avail
     assert "scene_interface_.getAttachedObjects()" in scene_source
     assert "clearManagedBoxes(error)" in scene_source
     assert "clearSceneAfterEmptyOperation(task);" in server_source
-    assert 'updateVisibleBoxScene("", false, true, visible_boxes, error,' in server_source
+    cleanup = server_source.split("void clearSceneAfterEmptyOperation", 1)[1].split(
+        "const char * carryPoseName", 1)[0]
+    assert "active_visible_boxes_.clear()" in cleanup
+    assert "updateVisibleBoxScene" not in cleanup
     assert (
         "planning_scene_.updateDetectionScene(observations, protected_ids, false, error)"
         in server_source
@@ -290,7 +319,8 @@ def test_post_place_separates_coordinated_retreat_from_named_target_planning():
         Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
     ).read_text(encoding="utf-8")
     assert "motion_planner_.buildRetreat(" in server_source
-    assert "post_place_planner_->plan(retreat_end, {}, scene, false" in server_source
+    assert "post_place_planner_->planToNamedTarget(empty_start, scene," in server_source
+    assert "post_place_planner_->planRetreat(empty_start," in server_source
     assert "validatePostPlaceSegment(" in server_source
     assert "postPlaceRetreatTarget" not in server_source
 
@@ -356,7 +386,7 @@ def test_launch_defaults_preserve_state_delivery_headroom():
     source = LAUNCH_FILE.read_text(encoding="utf-8")
 
     assert 'DeclareLaunchArgument("use_rviz", default_value="false")' in source
-    assert '"ros2_control_update_rate",\n                default_value="100"' in source
+    assert '"ros2_control_update_rate",\n                default_value="50"' in source
     assert '"initial_arm_command_mode",\n                default_value="ready"' in source
     assert '"initial_arm_command_mode": initial_arm_command_mode' in source
 
@@ -436,13 +466,13 @@ def test_tag9_derives_the_default_table_place_pose():
     assert config["maximum_table_tag_pose_age"] > 0.0
     assert config["table_tag_detections_topic"] == "/front_center_rectify/detections"
     assert config["table_tag_id"] == 9
-    assert config["table_tag_stable_sample_count"] == 3
+    assert config["table_tag_stable_sample_count"] == 2
     assert config["table_tag_maximum_position_spread"] == 0.005
     assert config["table_tag_maximum_angular_spread"] == 0.0523598776
     assert config["table_tag_maximum_sample_gap"] == 2.5
 
 
-def test_table_collision_is_published_as_a_latched_visualization_marker():
+def test_table_detection_is_published_as_a_latched_visualization_marker():
     source = PLANNING_SCENE_MANAGER_FILE.read_text(encoding="utf-8")
     server_source = (
         Path(__file__).parents[1] / "src" / "pick_place_server.cpp"
@@ -450,13 +480,14 @@ def test_table_collision_is_published_as_a_latched_visualization_marker():
 
     assert '"/table_markers", rclcpp::QoS(1).transient_local()' in source
     assert "void PlanningSceneManager::publishTableMarker" in source
-    assert 'marker.ns = "collision_table"' in source
+    assert 'marker.ns = profile_id == "default" ? "detected_table"' in source
     assert "marker.type = visualization_msgs::msg::Marker::CUBE" in source
     assert "marker.pose = toPoseMsg(pose)" in source
-    assert "marker.scale.x = config_.table_dimensions.length" in source
-    assert "marker.scale.y = config_.table_dimensions.width" in source
-    assert "marker.scale.z = config_.table_dimensions.height" in source
-    assert "publishTrackedTableMarker(tag_pose);" in server_source
+    assert "dimensions ? *dimensions : config_.table_dimensions" in source
+    assert "marker.scale.x = size.length" in source
+    assert "marker.scale.y = size.width" in source
+    assert "marker.scale.z = size.height" in source
+    assert "publishTrackedTableMarker(profile, tag_pose);" in server_source
     assert "tablePoseFromVerticalTag(" in server_source
     assert "tag_pose.header.stamp" in server_source
 
@@ -601,8 +632,8 @@ def test_coordinated_grasp_search_has_conservative_limits():
     assert config["closed_chain_validation_orientation_step"] <= 0.017454
     assert config["closed_chain_contact_position_error"] <= 0.1
     assert config["closed_chain_contact_orientation_error"] <= 0.174534
-    assert config["carry_search_timeout"] == 80.0
-    assert config["maximum_carry_candidates"] == 270
+    assert config["carry_search_timeout"] == 8.0
+    assert config["maximum_carry_candidates"] == 96
     assert config["carry_search_z_lower"] >= 0.02
     assert config["carry_search_z_upper"] <= 0.05
     assert config["carry_search_x_range"] <= 0.05

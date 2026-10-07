@@ -9,7 +9,7 @@ box_localizer:
     tag_to_box_yaw: 0.0
     # Additional [x, y, z] correction from the centered top-tag model, in tag coordinates [m].
     tag_to_box_offset: [0.04, 0.0, 0.1]
-    stable_sample_count: 3
+    stable_sample_count: 2
     maximum_pose_age: 2.5
     maximum_position_spread: 0.005
     maximum_angular_spread: 0.0523598776  # 3 degrees
@@ -34,14 +34,29 @@ pick_place_server:
     contact_height_offset: 0.0
     lift_height: 0.08
     cartesian_step: 0.01
+    # Generated Cartesian trajectory accuracy (m / rad).
+    planning_position_tolerance: 0.02
+    planning_orientation_tolerance: 0.0872664626  # 5 degrees
+    # Measured alignment, contact, held-state consistency, and recovery (m / rad).
+    execution_position_tolerance: 0.1
+    execution_orientation_tolerance: 0.1745329252  # 10 degrees
+    # Optional selected Pick target movement against the retained snapshot (m / rad).
+    pick_replan_on_target_movement: false
+    detection_position_tolerance: 0.1
+    detection_orientation_tolerance: 0.1745329252  # 10 degrees
+    # Legacy fallbacks below remain supported when the new settings are absent.
+    # Geometric path deviation for pose_to_pose approach, pick lift, descent,
+    # and retreat; independent of measured execution/attachment tolerances.
+    cartesian_path_position_tolerance: 0.02  # m
+    cartesian_path_orientation_tolerance: 0.0872664626  # 5 degrees
     maximum_box_pose_age: 2.5
     # Shared cancellable wait for fresh box/table detections before motion.
     tag_reacquisition_timeout: 10.0
     ik_timeout: 0.05
     # Coordinated dual-arm search. These are shared grasp hypotheses, not
     # independent per-hand pose tolerances.
-    grasp_position_tolerance: 0.1
-    grasp_orientation_tolerance: 0.1745329252  # 10 degrees
+    grasp_position_tolerance: 0.05  # 5 cm
+    grasp_orientation_tolerance: 0.0872664626  # 5 degrees
     pregrasp_distance_tolerance: 0.020
     alternate_face_alignment_tolerance: 0.261799388  # 15 degrees from best face pair
     maximum_grasp_candidates: 128
@@ -68,8 +83,8 @@ pick_place_server:
     closed_chain_validation_orientation_step: 0.0174533
     closed_chain_contact_position_error: 0.1
     closed_chain_contact_orientation_error: 0.1745329252  # 10 degrees
-    carry_search_timeout: 80.0
-    maximum_carry_candidates: 270
+    carry_search_timeout: 8.0
+    maximum_carry_candidates: 96
     carry_search_x_range: 0.05
     carry_search_y_range: 0.05
     carry_search_z_lower: 0.02
@@ -104,7 +119,7 @@ pick_place_server:
     table_tag_detections_topic: /front_center_rectify/detections
     table_tag_id: 9
     table_tag_minimum_decision_margin: 20.0
-    table_tag_stable_sample_count: 3
+    table_tag_stable_sample_count: 2
     table_tag_maximum_position_spread: 0.005
     table_tag_maximum_angular_spread: 0.0523598776  # 3 degrees
     table_tag_maximum_sample_gap: 2.5  # s; reset after a detector outage
@@ -123,8 +138,8 @@ pick_place_server:
     carry_box_pose_b: [0.25, 0.0, 0.34, 0.0, 0.0, 0.0, 1.0]
     recovery_position_tolerance: 0.1
     recovery_angular_tolerance: 0.1745329252  # 10 degrees
-    # Permit a small measured encoder/model discrepancy before Place. This is
-    # not a replacement for calibrated URDF position limits.
+    # Permit a small measured encoder/model discrepancy at held-state, saved,
+    # cached and return starts. Planned waypoints still obey URDF position limits.
     place_start_state_bounds_tolerance: 0.02  # rad, about 1.15 degrees
     initial_state: empty
     post_place_named_target: ready
@@ -144,6 +159,7 @@ pick_place_server:
     return_back_offsets: [0.0, 0.05, 0.10]
     return_out_offsets: [0.0, 0.04]
     return_longest_valid_segment_fraction: 0.005
+    controller_spline_bounds_tolerance: 0.001  # rad; spline-only allowance, 0 for strict bounds
     return_validation_joint_step: 0.01  # rad; check interpolated edges after timing
     return_path_tolerance: 0.01  # TOTG joint-space deviation tolerance
     reset_named_target: ready
@@ -153,6 +169,8 @@ pick_place_server:
     # Validate these against measured hardware tracking. The server requires
     # direct post-execution feedback satisfying them before any following phase.
     execution_settle_timeout: 10.0
+    # Also accepts saved-plan start error per joint without adding alignment
+    # or modifying the saved waypoint positions.
     execution_joint_tolerance: 0.1
     execution_velocity_tolerance: 0.05
     execution_settle_samples: 3

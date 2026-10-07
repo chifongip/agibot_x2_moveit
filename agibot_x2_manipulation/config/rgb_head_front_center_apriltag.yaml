@@ -14,6 +14,6 @@
       debug: false
     pose_estimation_method: pnp
     tag:
-      ids: [9]
-      frames: [tag9]
-      sizes: [0.136]
+      ids: [7, 9]
+      frames: [tag7, tag9]
+      sizes: [0.136, 0.136]

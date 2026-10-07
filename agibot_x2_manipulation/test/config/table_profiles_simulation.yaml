@@ -1,0 +1,13 @@
+pick_place_server:
+  ros__parameters:
+    table_profile_names: [second]
+    default_table_profile: default
+    table_profiles:
+      second:
+        tag_id: 10
+        tag_frame: tag10
+        tabletop_center: [0.1, -0.4, 0.2]
+        dimensions: [0.8, 0.5, 0.7]
+        place_offset: [-0.1, 0.1]
+        place_yaw: 0.2
+        collision_id: second_work_table

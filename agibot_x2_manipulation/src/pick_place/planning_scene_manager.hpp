@@ -1,6 +1,8 @@
 #pragma once
 
 #include <optional>
+#include <map>
+#include <mutex>
 
 #include "agibot_x2_manipulation/box_geometry.hpp"
 #include "pick_place/pick_place_config.hpp"
@@ -23,14 +25,19 @@
 namespace agibot_x2_manipulation
 {
 
-// Use the existing grasp touch policy only for coordinated disengagement.
+// Apply the grasp touch policy while preserving attached geometry.
+planning_scene::PlanningScenePtr graspContactScene(
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config);
+
+// Disengagement checks the released box as a world obstacle.
 planning_scene::PlanningScenePtr retreatContactScene(
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config);
 
 // After operator-confirmed release, clear managed detection geometry.
 bool buildResetSceneDiff(
   const planning_scene::PlanningSceneConstPtr & scene, const std::string & box_prefix,
-  const std::string & table_id, moveit_msgs::msg::PlanningScene & diff, std::string & error);
+  const std::string & table_id, moveit_msgs::msg::PlanningScene & diff, std::string & error,
+  const std::vector<std::string> & table_ids = {});
 
 struct SceneBox
 {
@@ -43,13 +50,15 @@ struct DetectionSceneSnapshot
 {
   std::vector<SceneBox> boxes;
   std::optional<SceneBox> table;
+  std::vector<SceneBox> tables;
 };
 
 bool buildDetectionSceneDiff(
   const planning_scene::PlanningSceneConstPtr & scene, const std::string & box_prefix,
   const std::string & table_id, const std::string & frame,
   const DetectionSceneSnapshot & observations, const std::set<std::string> & protected_ids,
-  bool confirmed_release, moveit_msgs::msg::PlanningScene & diff, std::string & error);
+  bool confirmed_release, moveit_msgs::msg::PlanningScene & diff, std::string & error,
+  const std::vector<std::string> & table_ids = {});
 
 class PlanningSceneManager
 {
@@ -57,13 +66,18 @@ public:
   PlanningSceneManager(
     const rclcpp::Node::SharedPtr & node, const PickPlaceConfig & config);
 
+  bool restoreSavedObjects(const moveit_msgs::msg::PlanningSceneWorld & world, bool held, std::string & error);
   bool synchronize(std::string & error);
+  bool retainDetectionObjects(std::string & error);
+  void releaseDetectionObjects();
+  bool clearCarryObstacles(std::string & error);
   planning_scene::PlanningScenePtr snapshot() const;
   planning_scene::PlanningScenePtr releasedBoxSnapshot(const Eigen::Isometry3d & pose) const;
   bool applyBox(const Eigen::Isometry3d & pose, std::string & error);
   bool applyTable(const Eigen::Isometry3d & pose, std::string & error);
   void publishTableMarker(
-    const Eigen::Isometry3d & pose, const builtin_interfaces::msg::Time & stamp);
+    const Eigen::Isometry3d & pose, const builtin_interfaces::msg::Time & stamp,
+    const std::string & profile_id = "default", const BoxDimensions * dimensions = nullptr);
   bool applyObstacleBoxes(const std::vector<SceneBox> & boxes, std::string & error);
   bool refreshResetBoxes(const std::vector<SceneBox> & boxes, std::string & error);
   bool prepareResetScene(std::string & error);
@@ -74,7 +88,7 @@ public:
   bool clearManagedBoxes(std::string & error);
   bool removeBox(std::string & error);
   bool detachBox(std::string & error);
-  bool attachBox(std::string & error);
+  bool attachBox(std::string & error, const Eigen::Isometry3d * box_to_left = nullptr);
   bool verifyBoxState(bool expect_attached, bool expect_world, std::string & error);
   bool clearBox(std::string & error);
   bool placeBox(const Eigen::Isometry3d & pose, std::string & error);
@@ -83,7 +97,8 @@ public:
   bool restoreWorldBox(
     const moveit_msgs::msg::CollisionObject & saved_object, std::string & error);
   bool beginVirtualAttachment(
-    moveit_msgs::msg::CollisionObject & saved_object, std::string & error);
+    moveit_msgs::msg::CollisionObject & saved_object, std::string & error,
+    const Eigen::Isometry3d * box_to_left = nullptr);
   bool endVirtualAttachment(
     const moveit_msgs::msg::CollisionObject & saved_object, std::string & error);
   // When collision_pairs is supplied, collect at most one contact per pair and
@@ -101,12 +116,21 @@ private:
     const Eigen::Isometry3d & pose) const;
   bool removeOwnedBox(const std::string & id, std::string & error);
   bool isManagedBoxId(const std::string & id) const;
+  bool isDetectionObjectId(const std::string & id) const;
+  void retainObject(const moveit_msgs::msg::CollisionObject & object);
+  mutable std::mutex retained_objects_mutex_;
+  std::optional<std::map<std::string, moveit_msgs::msg::CollisionObject>> retained_objects_;
+  void clearTableMarker();
+  void expireTableMarker();
+  void deleteTableMarkerLocked();
   void auditCollisionObject(
     const moveit_msgs::msg::CollisionObject & object, const char * topic) const;
 
   rclcpp::Node::SharedPtr node_;
   const PickPlaceConfig & config_;
   std::string managed_box_id_prefix_;
+  const std::string marker_frame_;
+  const double marker_maximum_age_;
   moveit::planning_interface::PlanningSceneInterface scene_interface_;
   std::set<std::string> owned_box_ids_;
   std::set<std::string> obstacle_box_ids_;
@@ -114,6 +138,10 @@ private:
   rclcpp::Subscription<moveit_msgs::msg::PlanningScene>::SharedPtr scene_audit_sub_;
   rclcpp::Subscription<moveit_msgs::msg::PlanningSceneWorld>::SharedPtr world_audit_sub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr table_marker_pub_;
+  std::mutex table_marker_mutex_;
+  std::map<std::string, visualization_msgs::msg::Marker> table_markers_;
+  std::map<std::string, rclcpp::Time> table_marker_expiries_;
+  rclcpp::TimerBase::SharedPtr table_marker_timer_;
 };
 
 }  // namespace agibot_x2_manipulation

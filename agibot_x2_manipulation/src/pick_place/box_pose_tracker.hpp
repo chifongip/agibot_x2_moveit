@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #include "agibot_x2_manipulation/box_geometry.hpp"
 
 #include <agibot_x2_manipulation_msgs/msg/box_state_array.hpp>
@@ -13,6 +15,7 @@
 #include <Eigen/Geometry>
 
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -40,16 +43,24 @@ public:
     double position_tolerance,
     double orientation_tolerance);
 
-  bool stablePose(const std::string & instance_id, TrackedBoxPose & pose) const;
+  // When supplied, not_before excludes observations captured at/before the request.
+  bool stablePose(const std::string & instance_id, TrackedBoxPose & pose,
+    const std::optional<rclcpp::Time> & not_before = {}) const;
+  // Nonblocking: absent, stale, invalid, or different-profile poses are ignored.
+  bool movedStablePose(
+    const TrackedBoxPose & reference, TrackedBoxPose & latest, std::string & detail,
+    const std::optional<rclcpp::Time> & not_before = {}) const;
   bool waitForStablePose(
     const std::string & instance_id, double timeout, const std::function<bool()> & canceled,
     TrackedBoxPose & pose, std::string & error,
-    const std::function<void()> & waiting = {}) const;
+    const std::function<void()> & waiting = {},
+    const std::optional<rclcpp::Time> & not_before = {}) const;
   bool waitForUnchangedPoses(
     const std::vector<TrackedBoxPose> & references, double timeout,
     const std::function<bool()> & canceled, std::string & error,
-    const std::function<void()> & waiting = {}) const;
-  std::map<std::string, TrackedBoxPose> freshPoses() const;
+    const std::function<void()> & waiting = {}, bool * moved = nullptr) const;
+  std::map<std::string, TrackedBoxPose> freshPoses(
+    const std::optional<rclcpp::Time> & not_before = {}) const;
   bool stillWithinTolerance(
     const TrackedBoxPose & reference, TrackedBoxPose & latest,
     std::string & error) const;
@@ -60,7 +71,8 @@ public:
 
 private:
   bool withinTolerance(
-    const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error) const;
+    const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error,
+    bool * moved = nullptr) const;
   bool waitForFresh(
     const std::function<bool(std::string &)> & ready, double timeout,
     const std::function<bool()> & canceled, const std::function<void()> & waiting,
@@ -125,10 +137,20 @@ public:
   bool waitForStablePose(
     double timeout, const std::function<bool()> & canceled,
     geometry_msgs::msg::PoseStamped & output, std::string & error,
-    const std::function<void()> & waiting = {}) const;
+    const std::function<void()> & waiting = {},
+    const std::optional<rclcpp::Time> & not_before = {}) const;
+
+  // A stable observation generation advances even when the detected pose is unchanged.
+  std::uint64_t generation() const;
+  bool waitForStablePoseAfter(
+    std::uint64_t minimum_generation, double timeout, const std::function<bool()> & canceled,
+    geometry_msgs::msg::PoseStamped & output, std::uint64_t & generation,
+    std::string & error, const std::function<void()> & waiting = {},
+    const std::optional<rclcpp::Time> & not_before = {}) const;
 
 private:
   void onDetections(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message);
+  void processPendingDetections();
   void updateStablePose(
     const Eigen::Isometry3d & sample, const builtin_interfaces::msg::Time & stamp);
 
@@ -142,11 +164,20 @@ private:
   mutable std::condition_variable stable_pose_condition_;
   TableTagPoseStabilityFilter stability_filter_;
   bool have_stable_pose_{false};
+  std::uint64_t stable_generation_{0};
   geometry_msgs::msg::PoseStamped stable_pose_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_sub_;
   StablePoseCallback stable_pose_callback_;
+  struct PendingDetection
+  {
+    builtin_interfaces::msg::Time stamp;
+    std::chrono::steady_clock::time_point deadline;
+  };
+  std::mutex pending_mutex_;
+  std::deque<PendingDetection> pending_detections_;
+  rclcpp::TimerBase::SharedPtr pending_timer_;
 };
 
 }  // namespace agibot_x2_manipulation

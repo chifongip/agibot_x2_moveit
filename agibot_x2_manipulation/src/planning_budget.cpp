@@ -6,6 +6,16 @@
 namespace agibot_x2_manipulation
 {
 
+double fastAttemptTimeout(double remaining_budget, double nominal_timeout)
+{
+  if (!std::isfinite(remaining_budget) || !std::isfinite(nominal_timeout) ||
+    remaining_budget <= 0.0 || nominal_timeout <= 0.0)
+  {
+    return 0.0;
+  }
+  return std::min(0.2 * remaining_budget, nominal_timeout);
+}
+
 double adaptiveRetryTimeout(
   double total_budget, double elapsed, std::size_t remaining_candidates)
 {

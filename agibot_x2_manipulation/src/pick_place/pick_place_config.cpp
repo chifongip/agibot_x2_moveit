@@ -17,10 +17,34 @@ namespace
 template<typename T>
 T parameter(const rclcpp::Node::SharedPtr & node, const std::string & name, const T & default_value)
 {
+  rcl_interfaces::msg::ParameterDescriptor descriptor;
+  descriptor.read_only = name == "table_tag_id" || name == "table_tag_frame" ||
+    name == "table_tag_to_tabletop_center" || name == "table_dimensions" ||
+    name == "table_tag_place_offset" || name == "table_tag_to_box_yaw" ||
+    name == "table_collision_id";
   if (node->has_parameter(name)) {
-    return node->get_parameter(name).get_value<T>();
+    const auto value = node->get_parameter(name).get_value<T>();
+    const auto existing = node->describe_parameter(name);
+    if (!descriptor.read_only || existing.read_only || !existing.dynamic_typing) {return value;}
+    node->undeclare_parameter(name);
+    return node->declare_parameter<T>(name, value, descriptor);
   }
-  return node->declare_parameter<T>(name, default_value);
+  return node->declare_parameter<T>(name, default_value, descriptor);
+}
+
+std::optional<double> optional_pose_tolerance(
+  const rclcpp::Node::SharedPtr & node, const std::string & name)
+{
+  if (!node->has_parameter(name)) {
+    node->declare_parameter(name, rclcpp::ParameterType::PARAMETER_DOUBLE);
+  }
+  rclcpp::Parameter value;
+  if (!node->get_parameter(name, value)) {return std::nullopt;}
+  const double tolerance = value.as_double();
+  if (!std::isfinite(tolerance) || tolerance <= 0.0) {
+    throw std::runtime_error(name + " must be finite and positive");
+  }
+  return tolerance;
 }
 
 std::string defaultStateFile()
@@ -93,6 +117,25 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.contact_height_offset = parameter<double>(node, "contact_height_offset", 0.0);
   config.lift_height = parameter<double>(node, "lift_height", 0.05);
   config.cartesian_step = parameter<double>(node, "cartesian_step", 0.01);
+  config.cartesian_path_position_tolerance = parameter<double>(
+    node, "cartesian_path_position_tolerance", 0.02);
+  config.cartesian_path_orientation_tolerance = parameter<double>(
+    node, "cartesian_path_orientation_tolerance", 0.0872664626);
+  for (const double value : {config.cartesian_step, config.cartesian_path_position_tolerance,
+      config.cartesian_path_orientation_tolerance})
+  {
+    if (!std::isfinite(value) || value <= 0.0) {
+      throw std::runtime_error("Cartesian step and path tolerances must be finite and positive");
+    }
+  }
+  config.planning_position_tolerance = optional_pose_tolerance(node, "planning_position_tolerance");
+  config.planning_orientation_tolerance = optional_pose_tolerance(node, "planning_orientation_tolerance");
+  config.execution_position_tolerance = optional_pose_tolerance(node, "execution_position_tolerance");
+  config.execution_orientation_tolerance = optional_pose_tolerance(node, "execution_orientation_tolerance");
+  config.pick_replan_on_target_movement = parameter<bool>(
+    node, "pick_replan_on_target_movement", false);
+  config.detection_position_tolerance = optional_pose_tolerance(node, "detection_position_tolerance");
+  config.detection_orientation_tolerance = optional_pose_tolerance(node, "detection_orientation_tolerance");
   config.max_pose_age = parameter<double>(node, "maximum_box_pose_age", 0.50);
   config.ik_timeout = parameter<double>(node, "ik_timeout", 0.05);
   config.grasp_position_tolerance = parameter<double>(node, "grasp_position_tolerance", 0.015);
@@ -298,6 +341,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   }
   config.return_ik_attempts = parameter<int>(node, "return_ik_attempts", 8);
   config.return_validation_joint_step = parameter<double>(node, "return_validation_joint_step", 0.01);
+  config.controller_spline_bounds_tolerance = parameter<double>(
+    node, "controller_spline_bounds_tolerance", 0.001);
   config.return_longest_valid_segment_fraction = parameter<double>(
     node, "return_longest_valid_segment_fraction", 0.005);
   config.return_path_tolerance = parameter<double>(node, "return_path_tolerance", 0.01);
@@ -319,6 +364,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
     config.return_planning_attempts < 1 || config.return_planning_attempts > 64 ||
     !positive(config.return_planning_time_per_attempt) || config.return_ik_attempts < 1 ||
     config.return_ik_attempts > 64 || !positive(config.return_validation_joint_step) ||
+    !std::isfinite(config.controller_spline_bounds_tolerance) ||
+    config.controller_spline_bounds_tolerance < 0.0 ||
     !positive(config.return_longest_valid_segment_fraction) ||
     config.return_longest_valid_segment_fraction > 1.0 ||
     !positive(config.return_path_tolerance) || !offsets_valid(config.return_up_offsets) ||

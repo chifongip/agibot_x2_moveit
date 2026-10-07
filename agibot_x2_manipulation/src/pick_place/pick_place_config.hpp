@@ -6,6 +6,7 @@
 #include <Eigen/Geometry>
 #include <rclcpp/rclcpp.hpp>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,7 +40,29 @@ struct PickPlaceConfig
   double pregrasp_distance{0.0};
   double contact_height_offset{0.0};
   double lift_height{0.0};
+  // Unset overrides preserve the corresponding legacy check's tolerance.
+  std::optional<double> planning_position_tolerance;
+  std::optional<double> planning_orientation_tolerance;
+  std::optional<double> execution_position_tolerance;
+  std::optional<double> execution_orientation_tolerance;
+  bool pick_replan_on_target_movement{false};
+  std::optional<double> detection_position_tolerance;
+  std::optional<double> detection_orientation_tolerance;
+  double planning_position_limit() const
+  {return planning_position_tolerance.value_or(cartesian_path_position_tolerance);}
+  double planning_orientation_limit() const
+  {return planning_orientation_tolerance.value_or(cartesian_path_orientation_tolerance);}
+  double execution_position_limit(double legacy) const
+  {return execution_position_tolerance.value_or(legacy);}
+  double execution_orientation_limit(double legacy) const
+  {return execution_orientation_tolerance.value_or(legacy);}
+  double detection_position_limit(double legacy) const
+  {return detection_position_tolerance.value_or(legacy);}
+  double detection_orientation_limit(double legacy) const
+  {return detection_orientation_tolerance.value_or(legacy);}
   double cartesian_step{0.0};
+  double cartesian_path_position_tolerance{0.02};
+  double cartesian_path_orientation_tolerance{0.0872664626};
   double max_pose_age{0.0};
   double ik_timeout{0.0};
   double grasp_position_tolerance{0.0};
@@ -86,6 +109,7 @@ struct PickPlaceConfig
   double table_tag_to_box_yaw{0.0};
   bool table_collision_enabled{false};
   std::string table_collision_id;
+  std::vector<std::string> managed_table_ids;
   BoxDimensions table_dimensions;
   double maximum_table_tag_pose_age{0.0};
   std::string table_tag_detections_topic;
@@ -120,6 +144,7 @@ struct PickPlaceConfig
   double phase_retry_delay{0.5};
   int return_ik_attempts{8};
   double return_validation_joint_step{0.01};
+  double controller_spline_bounds_tolerance{0.001};
   double return_longest_valid_segment_fraction{0.005};
   double return_path_tolerance{0.01};
   std::vector<double> return_up_offsets{0.05, 0.10, 0.15, 0.20};

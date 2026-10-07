@@ -70,7 +70,7 @@ public:
   }
 
   bool requestContinue(const std::string & task_id, unsigned int pause_id,
-    std::string & error)
+    std::string & error, const std::function<void()> & accepted = {})
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (task_id != status_.task_id || pause_id != status_.pause_id ||
@@ -79,6 +79,9 @@ public:
       error = "task is not paused at this checkpoint, or Continue was already accepted";
       return false;
     }
+    // Publish resume metadata before the worker can observe the signal.
+    // The callback must not call back into this controller.
+    if (accepted) {accepted();}
     continue_requested_ = true;
     status_.can_continue = false;
     condition_.notify_all();
@@ -88,7 +91,8 @@ public:
   bool run(const std::string & phase, bool plan_only, int attempts,
     double timeout, double delay, const Attempt & attempt, const Cancel & canceled,
     const Publish & publish, std::string & error,
-    const Cancel & terminal = []() {return false;})
+    const Cancel & terminal = []() {return false;},
+    const Cancel & completed = []() {return true;})
   {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -111,7 +115,7 @@ public:
           if (canceled()) {break;}
           {
             std::lock_guard<std::mutex> lock(mutex_);
-            status_.last_completed_phase = phase;
+            if (completed()) {status_.last_completed_phase = phase;}
             status_.status = "running";
             status_.failure.clear();
           }

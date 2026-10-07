@@ -15,10 +15,26 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace agibot_x2_manipulation
 {
+
+struct HandPosePair
+{
+  Eigen::Isometry3d left;
+  Eigen::Isometry3d right;
+};
+
+struct CartesianSegment
+{
+  std::size_t first{0};
+  std::size_t last{0};
+  HandPosePair from;
+  HandPosePair to;
+};
 
 struct PlannedGrasp
 {
@@ -33,15 +49,17 @@ struct AdaptiveCarryPlan
 {
   Eigen::Isometry3d pose{Eigen::Isometry3d::Identity()};
   CarryRoute route{CarryRoute::DIRECT};
+  std::vector<CartesianSegment> cartesian;
   moveit_msgs::msg::RobotTrajectory trajectory;
   std::shared_ptr<moveit::core::RobotState> end_state;
 };
 
 using CancelFunction = std::function<bool ()>;
+using PlanningDeadline = std::chrono::steady_clock::time_point;
 using ContinuationFunction = std::function<bool (
-      const moveit::core::RobotState &, const PlannedGrasp &, std::string &)>;
+      const moveit::core::RobotState &, const PlannedGrasp &, std::string &, PlanningDeadline)>;
 using PlaceContinuation = std::function<bool (
-      const moveit::core::RobotState &, const Eigen::Isometry3d &, std::string &)>;
+      const moveit::core::RobotState &, const Eigen::Isometry3d &, std::string &, PlanningDeadline)>;
 
 class DualArmMotionPlanner
 {
@@ -100,7 +118,8 @@ public:
     const Eigen::Isometry3d & nominal_target_pose, bool plan_only,
     const Eigen::Isometry3d & box_to_left_contact,
     const Eigen::Isometry3d & box_to_right_contact, AdaptiveCarryPlan & selected,
-    std::string & error, const CancelFunction & canceled);
+    std::string & error, const CancelFunction & canceled,
+    std::optional<double> pick_lift_top = std::nullopt);
   bool planAdaptiveCarryTransition(
     const moveit::core::RobotState & start, const Eigen::Isometry3d & from_pose,
     const Eigen::Isometry3d & nominal_target_pose,
@@ -126,6 +145,9 @@ public:
   void updateHeldPoseFromRobot();
   bool validateHeldClosure(std::string & error);
   void clearGraspMarkers();
+  void traceReuse(const std::string & stage, bool reused, const std::string & reason, double seconds);
+  std::vector<CartesianSegment> cartesianSegments() const;
+  std::size_t searchCalls() const;
 
 private:
   class Impl;

@@ -1,4 +1,5 @@
 #include "pick_place/planning_scene_manager.hpp"
+#include "agibot_x2_manipulation/detection_marker.hpp"
 
 #include <moveit/collision_detection/collision_matrix.h>
 #include <moveit/collision_detection/collision_common.h>
@@ -7,6 +8,7 @@
 #include <tf2_eigen/tf2_eigen.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <cmath>
 #include <sstream>
@@ -72,11 +74,10 @@ std::vector<std::string> boxTouchLinks(const PickPlaceConfig & config)
 
 }  // namespace
 
-planning_scene::PlanningScenePtr retreatContactScene(
+planning_scene::PlanningScenePtr graspContactScene(
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config)
 {
   auto copy = planning_scene::PlanningScene::clone(scene);
-  copy->getCurrentStateNonConst().clearAttachedBody(config.box_id);
   auto & acm = copy->getAllowedCollisionMatrixNonConst();
   acm.setEntry(config.box_id, false);
   acm.setDefaultEntry(config.box_id, false);
@@ -84,9 +85,18 @@ planning_scene::PlanningScenePtr retreatContactScene(
   return copy;
 }
 
+planning_scene::PlanningScenePtr retreatContactScene(
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config)
+{
+  auto copy = graspContactScene(scene, config);
+  copy->getCurrentStateNonConst().clearAttachedBody(config.box_id);
+  return copy;
+}
+
 bool buildResetSceneDiff(
   const planning_scene::PlanningSceneConstPtr & scene, const std::string & box_prefix,
-  const std::string & table_id, moveit_msgs::msg::PlanningScene & diff, std::string & error)
+  const std::string & table_id, moveit_msgs::msg::PlanningScene & diff, std::string & error,
+  const std::vector<std::string> & table_ids)
 {
   diff = moveit_msgs::msg::PlanningScene();
   diff.is_diff = true;
@@ -97,6 +107,9 @@ bool buildResetSceneDiff(
   }
   auto released = planning_scene::PlanningScene::clone(scene);
   std::set<std::string> removed;
+  const auto is_table = [&](const std::string & id) {
+      return id == table_id || std::find(table_ids.begin(), table_ids.end(), id) != table_ids.end();
+    };
   const auto managed = [&box_prefix](const std::string & id) {
       return id == box_prefix || id.rfind(box_prefix + "_", 0) == 0;
     };
@@ -119,7 +132,7 @@ bool buildResetSceneDiff(
   }
   auto & acm = released->getAllowedCollisionMatrixNonConst();
   for (const auto & id : released->getWorld()->getObjectIds()) {
-    if (managed(id) || id == table_id) {
+    if (managed(id) || is_table(id)) {
       removed.insert(id);
     }
   }
@@ -139,24 +152,29 @@ bool buildDetectionSceneDiff(
   const planning_scene::PlanningSceneConstPtr & scene, const std::string & box_prefix,
   const std::string & table_id, const std::string & frame,
   const DetectionSceneSnapshot & observations, const std::set<std::string> & protected_ids,
-  bool confirmed_release, moveit_msgs::msg::PlanningScene & diff, std::string & error)
+  bool confirmed_release, moveit_msgs::msg::PlanningScene & diff, std::string & error,
+  const std::vector<std::string> & table_ids)
 {
   diff = moveit_msgs::msg::PlanningScene();
+  const auto is_table = [&](const std::string & id) {
+      return id == table_id || std::find(table_ids.begin(), table_ids.end(), id) != table_ids.end();
+    };
   const auto managed = [&box_prefix](const std::string & id) {
       return id == box_prefix || id.rfind(box_prefix + "_", 0) == 0;
     };
   std::vector<SceneBox> objects = observations.boxes;
   if (observations.table) {
-    if (observations.table->id != table_id) {
+    if (!is_table(observations.table->id)) {
       error = "unexpected detection table ID";
       return false;
     }
     objects.push_back(*observations.table);
   }
+  objects.insert(objects.end(), observations.tables.begin(), observations.tables.end());
   std::set<std::string> ids;
   for (const auto & box : objects) {
     const auto & rotation = box.pose.linear();
-    if ((!managed(box.id) && box.id != table_id) || box.id.empty() ||
+    if ((!managed(box.id) && !is_table(box.id)) || box.id.empty() ||
       !ids.insert(box.id).second || protected_ids.count(box.id) != 0U ||
       !box.pose.matrix().allFinite() ||
       !(rotation.transpose() * rotation).isApprox(Eigen::Matrix3d::Identity(), 1e-6) ||
@@ -190,7 +208,7 @@ bool buildDetectionSceneDiff(
       error = "confirmed release cannot protect task objects";
       return false;
     }
-    if (!buildResetSceneDiff(scene, box_prefix, table_id, diff, error)) {
+    if (!buildResetSceneDiff(scene, box_prefix, table_id, diff, error, table_ids)) {
       return false;
     }
     collision_detection::AllowedCollisionMatrix acm(diff.allowed_collision_matrix);
@@ -204,7 +222,7 @@ bool buildDetectionSceneDiff(
     diff.robot_state.is_diff = true;
     auto acm = scene->getAllowedCollisionMatrix();
     for (const auto & id : scene->getWorld()->getObjectIds()) {
-      if ((managed(id) || id == table_id) && protected_objects.count(id) == 0U) {
+      if ((managed(id) || is_table(id)) && protected_objects.count(id) == 0U) {
         moveit_msgs::msg::CollisionObject removal;
         removal.id = id;
         removal.operation = moveit_msgs::msg::CollisionObject::REMOVE;
@@ -244,7 +262,7 @@ bool PlanningSceneManager::updateDetectionScene(
   }
   moveit_msgs::msg::PlanningScene diff;
   if (!buildDetectionSceneDiff(snapshot(), managed_box_id_prefix_, config_.table_collision_id,
-      config_.planning_frame, observations, protected_ids, confirmed_release, diff, error))
+      config_.planning_frame, observations, protected_ids, confirmed_release, diff, error, config_.managed_table_ids))
   {
     return false;
   }
@@ -252,6 +270,7 @@ bool PlanningSceneManager::updateDetectionScene(
     error = "MoveIt rejected detection scene update";
     return false;
   }
+  for (const auto & object : diff.world.collision_objects) {retainObject(object);}
   if (!synchronize(error)) {
     return false;
   }
@@ -264,7 +283,9 @@ bool PlanningSceneManager::updateDetectionScene(
   for (const auto & object : diff.world.collision_objects) {
     const bool observed = std::any_of(observations.boxes.begin(), observations.boxes.end(),
       [&object](const SceneBox & box) {return box.id == object.id;}) ||
-      (observations.table && observations.table->id == object.id);
+      (observations.table && observations.table->id == object.id) ||
+      std::any_of(observations.tables.begin(), observations.tables.end(),
+      [&object](const SceneBox & table) {return table.id == object.id;});
     RCLCPP_DEBUG(node_->get_logger(), "Detection scene %s: %s (%s)",
       object.operation == moveit_msgs::msg::CollisionObject::REMOVE ? "remove" : "add/update",
       object.id.c_str(), observed ? "fresh replacement" : "absent/stale detection");
@@ -292,13 +313,18 @@ moveit_msgs::msg::CollisionObject PlanningSceneManager::makeBoxObject(
 
 PlanningSceneManager::PlanningSceneManager(
   const rclcpp::Node::SharedPtr & node, const PickPlaceConfig & config)
-: node_(node), config_(config), managed_box_id_prefix_(config.box_id)
+: node_(node), config_(config), managed_box_id_prefix_(config.box_id),
+  marker_frame_(config.planning_frame), marker_maximum_age_(config.maximum_table_tag_pose_age)
 {
   scene_monitor_ = std::make_shared<planning_scene_monitor::PlanningSceneMonitor>(
     node_, "robot_description", "x2_pick_place_scene_monitor");
   if (!scene_monitor_->getPlanningScene()) {
     throw std::runtime_error("failed to create MoveIt planning scene monitor");
   }
+  // Humble applies incoming full snapshots as diffs when no parent scene is
+  // maintained. Keep a parent so synchronization also removes absent objects,
+  // allowing Continue to observe an obstacle removed through MoveIt's service.
+  scene_monitor_->monitorDiffs(true);
   scene_monitor_->startStateMonitor();
   scene_monitor_->startSceneMonitor();
   const bool load_octomap_monitor =
@@ -327,6 +353,9 @@ PlanningSceneManager::PlanningSceneManager(
     });
   table_marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
     "/table_markers", rclcpp::QoS(1).transient_local());
+  table_marker_timer_ = node_->create_wall_timer(
+    std::chrono::milliseconds(100), [this]() {expireTableMarker();});
+  clearTableMarker();
 }
 
 void PlanningSceneManager::auditCollisionObject(
@@ -359,11 +388,81 @@ bool PlanningSceneManager::synchronize(std::string & error)
       error = "failed to synchronize the refreshed MoveIt planning scene";
       return false;
     }
+    // Humble clears the child diff before replacing its parent snapshot. World
+    // geometry uses a copy, so rebuild it once more from the updated parent.
+    planning_scene_monitor::LockedPlanningSceneRW synchronized(scene_monitor_);
+    synchronized->clearDiffs();
     return true;
   } catch (const std::exception & exception) {
     error = "planning-scene synchronization failed: " + std::string(exception.what());
     return false;
   }
+}
+
+bool PlanningSceneManager::isDetectionObjectId(const std::string & id) const
+{
+  return isManagedBoxId(id) || id == config_.table_collision_id ||
+    std::find(config_.managed_table_ids.begin(), config_.managed_table_ids.end(), id) !=
+    config_.managed_table_ids.end();
+}
+
+bool PlanningSceneManager::retainDetectionObjects(std::string & error)
+{
+  if (!synchronize(error)) {return false;}
+  planning_scene_monitor::LockedPlanningSceneRO scene(scene_monitor_);
+  moveit_msgs::msg::PlanningScene message;
+  scene->getPlanningSceneMsg(message);
+  std::lock_guard<std::mutex> lock(retained_objects_mutex_);
+  if (retained_objects_) {return true;}
+  retained_objects_.emplace();
+  for (const auto & object : message.world.collision_objects) {
+    if (isDetectionObjectId(object.id)) {retained_objects_->emplace(object.id, object);}
+  }
+  return true;
+}
+
+void PlanningSceneManager::releaseDetectionObjects()
+{
+  std::lock_guard<std::mutex> lock(retained_objects_mutex_);
+  retained_objects_.reset();
+}
+
+void PlanningSceneManager::retainObject(const moveit_msgs::msg::CollisionObject & object)
+{
+  std::lock_guard<std::mutex> lock(retained_objects_mutex_);
+  if (!retained_objects_ || !isDetectionObjectId(object.id)) {return;}
+  if (object.operation == moveit_msgs::msg::CollisionObject::REMOVE) {
+    retained_objects_->erase(object.id);
+  } else {retained_objects_->insert_or_assign(object.id, object);}
+}
+
+bool PlanningSceneManager::clearCarryObstacles(std::string & error)
+{
+  if (!synchronize(error)) {return false;}
+  const auto current = snapshot();
+  std::vector<std::string> removed;
+  for (const auto & id : current->getWorld()->getObjectIds()) {
+    if ((isManagedBoxId(id) || (id == config_.table_collision_id ||
+        std::find(config_.managed_table_ids.begin(), config_.managed_table_ids.end(), id) !=
+        config_.managed_table_ids.end())) &&
+      !current->getCurrentState().hasAttachedBody(id))
+    {
+      removed.push_back(id);
+    }
+  }
+  if (removed.empty()) {clearTableMarker(); return true;}
+  const std::set<std::string> protected_ids =
+    current->getCurrentState().hasAttachedBody(config_.box_id) ?
+    std::set<std::string>{config_.box_id} : std::set<std::string>{};
+  if (!updateDetectionScene({}, protected_ids, false, error)) {return false;}
+  clearTableMarker();
+  for (const auto & id : removed) {
+    RCLCPP_INFO(node_->get_logger(), "Carry scene removed previous perception obstacle: %s",
+      id.c_str());
+  }
+  RCLCPP_INFO(node_->get_logger(),
+    "Carry scene retains attached objects and external obstacles; no detections required");
+  return true;
 }
 
 bool PlanningSceneManager::applyBox(const Eigen::Isometry3d & pose, std::string & error)
@@ -374,6 +473,7 @@ bool PlanningSceneManager::applyBox(const Eigen::Isometry3d & pose, std::string 
       error = "MoveIt rejected the box collision object";
       return false;
     }
+    retainObject(object);
     owned_box_ids_.insert(config_.box_id);
     return true;
   } catch (const std::exception & exception) {
@@ -385,7 +485,21 @@ bool PlanningSceneManager::applyBox(const Eigen::Isometry3d & pose, std::string 
 planning_scene::PlanningScenePtr PlanningSceneManager::snapshot() const
 {
   planning_scene_monitor::LockedPlanningSceneRO scene(scene_monitor_);
-  return planning_scene::PlanningScene::clone(scene);
+  auto result = planning_scene::PlanningScene::clone(scene);
+  std::lock_guard<std::mutex> lock(retained_objects_mutex_);
+  if (retained_objects_) {
+    for (const auto & id : result->getWorld()->getObjectIds()) {
+      if (isDetectionObjectId(id)) {result->getWorldNonConst()->removeObject(id);}
+    }
+    for (const auto & entry : *retained_objects_) {
+      if (!result->getCurrentState().hasAttachedBody(entry.first)) {
+        if (!result->processCollisionObjectMsg(entry.second)) {
+          throw std::runtime_error("cannot restore retained detection object: " + entry.first);
+        }
+      }
+    }
+  }
+  return result;
 }
 
 planning_scene::PlanningScenePtr PlanningSceneManager::releasedBoxSnapshot(
@@ -411,6 +525,7 @@ bool PlanningSceneManager::applyTable(const Eigen::Isometry3d & pose, std::strin
       error = "MoveIt rejected the table collision object";
       return false;
     }
+    retainObject(object);
     return true;
   } catch (const std::exception & exception) {
     error = "failed to apply the table collision object: " + std::string(exception.what());
@@ -419,26 +534,86 @@ bool PlanningSceneManager::applyTable(const Eigen::Isometry3d & pose, std::strin
 }
 
 void PlanningSceneManager::publishTableMarker(
-  const Eigen::Isometry3d & pose, const builtin_interfaces::msg::Time & stamp)
+  const Eigen::Isometry3d & pose, const builtin_interfaces::msg::Time & stamp,
+  const std::string & profile_id, const BoxDimensions * dimensions)
 {
+  const auto observed_at = rclcpp::Time(stamp, node_->get_clock()->get_clock_type());
+  const auto lifetime = detectionMarkerLifetime(
+    node_->now(), observed_at, marker_maximum_age_);
+  if (!lifetime) {return;}
+  std::lock_guard<std::mutex> lock(table_marker_mutex_);
   visualization_msgs::msg::Marker marker;
-  marker.header.frame_id = config_.planning_frame;
+  marker.header.frame_id = marker_frame_;
   marker.header.stamp = stamp;
-  marker.ns = "collision_table";
+  marker.ns = profile_id == "default" ? "detected_table" : "detected_table/" + profile_id;
   marker.id = 0;
   marker.type = visualization_msgs::msg::Marker::CUBE;
   marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.lifetime = *lifetime;
   marker.pose = toPoseMsg(pose);
-  marker.scale.x = config_.table_dimensions.length;
-  marker.scale.y = config_.table_dimensions.width;
-  marker.scale.z = config_.table_dimensions.height;
+  const auto & size = dimensions ? *dimensions : config_.table_dimensions;
+  marker.scale.x = size.length;
+  marker.scale.y = size.width;
+  marker.scale.z = size.height;
   marker.color.r = 0.85F;
   marker.color.g = 0.55F;
   marker.color.b = 0.15F;
   marker.color.a = 0.35F;
 
   visualization_msgs::msg::MarkerArray markers;
-  markers.markers.push_back(marker);
+  table_markers_.insert_or_assign(profile_id, marker);
+  for (const auto & entry : table_markers_) {markers.markers.push_back(entry.second);}
+  auto legacy = marker;
+  legacy.ns = "collision_table";
+  legacy.action = visualization_msgs::msg::Marker::DELETE;
+  markers.markers.push_back(legacy);
+  table_marker_expiries_.insert_or_assign(profile_id,
+    observed_at + rclcpp::Duration::from_seconds(marker_maximum_age_));
+  table_marker_pub_->publish(markers);
+}
+
+void PlanningSceneManager::clearTableMarker()
+{
+  std::lock_guard<std::mutex> lock(table_marker_mutex_);
+  deleteTableMarkerLocked();
+}
+
+void PlanningSceneManager::deleteTableMarkerLocked()
+{
+  visualization_msgs::msg::MarkerArray markers;
+  for (const auto * ns : {"detected_table", "collision_table"}) {
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = marker_frame_;
+    marker.ns = ns;
+    marker.id = 0;
+    marker.action = visualization_msgs::msg::Marker::DELETE;
+    markers.markers.push_back(marker);
+  }
+  for (const auto & entry : table_markers_) {
+    auto marker = entry.second;
+    marker.action = visualization_msgs::msg::Marker::DELETE;
+    markers.markers.push_back(marker);
+  }
+  table_markers_.clear();
+  table_marker_expiries_.clear();
+  table_marker_pub_->publish(markers);
+}
+
+void PlanningSceneManager::expireTableMarker()
+{
+  std::lock_guard<std::mutex> lock(table_marker_mutex_);
+  visualization_msgs::msg::MarkerArray markers;
+  const auto now = node_->now();
+  for (auto it = table_marker_expiries_.begin(); it != table_marker_expiries_.end();) {
+    if (now < it->second) {++it; continue;}
+    auto marker = table_markers_.at(it->first);
+    marker.action = visualization_msgs::msg::Marker::DELETE;
+    markers.markers.push_back(marker);
+    table_markers_.erase(it->first);
+    it = table_marker_expiries_.erase(it);
+  }
+  if (markers.markers.empty()) {return;}
+  for (const auto & entry : table_markers_) {markers.markers.push_back(entry.second);}
   table_marker_pub_->publish(markers);
 }
 
@@ -464,6 +639,10 @@ bool PlanningSceneManager::removeOwnedBox(const std::string & id, std::string & 
         return false;
       }
     }
+    moveit_msgs::msg::CollisionObject removed;
+    removed.id = id;
+    removed.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    retainObject(removed);
     return true;
   } catch (const std::exception & exception) {
     error = "failed to remove owned box '" + id + "': " + exception.what();
@@ -503,12 +682,13 @@ bool PlanningSceneManager::applyObstacleBoxes(
 
   for (const auto & box : boxes) {
     try {
-      if (!scene_interface_.applyCollisionObject(
-          makeBoxObject(box.id, box.dimensions, box.pose)))
+      const auto object = makeBoxObject(box.id, box.dimensions, box.pose);
+      if (!scene_interface_.applyCollisionObject(object))
       {
         error = "MoveIt rejected visible-box obstacle '" + box.id + "'";
         return false;
       }
+      retainObject(object);
     } catch (const std::exception & exception) {
       error = "failed to apply visible-box obstacle '" + box.id + "': " + exception.what();
       return false;
@@ -538,7 +718,7 @@ bool PlanningSceneManager::prepareResetScene(std::string & error)
   }
   moveit_msgs::msg::PlanningScene diff;
   if (!buildResetSceneDiff(snapshot(), managed_box_id_prefix_, config_.table_collision_id,
-      diff, error) ||
+      diff, error, config_.managed_table_ids) ||
     !scene_interface_.applyPlanningScene(diff))
   {
     if (error.empty()) {
@@ -619,17 +799,19 @@ bool PlanningSceneManager::clearManagedBoxes(std::string & error)
 bool PlanningSceneManager::removeBox(std::string & error)
 {
   try {
-    if (scene_interface_.getObjects({config_.box_id}).empty()) {
-      return true;
-    }
     moveit_msgs::msg::CollisionObject object;
     object.header.frame_id = config_.planning_frame;
     object.id = config_.box_id;
     object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    if (scene_interface_.getObjects({config_.box_id}).empty()) {
+      retainObject(object);
+      return true;
+    }
     if (!scene_interface_.applyCollisionObject(object)) {
       error = "MoveIt rejected removal of the box collision object";
       return false;
     }
+    retainObject(object);
     return true;
   } catch (const std::exception & exception) {
     error = "failed to remove the box collision object: " + std::string(exception.what());
@@ -657,7 +839,34 @@ bool PlanningSceneManager::detachBox(std::string & error)
   }
 }
 
-bool PlanningSceneManager::attachBox(std::string & error)
+bool PlanningSceneManager::restoreSavedObjects(
+  const moveit_msgs::msg::PlanningSceneWorld & world, bool held, std::string & error)
+{
+  if (!synchronize(error)) {return false;}
+  moveit_msgs::msg::PlanningScene diff;
+  diff.is_diff = true;
+  diff.robot_state.is_diff = true;
+  const auto current = snapshot();
+  for (const auto & id : current->getWorld()->getObjectIds()) {
+    if (!isDetectionObjectId(id)) {continue;}
+    moveit_msgs::msg::CollisionObject object;
+    object.id = id;
+    object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    diff.world.collision_objects.push_back(object);
+  }
+  for (auto object : world.collision_objects) {
+    if (!isDetectionObjectId(object.id) || (held && object.id == config_.box_id)) {continue;}
+    object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    diff.world.collision_objects.push_back(std::move(object));
+  }
+  if (!scene_interface_.applyPlanningScene(diff)) {
+    error = "failed to restore saved detection geometry"; return false;
+  }
+  for (const auto & object : diff.world.collision_objects) {retainObject(object);}
+  return synchronize(error);
+}
+
+bool PlanningSceneManager::attachBox(std::string & error, const Eigen::Isometry3d * box_to_left)
 {
   try {
     // A previous request may have succeeded before its verification timed out.
@@ -672,8 +881,13 @@ bool PlanningSceneManager::attachBox(std::string & error)
     }
     moveit_msgs::msg::AttachedCollisionObject object;
     object.link_name = config_.left_tcp;
-    object.object.id = config_.box_id;
-    object.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    if (box_to_left) {
+      object.object = makeBoxObject(config_.box_id, config_.dimensions, box_to_left->inverse());
+      object.object.header.frame_id = config_.left_tcp;
+    } else {
+      object.object.id = config_.box_id;
+      object.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    }
     object.touch_links = boxTouchLinks(config_);
     if (!scene_interface_.applyAttachedCollisionObject(object)) {
       error = "MoveIt rejected box attachment to the planning scene";
@@ -760,6 +974,7 @@ bool PlanningSceneManager::restoreWorldBox(
       error = "MoveIt rejected restoration of the world box";
       return false;
     }
+    retainObject(object);
     return verifyBoxState(false, true, error);
   } catch (const std::exception & exception) {
     error = "failed to restore the world box: " + std::string(exception.what());
@@ -768,7 +983,8 @@ bool PlanningSceneManager::restoreWorldBox(
 }
 
 bool PlanningSceneManager::beginVirtualAttachment(
-  moveit_msgs::msg::CollisionObject & saved_object, std::string & error)
+  moveit_msgs::msg::CollisionObject & saved_object, std::string & error,
+  const Eigen::Isometry3d * box_to_left)
 {
   try {
     const auto objects = scene_interface_.getObjects({config_.box_id});
@@ -783,7 +999,16 @@ bool PlanningSceneManager::beginVirtualAttachment(
       std::string(exception.what());
     return false;
   }
-  return attachBox(error);
+  // Local spline checks must observe the attachment acknowledged by MoveIt.
+  const bool attached = attachBox(error, box_to_left);
+  if (!attached) {return false;}
+  if (synchronize(error)) {return true;}
+  const auto synchronization_error = error;
+  std::string restore_error;
+  if (!endVirtualAttachment(saved_object, restore_error)) {
+    error = synchronization_error + "; virtual attachment cleanup failed: " + restore_error;
+  } else {error = synchronization_error;}
+  return false;
 }
 
 bool PlanningSceneManager::endVirtualAttachment(
@@ -796,7 +1021,7 @@ bool PlanningSceneManager::collisionFree(
   moveit::core::RobotState & state, bool allow_pad_contact, bool ignore_box,
   std::string * collision_pairs) const
 {
-  planning_scene_monitor::LockedPlanningSceneRO scene(scene_monitor_);
+  const auto scene = snapshot();
   collision_detection::AllowedCollisionMatrix acm = scene->getAllowedCollisionMatrix();
   if (ignore_box) {
     acm.setEntry(config_.box_id, true);
@@ -821,8 +1046,7 @@ bool PlanningSceneManager::collisionFreeWithBox(
   moveit::core::RobotState & state, const Eigen::Isometry3d & box_pose,
   bool allow_pad_contact, std::string * collision_pairs) const
 {
-  planning_scene_monitor::LockedPlanningSceneRO locked(scene_monitor_);
-  auto scene = locked->diff();
+  auto scene = snapshot();
   moveit_msgs::msg::CollisionObject object;
   object.header.frame_id = config_.planning_frame;
   object.id = config_.box_id;

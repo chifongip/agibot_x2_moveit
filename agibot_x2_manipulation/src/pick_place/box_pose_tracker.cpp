@@ -19,11 +19,15 @@ Eigen::Isometry3d toEigen(const geometry_msgs::msg::Pose & pose)
 {
   Eigen::Quaterniond rotation(
     pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z);
+  const Eigen::Vector3d position(pose.position.x, pose.position.y, pose.position.z);
+  if (!position.allFinite() || !rotation.coeffs().allFinite() || !std::isfinite(rotation.norm())) {
+    throw std::invalid_argument("pose contains non-finite values");
+  }
   if (rotation.norm() < 1e-9) {
     throw std::invalid_argument("pose quaternion has zero length");
   }
   Eigen::Isometry3d result = Eigen::Isometry3d::Identity();
-  result.translation() = Eigen::Vector3d(pose.position.x, pose.position.y, pose.position.z);
+  result.translation() = position;
   result.linear() = rotation.normalized().toRotationMatrix();
   return result;
 }
@@ -140,12 +144,15 @@ BoxPoseTracker::BoxPoseTracker(
 }
 
 bool BoxPoseTracker::stablePose(
-  const std::string & instance_id, TrackedBoxPose & pose) const
+  const std::string & instance_id, TrackedBoxPose & pose,
+  const std::optional<rclcpp::Time> & not_before) const
 {
   std::lock_guard<std::mutex> lock(mutex_);
-  const auto fresh = [this](const TrackedBoxPose & candidate) {
-      return candidate.pose.header.frame_id == planning_frame_ &&
-             (node_->now() - candidate.pose.header.stamp).seconds() <= maximum_age_;
+  const auto fresh = [this, &not_before](const TrackedBoxPose & candidate) {
+      const rclcpp::Time stamp(candidate.pose.header.stamp, node_->get_clock()->get_clock_type());
+      const double age = (node_->now() - stamp).seconds();
+      return candidate.pose.header.frame_id == planning_frame_ && age >= 0.0 &&
+             age <= maximum_age_ && (!not_before || stamp > *not_before);
     };
   if (!instance_id.empty()) {
     const auto found = latest_poses_.find(instance_id);
@@ -172,6 +179,18 @@ bool BoxPoseTracker::stablePose(
   }
   pose = *selected;
   return true;
+}
+
+bool BoxPoseTracker::movedStablePose(
+  const TrackedBoxPose & reference, TrackedBoxPose & latest, std::string & detail,
+  const std::optional<rclcpp::Time> & not_before) const
+{
+  detail.clear();
+  if (!stablePose(reference.instance_id, latest, not_before)) {return false;}
+  bool moved = false;
+  withinTolerance(reference, latest, detail, &moved);
+  if (!moved) {detail.clear();}
+  return moved;
 }
 
 bool BoxPoseTracker::waitForFresh(
@@ -211,18 +230,21 @@ bool BoxPoseTracker::waitForFresh(
 
 bool BoxPoseTracker::waitForStablePose(
   const std::string & instance_id, double timeout, const std::function<bool()> & canceled,
-  TrackedBoxPose & pose, std::string & error, const std::function<void()> & waiting) const
+  TrackedBoxPose & pose, std::string & error, const std::function<void()> & waiting,
+  const std::optional<rclcpp::Time> & not_before) const
 {
-  return waitForFresh([&](std::string &) {return stablePose(instance_id, pose);},
-    timeout, canceled, waiting, instance_id.empty() ? "a uniquely selectable fresh box pose" :
-    "fresh box pose for instance " + instance_id, error);
+  return waitForFresh([&](std::string &) {return stablePose(instance_id, pose, not_before);},
+    timeout, canceled, waiting, (instance_id.empty() ? "a uniquely selectable fresh box pose" :
+    "fresh box pose for instance " + instance_id) +
+    std::string(not_before ? " captured after the action request" : ""), error);
 }
 
 bool BoxPoseTracker::waitForUnchangedPoses(
   const std::vector<TrackedBoxPose> & references, double timeout,
   const std::function<bool()> & canceled, std::string & error,
-  const std::function<void()> & waiting) const
+  const std::function<void()> & waiting, bool * moved) const
 {
+  if (moved) {*moved = false;}
   // One deadline for the whole snapshot, rather than a timeout per missing tag.
   return waitForFresh([&](std::string & check_error) {
       const auto fresh = freshPoses();
@@ -231,7 +253,7 @@ bool BoxPoseTracker::waitForUnchangedPoses(
         const auto found = fresh.find(reference.instance_id);
         if (found == fresh.end()) {
           missing = true;
-        } else if (!withinTolerance(reference, found->second, check_error)) {
+        } else if (!withinTolerance(reference, found->second, check_error, moved)) {
           check_error = "visible box instance '" + reference.instance_id +
             "' changed before motion: " + check_error;
           return false;
@@ -241,14 +263,17 @@ bool BoxPoseTracker::waitForUnchangedPoses(
     }, timeout, canceled, waiting, "fresh detections for the planned box snapshot", error);
 }
 
-std::map<std::string, TrackedBoxPose> BoxPoseTracker::freshPoses() const
+std::map<std::string, TrackedBoxPose> BoxPoseTracker::freshPoses(
+  const std::optional<rclcpp::Time> & not_before) const
 {
   std::lock_guard<std::mutex> lock(mutex_);
   std::map<std::string, TrackedBoxPose> result;
   for (const auto & entry : latest_poses_) {
     const auto & candidate = entry.second;
-    if (candidate.pose.header.frame_id == planning_frame_ &&
-      (node_->now() - candidate.pose.header.stamp).seconds() <= maximum_age_)
+    const rclcpp::Time stamp(candidate.pose.header.stamp, node_->get_clock()->get_clock_type());
+    const double age = (node_->now() - stamp).seconds();
+    if (candidate.pose.header.frame_id == planning_frame_ && age >= 0.0 &&
+      age <= maximum_age_ && (!not_before || stamp > *not_before))
     {
       result.emplace(entry.first, candidate);
     }
@@ -268,28 +293,32 @@ bool BoxPoseTracker::stillWithinTolerance(
 }
 
 bool BoxPoseTracker::withinTolerance(
-  const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error) const
+  const TrackedBoxPose & reference, const TrackedBoxPose & latest, std::string & error,
+  bool * moved) const
 {
   if (latest.profile_id != reference.profile_id) {
     error = "box profile changed before approach";
     return false;
   }
-  Eigen::Isometry3d current;
+  Eigen::Isometry3d current, reference_pose;
   try {
     current = toEigen(latest.pose.pose.pose);
+    reference_pose = toEigen(reference.pose.pose.pose);
   } catch (const std::exception & exception) {
     error = exception.what();
     return false;
   }
-  const Eigen::Isometry3d reference_pose = toEigen(reference.pose.pose.pose);
   const double position_error = (current.translation() - reference_pose.translation()).norm();
   const Eigen::Quaterniond reference_q(reference_pose.linear());
   const Eigen::Quaterniond current_q(current.linear());
   const double angular_error = 2.0 * std::acos(
     std::clamp(std::abs(reference_q.dot(current_q)), 0.0, 1.0));
   if (position_error > position_tolerance_ || angular_error > orientation_tolerance_) {
-    error = "box moved after planning (position=" + std::to_string(position_error) +
-      " m, angle=" + std::to_string(angular_error) + " rad)";
+    if (moved) {*moved = true;}
+    error = "box moved after planning: " + reference.instance_id +
+      " (position=" + std::to_string(position_error) + " m, limit=" +
+      std::to_string(position_tolerance_) + "; angle=" + std::to_string(angular_error) +
+      " rad, limit=" + std::to_string(orientation_tolerance_) + ")";
     return false;
   }
   return true;
@@ -335,61 +364,56 @@ TableTagPoseTracker::TableTagPoseTracker(
   detections_sub_ = node_->create_subscription<apriltag_msgs::msg::AprilTagDetectionArray>(
     std::move(detections_topic), rclcpp::SensorDataQoS(),
     std::bind(&TableTagPoseTracker::onDetections, this, std::placeholders::_1));
+  pending_timer_ = node_->create_wall_timer(std::chrono::milliseconds(20),
+    std::bind(&TableTagPoseTracker::processPendingDetections, this));
 }
 
 void TableTagPoseTracker::onDetections(
   const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message)
 {
-  const auto detection = std::find_if(
-    message->detections.begin(), message->detections.end(),
+  const auto detection = std::find_if(message->detections.begin(), message->detections.end(),
     [this](const auto & item) {
-      return item.id == tag_id_ && item.decision_margin >= minimum_decision_margin_;
+      return item.id == tag_id_ && std::isfinite(item.decision_margin) &&
+             item.decision_margin >= minimum_decision_margin_;
     });
-  if (detection == message->detections.end()) {
-    return;
+  if (detection == message->detections.end()) {return;}
+  const rclcpp::Time stamp(message->header.stamp);
+  const double age = (node_->now() - stamp).seconds();
+  if (stamp.nanoseconds() == 0 || age < 0.0 || age > maximum_age_) {return;}
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    if (pending_detections_.size() >= 64) {pending_detections_.pop_front();}
+    pending_detections_.push_back({message->header.stamp,
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(500)});
   }
+  processPendingDetections();
+}
 
-  try {
-    const rclcpp::Time detection_stamp(message->header.stamp);
-    if (detection_stamp.nanoseconds() == 0) {
-      RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "Table tag detection rejected because its timestamp is zero");
-      return;
+void TableTagPoseTracker::processPendingDetections()
+{
+  std::lock_guard<std::mutex> lock(pending_mutex_);
+  while (!pending_detections_.empty()) {
+    const auto pending = pending_detections_.front();
+    const rclcpp::Time stamp(pending.stamp);
+    const double age = (node_->now() - stamp).seconds();
+    if (age < 0.0 || age > maximum_age_ ||
+      std::chrono::steady_clock::now() >= pending.deadline)
+    {
+      pending_detections_.pop_front();
+      continue;
     }
-    if ((node_->now() - detection_stamp).seconds() > maximum_age_) {
-      RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "Table tag detection rejected because it is older than %.3f s", maximum_age_);
+    try {
+      const auto transform = tf_buffer_.lookupTransform(planning_frame_, tag_frame_, stamp);
+      updateStablePose(tf2::transformToEigen(transform), pending.stamp);
+      pending_detections_.pop_front();
+    } catch (const tf2::TransformException &) {
+      // Preserve sample order while waiting for detection-time TF on another topic.
       return;
+    } catch (const std::exception & error) {
+      pending_detections_.pop_front();
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+        "Table tag pose rejected: %s", error.what());
     }
-    // Tag detections and their TF are separate topics. During table-tag
-    // measurement the robot and table are stationary, so the latest fresh tag
-    // transform is equivalent to the detection-time transform.
-    const auto transform = tf_buffer_.lookupTransform(
-      planning_frame_, tag_frame_, tf2::TimePointZero);
-    const rclcpp::Time transform_stamp(transform.header.stamp);
-    if (transform_stamp.nanoseconds() == 0) {
-      RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "Table tag TF rejected because its timestamp is zero");
-      return;
-    }
-    if ((node_->now() - transform_stamp).seconds() > maximum_age_) {
-      RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 2000,
-        "Table tag TF rejected because it is older than %.3f s", maximum_age_);
-      return;
-    }
-    updateStablePose(tf2::transformToEigen(transform), transform.header.stamp);
-  } catch (const tf2::TransformException & error) {
-    RCLCPP_WARN_THROTTLE(
-      node_->get_logger(), *node_->get_clock(), 2000,
-      "Table tag TF unavailable: %s", error.what());
-  } catch (const std::exception & error) {
-    RCLCPP_WARN_THROTTLE(
-      node_->get_logger(), *node_->get_clock(), 2000,
-      "Table tag pose rejected: %s", error.what());
   }
 }
 
@@ -416,6 +440,7 @@ void TableTagPoseTracker::updateStablePose(
     stable_pose_.pose.position.z = stable_sample.translation().z();
     stable_pose_.pose.orientation = tf2::toMsg(Eigen::Quaterniond(stable_sample.linear()));
     have_stable_pose_ = true;
+    ++stable_generation_;
     stable_pose = stable_pose_;
   }
   stable_pose_condition_.notify_all();
@@ -427,7 +452,23 @@ void TableTagPoseTracker::updateStablePose(
 bool TableTagPoseTracker::waitForStablePose(
   double timeout, const std::function<bool()> & canceled,
   geometry_msgs::msg::PoseStamped & output, std::string & error,
-  const std::function<void()> & waiting) const
+  const std::function<void()> & waiting, const std::optional<rclcpp::Time> & not_before) const
+{
+  std::uint64_t consumed_generation = 0;
+  return waitForStablePoseAfter(0, timeout, canceled, output, consumed_generation, error, waiting, not_before);
+}
+
+std::uint64_t TableTagPoseTracker::generation() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return stable_generation_;
+}
+
+bool TableTagPoseTracker::waitForStablePoseAfter(
+  std::uint64_t minimum_generation, double timeout, const std::function<bool()> & canceled,
+  geometry_msgs::msg::PoseStamped & output, std::uint64_t & generation,
+  std::string & error, const std::function<void()> & waiting,
+  const std::optional<rclcpp::Time> & not_before) const
 {
   error.clear();
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout);
@@ -438,15 +479,20 @@ bool TableTagPoseTracker::waitForStablePose(
       error = "waiting for stable table tag pose canceled";
       return false;
     }
-    if (have_stable_pose_ &&
+    if (have_stable_pose_ && stable_generation_ > minimum_generation &&
+      (!not_before || rclcpp::Time(stable_pose_.header.stamp,
+        node_->get_clock()->get_clock_type()) > *not_before) &&
+      (node_->now() - stable_pose_.header.stamp).seconds() >= 0.0 &&
       (node_->now() - stable_pose_.header.stamp).seconds() <= maximum_age_)
     {
       output = stable_pose_;
+      generation = stable_generation_;
       return true;
     }
     const auto now = std::chrono::steady_clock::now();
     if (now >= deadline) {
-      error = "no fresh stable table tag pose";
+      error = not_before ? "no fresh stable table tag pose captured after the action request" :
+        "no fresh stable table tag pose";
       return false;
     }
     if (!announced && waiting) {

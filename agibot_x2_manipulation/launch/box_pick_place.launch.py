@@ -114,7 +114,6 @@ def generate_launch_description():
     image_decompress_input_reliability = LaunchConfiguration(
         "image_decompress_input_reliability"
     )
-    image_decompress_rmw = LaunchConfiguration("image_decompress_rmw")
     use_raw_image_throttler = LaunchConfiguration("use_raw_image_throttler")
     throttled_camera_image = LaunchConfiguration("throttled_camera_image")
     throttled_camera_info = LaunchConfiguration("throttled_camera_info")
@@ -126,12 +125,14 @@ def generate_launch_description():
     depth_image_topic = LaunchConfiguration("depth_image_topic")
     depth_camera_info_topic = LaunchConfiguration("depth_camera_info_topic")
     lidar_pointcloud_topic = LaunchConfiguration("lidar_pointcloud_topic")
+    pick_replan_on_target_movement = LaunchConfiguration("pick_replan_on_target_movement")
     allow_execution = LaunchConfiguration("allow_execution")
     motion_planning_mode = LaunchConfiguration("motion_planning_mode")
     manipulation_state_file = LaunchConfiguration("manipulation_state_file")
     planning_log_file = LaunchConfiguration("planning_log_file")
     planning_log_directory = LaunchConfiguration("planning_log_directory")
     box_profiles_file = LaunchConfiguration("box_profiles_file")
+    table_profiles_file = LaunchConfiguration("table_profiles_file")
 
     config_share = get_package_share_directory("agibot_x2_moveit_config")
     manipulation_share = get_package_share_directory("agibot_x2_manipulation")
@@ -166,6 +167,11 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "table_profiles_file",
+                default_value=os.path.join(manipulation_share, "config", "table_profiles.yaml"),
+                description="Immutable physical table calibration catalog",
+            ),
             DeclareLaunchArgument(
                 "box_profiles_file",
                 default_value=default_box_profiles_file,
@@ -237,6 +243,12 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
+                "pick_replan_on_target_movement",
+                default_value=str(server_params.get("pick_replan_on_target_movement", False)).lower(),
+                choices=["true", "false"],
+                description="Replan Pick for selected-target movement before attachment",
+            ),
+            DeclareLaunchArgument(
                 "allow_execution",
                 default_value="false",
                 choices=["true", "false"],
@@ -291,10 +303,10 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "ros2_control_update_rate",
-                default_value="100",
+                default_value="50",
                 description=(
                     "Controller-manager loop rate passed to real_robot.launch.py. "
-                    "The 100 Hz default protects HAL state-delivery headroom."
+                    "The 50 Hz default matches the ZMQ command publish-rate limit."
                 ),
             ),
             DeclareLaunchArgument("use_apriltag", default_value="true"),
@@ -321,6 +333,10 @@ def generate_launch_description():
                     "Publish a test-only tag pose and detections. This disables both "
                     "camera detector pipelines."
                 ),
+            ),
+            DeclareLaunchArgument(
+                "disable_table_collision", default_value=use_dummy_apriltag,
+                description="Disable the tag-derived table collision model in simulation.",
             ),
             DeclareLaunchArgument(
                 "dummy_tag_params_file",
@@ -355,15 +371,6 @@ def generate_launch_description():
                 description=(
                     "Reliable is recommended for fragmented JPEG samples over LAN; "
                     "the decoder callback remains non-blocking."
-                ),
-            ),
-            DeclareLaunchArgument(
-                "image_decompress_rmw",
-                default_value="rmw_cyclonedds_cpp",
-                choices=["rmw_cyclonedds_cpp", "rmw_fastrtps_cpp"],
-                description=(
-                    "RMW used only by the compressed-image decoder. Keep the "
-                    "action/control nodes on the launch process's default RMW."
                 ),
             ),
             DeclareLaunchArgument(
@@ -439,7 +446,6 @@ def generate_launch_description():
                 name="best_effort_image_decompressor",
                 output="screen",
                 condition=IfCondition(use_image_decompressor),
-                additional_env={"RMW_IMPLEMENTATION": image_decompress_rmw},
                 parameters=[
                     {
                         "input_topic": compressed_camera_image,
@@ -530,15 +536,18 @@ def generate_launch_description():
                     # the same ROS parameter scope and take precedence.
                     server_params,
                     box_profiles_file,
+                    table_profiles_file,
                     {
                         "perception_3d_source": perception_3d_source,
+                        "pick_replan_on_target_movement": ParameterValue(
+                            pick_replan_on_target_movement, value_type=bool
+                        ),
                         "allow_execution": ParameterValue(
                             allow_execution, value_type=bool
                         ),
-                        # Dummy/replay workflows publish only the pickup tag;
-                        # they intentionally have no Tag 9 table model.
+                        # Single-tag dummy workflows disable the table by default.
                         "disable_table_collision": ParameterValue(
-                            use_dummy_apriltag, value_type=bool
+                            LaunchConfiguration("disable_table_collision"), value_type=bool
                         ),
                         "motion_planning_mode": motion_planning_mode,
                         "phase_retry_attempts": ParameterValue(

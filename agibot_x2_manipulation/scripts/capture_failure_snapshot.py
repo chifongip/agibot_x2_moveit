@@ -254,7 +254,10 @@ class FailureSnapshotRecorder(Node):
             )
             for topic in detection_topics
         ]
-        status_topics = arguments.action_status_topic or DEFAULT_ACTION_STATUS_TOPICS
+        status_topics = (
+            DEFAULT_ACTION_STATUS_TOPICS if arguments.action_status_topic is None
+            else arguments.action_status_topic
+        )
         self.status_subscriptions = [
             self.create_subscription(
                 GoalStatusArray,
@@ -266,8 +269,10 @@ class FailureSnapshotRecorder(Node):
         ]
 
         self.get_logger().info(
-            "Waiting for a manipulation action abort; Ctrl-C writes a manual snapshot to "
-            f"'{self.output_path}'",
+            getattr(arguments, "waiting_message", None) or (
+                "Waiting for a manipulation action abort; Ctrl-C writes a manual snapshot to "
+                f"'{self.output_path}'"
+            ),
         )
 
     def on_joint_state(self, message):

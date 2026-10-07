@@ -35,8 +35,12 @@ find_package(moveit_core REQUIRED)
 find_package(joint_trajectory_controller REQUIRED)
 find_package(moveit_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(image_geometry REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc calib3d)
+find_package(Threads REQUIRED)
 find_package(shape_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(tf2_eigen REQUIRED)
@@ -45,6 +49,12 @@ find_package(tf2_ros REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 pkg_check_modules(ZMQ REQUIRED IMPORTED_TARGET libzmq)
+
+add_executable(camera_preprocessor src/camera_preprocessor.cpp)
+target_include_directories(camera_preprocessor PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(camera_preprocessor ${OpenCV_LIBRARIES} Threads::Threads)
+ament_target_dependencies(camera_preprocessor rclcpp sensor_msgs image_geometry)
+install(TARGETS camera_preprocessor RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 add_library(box_geometry src/box_geometry.cpp)
 target_include_directories(box_geometry PUBLIC
@@ -88,6 +98,9 @@ target_include_directories(reset_coordinator PUBLIC
 add_library(pick_place_core
   src/pick_place/attachment_controller.cpp
   src/pick_place/box_pose_tracker.cpp
+  src/pick_place/controller_spline.cpp
+  src/pick_place/cartesian_motion.cpp
+  src/pick_place/saved_plan.cpp
   src/pick_place/dual_arm_motion_planner.cpp
   src/pick_place/locomanipulation_posture_controller.cpp
   src/pick_place/manipulation_state_store.cpp
@@ -104,7 +117,7 @@ target_link_libraries(pick_place_core
   box_geometry closed_chain_path_planner perception_readiness planning_budget Eigen3::Eigen PkgConfig::ZMQ)
 ament_target_dependencies(pick_place_core
   agibot_x2_manipulation_msgs aimdk_msgs apriltag_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
-  moveit_ros_planning_interface joint_trajectory_controller nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs
+  moveit_ros_planning_interface joint_trajectory_controller nav_msgs rcl_interfaces rclcpp rclcpp_action sensor_msgs shape_msgs
   std_srvs tf2_eigen tf2_geometry_msgs tf2_ros visualization_msgs)
 
 add_executable(box_localizer_node src/box_localizer_node.cpp)
@@ -123,7 +136,7 @@ target_link_libraries(pick_place_server
   reset_coordinator reset_utils)
 ament_target_dependencies(pick_place_server
   agibot_x2_manipulation_msgs aimdk_msgs diagnostic_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
-  moveit_ros_planning_interface nav_msgs rclcpp rclcpp_action sensor_msgs shape_msgs std_srvs tf2_eigen
+  moveit_ros_planning_interface nav_msgs rcl_interfaces rclcpp rclcpp_action sensor_msgs shape_msgs std_srvs tf2_eigen
   tf2_geometry_msgs trajectory_msgs visualization_msgs)
 
 install(TARGETS box_geometry box_profile_registry closed_chain_path_planner perception_readiness planning_budget reset_coordinator reset_utils box_localizer_node
@@ -139,6 +152,10 @@ install(PROGRAMS
   scripts/capture_failure_snapshot.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME capture_failure_snapshot)
+# Also install the reusable recorder module beside the task executable.
+install(FILES scripts/capture_failure_snapshot.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/capture_task_snapshot.py
+  DESTINATION lib/${PROJECT_NAME} RENAME capture_task_snapshot)
 install(PROGRAMS
   scripts/raw_image_throttler.py
   DESTINATION lib/${PROJECT_NAME}
@@ -147,14 +164,26 @@ install(PROGRAMS
   scripts/verify_carry_pose.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME verify_carry_pose)
+install(PROGRAMS
+  scripts/measure_execution_time.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME measure_execution_time)
+install(PROGRAMS scripts/time_saved_simulation.py
+  DESTINATION lib/${PROJECT_NAME} RENAME time_saved_simulation)
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
-install(FILES README.md DESTINATION share/${PROJECT_NAME})
+install(FILES README.md SIMULATION_TIMING.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
+  ament_add_pytest_test(test_optimized_camera_launch test/test_optimized_camera_launch.py)
+  ament_add_gtest(test_camera_preprocessing test/test_camera_preprocessing.cpp)
+  target_include_directories(test_camera_preprocessing PRIVATE src ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(test_camera_preprocessing ${OpenCV_LIBRARIES})
+  ament_target_dependencies(test_camera_preprocessing sensor_msgs image_geometry)
+  add_launch_test(test/test_camera_preprocessor.launch.py TIMEOUT 45)
   ament_add_gtest(test_phase_retry_controller test/test_phase_retry_controller.cpp)
   target_include_directories(test_phase_retry_controller PRIVATE include)
   ament_add_gtest(test_box_geometry test/test_box_geometry.cpp)
@@ -166,6 +195,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_perception_readiness perception_readiness)
   ament_add_gtest(test_planning_budget test/test_planning_budget.cpp)
   target_link_libraries(test_planning_budget planning_budget)
+  ament_add_gtest(test_endpoint_reached test/test_endpoint_reached.cpp)
+  target_include_directories(test_endpoint_reached PRIVATE src)
+  target_link_libraries(test_endpoint_reached Eigen3::Eigen)
+  ament_target_dependencies(test_endpoint_reached moveit_core)
   ament_add_gtest(test_closed_chain_path_planner test/test_closed_chain_path_planner.cpp)
   target_link_libraries(test_closed_chain_path_planner closed_chain_path_planner)
   ament_add_gtest(test_reset_utils test/test_reset_utils.cpp)
@@ -177,6 +210,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_manipulation_state_store test/test_manipulation_state_store.cpp)
   target_include_directories(test_manipulation_state_store PRIVATE src include)
   target_link_libraries(test_manipulation_state_store pick_place_core)
+  ament_add_gtest(test_table_profiles test/test_table_profiles.cpp)
+  target_include_directories(test_table_profiles PRIVATE src include)
+  target_link_libraries(test_table_profiles pick_place_core)
+  ament_target_dependencies(test_table_profiles rclcpp)
   ament_add_gtest(test_pick_place_config test/test_pick_place_config.cpp)
   target_include_directories(test_pick_place_config PRIVATE src include)
   target_link_libraries(test_pick_place_config pick_place_core)
@@ -190,10 +227,28 @@ if(BUILD_TESTING)
   target_include_directories(test_locomanipulation_posture_controller PRIVATE src include)
   target_link_libraries(test_locomanipulation_posture_controller pick_place_core)
   ament_target_dependencies(test_locomanipulation_posture_controller aimdk_msgs rclcpp)
+  ament_add_gtest(test_saved_plan test/test_saved_plan.cpp)
+  target_include_directories(test_saved_plan PRIVATE src include)
+  target_link_libraries(test_saved_plan pick_place_core)
+  ament_target_dependencies(test_saved_plan moveit_core moveit_ros_planning rclcpp)
+
+  ament_add_gtest(test_retained_planning_scene test/test_retained_planning_scene.cpp)
+  target_include_directories(test_retained_planning_scene PRIVATE src include)
+  target_link_libraries(test_retained_planning_scene pick_place_core)
+  ament_target_dependencies(test_retained_planning_scene moveit_core moveit_ros_planning rclcpp)
+
   ament_add_gtest(test_post_place_planner test/test_post_place_planner.cpp)
   target_include_directories(test_post_place_planner PRIVATE src include)
   target_link_libraries(test_post_place_planner pick_place_core)
   ament_target_dependencies(test_post_place_planner moveit_core moveit_ros_planning rclcpp)
+  ament_add_gtest(test_post_place_progress test/test_post_place_progress.cpp)
+  ament_add_gtest(test_cartesian_motion test/test_cartesian_motion.cpp)
+  target_include_directories(test_cartesian_motion PRIVATE src include)
+  target_link_libraries(test_cartesian_motion pick_place_core)
+  ament_target_dependencies(test_cartesian_motion moveit_core moveit_ros_planning rclcpp)
+  target_include_directories(test_post_place_progress PRIVATE src include)
+  target_link_libraries(test_post_place_progress pick_place_core)
+  ament_target_dependencies(test_post_place_progress moveit_core moveit_ros_planning rclcpp)
   ament_add_gtest_executable(test_post_place_replay test/test_post_place_replay.cpp
     SKIP_LINKING_MAIN_LIBRARIES)
   target_include_directories(test_post_place_replay PRIVATE src include)
@@ -210,13 +265,30 @@ if(BUILD_TESTING)
   target_include_directories(test_table_tag_pose_tracker PRIVATE src include)
   target_link_libraries(test_table_tag_pose_tracker pick_place_core)
   ament_target_dependencies(test_table_tag_pose_tracker apriltag_msgs geometry_msgs rclcpp tf2_ros)
+  ament_add_pytest_test(test_capture_task_snapshot test/test_capture_task_snapshot.py)
   ament_add_pytest_test(test_capture_failure_snapshot test/test_capture_failure_snapshot.py)
   ament_add_pytest_test(test_verify_carry_pose test/test_verify_carry_pose.py)
+  ament_add_pytest_test(test_time_saved_simulation test/test_time_saved_simulation.py)
+  ament_add_pytest_test(test_measure_execution_time test/test_measure_execution_time.py)
   ament_add_pytest_test(test_manipulation_config test/test_manipulation_config.py)
+  add_launch_test(test/test_detection_markers.launch.py TIMEOUT 45)
   add_launch_test(test/test_box_profile_reload.launch.py TIMEOUT 30)
   add_launch_test(test/test_reload_box_profiles_service.launch.py TIMEOUT 90)
   add_launch_test(test/test_recorded_workflow.launch.py TIMEOUT 180)
   add_launch_test(test/test_dummy_workflow.launch.py TIMEOUT 240)
+  add_launch_test(test/test_cartesian_workflow.launch.py TIMEOUT 300)
+  add_launch_test(test/test_place_continue.launch.py TIMEOUT 240)
+  add_launch_test(test/test_continue_actions.launch.py TIMEOUT 420)
+  add_launch_test(test/test_saved_continue_detection.launch.py TIMEOUT 420)
+  add_launch_test(test/test_cartesian_recovery.launch.py TIMEOUT 600)
+  add_launch_test(test/test_moved_box_retry.launch.py TIMEOUT 240)
+  add_launch_test(test/test_optional_pick_table.launch.py TIMEOUT 240)
+  add_launch_test(test/test_table_profiles.launch.py TIMEOUT 300)
+  set_tests_properties(test_test_table_profiles.launch.py PROPERTIES
+    ENVIRONMENT "ROS_DOMAIN_ID=196" RUN_SERIAL TRUE)
+  add_launch_test(test/test_detection_snapshot.launch.py TIMEOUT 300)
+  add_launch_test(test/test_saved_detection_snapshot.launch.py TIMEOUT 600)
+  add_launch_test(test/test_request_detection.launch.py TIMEOUT 300)
   add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_pose_to_pose
     ARGS "mode:=pose_to_pose" TIMEOUT 180)
   add_launch_test(test/test_retry_continue.launch.py TARGET test_retry_continue_closed_chain

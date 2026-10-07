@@ -43,14 +43,18 @@ ros2 launch agibot_x2_moveit_config real_robot.launch.py \
   command_transport:=ros_topic
 ```
 
-The real-robot defaults are headless and run `ros2_control` at 100 Hz. This
+The real-robot defaults are headless and run `ros2_control` at 50 Hz, matching
+the configured ZMQ command publish-rate limit. This
 leaves CPU and DDS scheduling headroom for the 100 ms HAL state watchdog. Use
 `use_rviz:=true` or `ros2_control_update_rate:=500` only after confirming the
 joint and IMU streams remain continuously fresh on the deployment host.
 
 To share state with navigation, start `x2_bringup` once, then pass
 `start_state_bringup:=false` to this launch so MoveIt consumes the existing
-`/joint_states`, `/tf`, and `/tf_static` topics.
+`/joint_states`, `/tf`, and `/tf_static` topics. Pass
+`ros2_control_update_rate:=50` when starting the shared `x2_bringup` launch
+to use the same rate; MoveIt cannot change an existing controller manager
+through `start_state_bringup:=false`.
 
 If that shared controller manager already has `dual_arm_controller` active,
 also pass `spawn_dual_arm_controller:=false` to avoid configuring it a second
