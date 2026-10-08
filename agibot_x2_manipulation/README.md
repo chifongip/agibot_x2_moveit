@@ -316,6 +316,12 @@ so planner and localizer catalogs stay aligned. A failed request keeps the
 active catalog unchanged. For a new physical calibration, run a `plan_only:
 true` pick/place after a successful reload before enabling execution.
 
+`/get_box_profiles` (`agibot_x2_manipulation_msgs/srv/GetBoxProfiles`) returns
+the active catalog's `profile_ids` and `profile_version` without requiring
+visible tags or commanding motion. It reports the loaded catalog at startup
+and after successful reloads; a dry run or failed reload keeps that list unchanged.
+The operator panel uses this service for its Box Profile dropdown.
+
 ## Recording the state before Pick/Place
 
 Keep the robot and objects stationary until recording succeeds, then send the

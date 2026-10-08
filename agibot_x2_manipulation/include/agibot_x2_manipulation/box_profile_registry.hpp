@@ -53,6 +53,7 @@ public:
                const std::string &prefix = "box_profiles");
 
   bool empty() const;
+  std::vector<std::string> profileIds() const;
   const BoxProfile *find(const std::string &profile_id) const;
   const BoxProfile *profileForTag(int tag_id) const;
   std::string tagFrame(int tag_id) const;

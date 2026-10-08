@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <rclcpp/rclcpp.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -72,6 +73,8 @@ TEST_F(BoxProfileRegistryTest, ResolvesProfilesAndInstancesFromTagIds) {
   const auto registry = BoxProfileRegistry::fromParameters(*node);
 
   ASSERT_FALSE(registry.empty());
+  EXPECT_EQ(registry.profileIds(),
+    (std::vector<std::string>{"bottom_container", "large", "small"}));
   const auto *small = registry.profileForTag(5);
   ASSERT_NE(small, nullptr);
   EXPECT_EQ(small->id, "small");
@@ -168,6 +171,37 @@ TEST_F(BoxProfileRegistryTest, LoadsValidatedCatalogFromYamlFile) {
       1e-12);
 }
 
+TEST_F(BoxProfileRegistryTest, PreservesProfileIdsAsSingleParameterComponents) {
+  const std::vector<std::string> names{
+    "box-a", "Box B", "箱A", ":manual", " box ", std::string(129, 'x')};
+  const auto path = std::filesystem::temp_directory_path() /
+    "agibot_x2_box_profile_names_test.yaml";
+  {
+    std::ofstream stream(path);
+    ASSERT_TRUE(stream.is_open());
+    stream << "/**:\n  ros__parameters:\n    box_profiles:\n";
+    int tag_id = 190;
+    for (const auto & name : names) {
+      stream << "      '" << name << "':\n"
+             << "        tag_ids: [" << tag_id++ << "]\n"
+             << R"(        dimensions: [0.2, 0.3, 0.3]
+        tag_to_box_center_pose: [0.0, 0.0, 0.15, 0.0, 0.0, 0.0, 1.0]
+        pregrasp_distance: 0.08
+        contact_height_offset: 0.0
+        carry_pose_a: [0.3, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0]
+)";
+    }
+  }
+  const auto registry = BoxProfileRegistry::fromYamlFile(path.string());
+  EXPECT_TRUE(std::filesystem::remove(path));
+  auto expected = names;
+  std::sort(expected.begin(), expected.end());
+  EXPECT_EQ(registry.profileIds(), expected);
+  for (const auto & name : names) {
+    ASSERT_NE(registry.find(name), nullptr);
+  }
+}
+
 TEST_F(BoxProfileRegistryTest, SupportsDifferentAndMultipleDockingApproaches) {
   auto node = nodeWithProfiles();
   node->declare_parameter("box_profiles.small.docking_profile_ids",
@@ -183,7 +217,7 @@ TEST_F(BoxProfileRegistryTest, SupportsDifferentAndMultipleDockingApproaches) {
   EXPECT_THROW(BoxProfileRegistry::fromParameters(*node), std::runtime_error);
 }
 
-TEST_F(BoxProfileRegistryTest, VerticalGreyBoxTagProducesAnUprightBoxBehindTheFace) {
+TEST_F(BoxProfileRegistryTest, VerticalGreyBoxTagPreservesConfiguredCenterAndUprightAxes) {
   const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() /
     "config" / "box_profiles.yaml";
   const auto registry = BoxProfileRegistry::fromYamlFile(path.string());
@@ -192,17 +226,20 @@ TEST_F(BoxProfileRegistryTest, VerticalGreyBoxTagProducesAnUprightBoxBehindTheFa
   Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();
   tag.linear() = Eigen::Quaterniond(0.5, 0.5, -0.5, -0.5).toRotationMatrix();
   tag.translation() = Eigen::Vector3d(0.5, 0.0, 0.3);
+  // The vertical tag's +X points right, +Y up, and +Z toward the robot.
+  const auto offset = profile->tag_to_box_center.translation();
+  const Eigen::Vector3d expected_center(0.5 - offset.z(), -offset.x(), 0.3 + offset.y());
   for (const double yaw : {0.0, 0.4, -0.7}) {
     Eigen::Isometry3d turn = Eigen::Isometry3d::Identity();
     turn.linear() = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
     const auto box = boxPoseFromTag(turn * tag, profile->tag_to_box_center);
     EXPECT_TRUE(box.linear().isApprox(turn.linear(), 1e-12));
     EXPECT_TRUE(box.translation().isApprox(
-      turn * Eigen::Vector3d(0.65, 0.0, 0.3), 1e-12));
+      turn * expected_center, 1e-12));
     const auto grasp = computeGraspGeometry(box, profile->dimensions,
       profile->pregrasp_distance, profile->contact_height_offset);
     EXPECT_NEAR(grasp.left_contact.translation().z(),
-      0.3 + profile->contact_height_offset, 1e-12);
+      expected_center.z() + profile->contact_height_offset, 1e-12);
     EXPECT_NEAR((grasp.left_pregrasp.translation() -
       grasp.left_contact.translation()).norm(), profile->pregrasp_distance, 1e-12);
   }

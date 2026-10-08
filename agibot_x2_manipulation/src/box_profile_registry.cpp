@@ -22,8 +22,9 @@ T requiredParameter(rclcpp::Node &node, const std::string &name) {
   return value;
 }
 
-std::set<std::string> profileIds(rclcpp::Node &node,
-                                 const std::string &prefix) {
+std::set<std::string> profileIdsFromParameters(
+  rclcpp::Node & node, const std::string & prefix)
+{
   const auto listed =
       node.list_parameters({prefix}, std::numeric_limits<uint64_t>::max());
   const std::string profile_prefix = prefix + ".";
@@ -95,7 +96,7 @@ BoxProfileRegistry
 BoxProfileRegistry::fromParameters(rclcpp::Node &node,
                                    const std::string &prefix) {
   BoxProfileRegistry registry;
-  const auto ids = profileIds(node, prefix);
+  const auto ids = profileIdsFromParameters(node, prefix);
   if (ids.empty()) {
     return registry;
   }
@@ -213,6 +214,8 @@ BoxProfileRegistry::fromYamlFile(const std::string &yaml_file,
     throw std::runtime_error("box-profile YAML file contains no parameters: " + yaml_file);
   }
   rclcpp::NodeOptions options;
+  // A replacement catalog must not inherit profiles from startup parameter files.
+  options.use_global_arguments(false);
   options.automatically_declare_parameters_from_overrides(true);
   options.parameter_overrides(overrides);
   rclcpp::Node validation_node("box_profile_catalog_validator", options);
@@ -220,6 +223,16 @@ BoxProfileRegistry::fromYamlFile(const std::string &yaml_file,
 }
 
 bool BoxProfileRegistry::empty() const { return profiles_.empty(); }
+
+std::vector<std::string> BoxProfileRegistry::profileIds() const
+{
+  std::vector<std::string> ids;
+  ids.reserve(profiles_.size());
+  for (const auto & entry : profiles_) {
+    ids.push_back(entry.first);
+  }
+  return ids;
+}
 
 const BoxProfile *
 BoxProfileRegistry::find(const std::string &profile_id) const {

@@ -1,0 +1,4 @@
+# Read the active catalog without requiring a visible box or commanding motion.
+---
+string[] profile_ids
+uint64 profile_version

@@ -31,6 +31,7 @@
 #include <agibot_x2_manipulation_msgs/srv/continue_manipulation.hpp>
 #include <agibot_x2_manipulation_msgs/srv/clear_locomanipulation_posture_target.hpp>
 #include <agibot_x2_manipulation_msgs/srv/recover_manipulation_state.hpp>
+#include <agibot_x2_manipulation_msgs/srv/get_box_profiles.hpp>
 #include <agibot_x2_manipulation_msgs/srv/reload_box_profiles.hpp>
 #include <agibot_x2_manipulation_msgs/srv/set_locomanipulation_posture.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -83,6 +84,7 @@ using ClearLocomanipulationPostureTarget =
 using RecoverManipulationState =
   agibot_x2_manipulation_msgs::srv::RecoverManipulationState;
 using ReloadBoxProfiles = agibot_x2_manipulation_msgs::srv::ReloadBoxProfiles;
+using GetBoxProfiles = agibot_x2_manipulation_msgs::srv::GetBoxProfiles;
 using SetLocomanipulationPosture =
   agibot_x2_manipulation_msgs::srv::SetLocomanipulationPosture;
 using PickGoalHandle = rclcpp_action::ServerGoalHandle<Pick>;
@@ -347,6 +349,14 @@ public:
         &PickPlaceServer::reloadBoxProfiles, this, std::placeholders::_1,
         std::placeholders::_2),
       rmw_qos_profile_services_default, reload_callback_group_);
+    // Share the reload group so IDs and version come from one active catalog.
+    get_profiles_service_ = node_->create_service<GetBoxProfiles>(
+      "/get_box_profiles",
+      [this](const std::shared_ptr<GetBoxProfiles::Request>,
+      std::shared_ptr<GetBoxProfiles::Response> response) {
+        response->profile_ids = profiles_.profileIds();
+        response->profile_version = profile_version_;
+      }, rmw_qos_profile_services_default, reload_callback_group_);
     posture_callback_group_ = node_->create_callback_group(
       rclcpp::CallbackGroupType::MutuallyExclusive);
     posture_service_ = node_->create_service<SetLocomanipulationPosture>(
@@ -3988,6 +3998,7 @@ private:
   rclcpp::Service<RecoverManipulationState>::SharedPtr recovery_service_;
   rclcpp::CallbackGroup::SharedPtr reload_callback_group_;
   rclcpp::Service<ReloadBoxProfiles>::SharedPtr reload_profiles_service_;
+  rclcpp::Service<GetBoxProfiles>::SharedPtr get_profiles_service_;
   rclcpp::CallbackGroup::SharedPtr posture_callback_group_;
   rclcpp::Service<SetLocomanipulationPosture>::SharedPtr posture_service_;
   rclcpp::CallbackGroup::SharedPtr posture_release_callback_group_;
