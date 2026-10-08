@@ -125,6 +125,7 @@ struct PickPlaceConfig
   bool allow_execution{false};
   double velocity_scaling{0.0};
   double acceleration_scaling{0.0};
+  // Both box-center targets are expressed in torso_link.
   // Carry A is kept in carry_pose because existing adaptive-pick and recovery
   // code use it as their nominal pose.
   Eigen::Isometry3d carry_pose{Eigen::Isometry3d::Identity()};

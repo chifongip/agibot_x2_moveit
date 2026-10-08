@@ -1,3 +1,4 @@
+#include "pick_place/carry_pose_frame.hpp"
 #include "pick_place/saved_plan.hpp"
 #include "pick_place/controller_spline.hpp"
 #include "pick_place/planning_scene_manager.hpp"
@@ -12,6 +13,21 @@
 
 namespace agibot_x2_manipulation
 {
+bool validateSavedCarryFrame(
+  const SavedPlan & plan, const moveit::core::RobotState & measured, std::string & error)
+{
+  if (!plan.carry_frame) {return true;}
+  try {
+    if (carryFrameMatches(carryFrameTransform(measured, plan.config.planning_frame),
+        *plan.carry_frame,
+        plan.config.execution_position_limit(plan.config.closed_chain_contact_position_error),
+        plan.config.execution_orientation_limit(plan.config.closed_chain_contact_orientation_error)))
+    {return true;}
+    error = "saved plan torso posture changed; request a fresh plan-only preview";
+  } catch (const std::exception & exception) {error = exception.what();}
+  return false;
+}
+
 namespace
 {
 using controller_spline::derivative;

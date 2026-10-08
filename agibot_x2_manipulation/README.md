@@ -3,9 +3,9 @@
 `agibot_x2_manipulation` localizes one approximately upright box from an AprilTag on the
 center of its top face, creates the corresponding MoveIt collision object, and
 plans coordinated dual-arm pick and place motions. `base_link` is attached to
-the pelvis: all example box and place poses are pelvis-relative, not
-floor-relative. Treat the supplied values as simulation starting points and
-calibrate them before hardware execution.
+the pelvis: detection and place poses are pelvis-relative, not
+floor-relative. Carry A/B are expressed in `torso_link`. Treat the supplied
+values as simulation starting points and calibrate them before hardware execution.
 
 ## Pick/place server
 
@@ -363,7 +363,7 @@ If the parameter query reports a different path, use that returned path. Adjust
 the domain and workspace paths for other deployments.
 
 Place recording requires the latched manipulation state to be `HOLDING` and a
-complete VERSION 4 recovery record matching the box instance and profile. It
+complete VERSION 4 or 5 recovery record matching the box instance and profile. It
 saves the held pose, both box-to-TCP contact transforms, carry targets, and box
 identity verbatim. Missing/mismatched records prevent capture. `--task-kind pick`
 also checks that manipulation state is `EMPTY`. The default `scene` mode remains
@@ -1331,8 +1331,8 @@ the next grasp candidate.
 `/pick_box` searches for an achievable Carry A pose around the selected
 profile's `carry_pose_a` and tests direct, translate-then-rotate, and
 rotate-then-translate routes. Legacy deployments without a profile catalog use
-`carry_box_pose_a`. The default pelvis-relative envelope is X +/-5 cm, Y +/-3
-cm, Z -12/+3 cm, and orientation within 10 degrees. `/place_box` and plan-only
+`carry_box_pose_a`. The torso-relative envelope is controlled by the
+`carry_search_*` position and orientation parameters. `/place_box` and plan-only
 `/pick_place` may adjust the requested place by X/Y +/-15 mm, Z +/-5 mm, and
 yaw +/-5 degrees. The action's `achieved_pose` reports the selected adaptive
 pose. Treat these as calibration/error allowances, not permission to bypass
@@ -1344,9 +1344,21 @@ used by `/move_carry_pose`; the legacy `carry_box_pose_a` and
 bounded adaptive correction used for Carry A during Pick. A selected endpoint,
 such as A′ when nominal A is unreachable, is remembered for the reverse
 transition and in the holding-state record. Both poses are
-`[x, y, z, qx, qy, qz, qw]` in `base_link` (pelvis-relative). The default Carry
-B equals Carry A so a profile does not acquire a new motion until it is
-calibrated.
+`[x, y, z, qx, qy, qz, qw]` in `torso_link` (torso-relative). Carry B defaults
+to Carry A when omitted; explicitly configured targets may differ.
+
+Carry position and orientation both follow `torso_link`. Targets are resolved
+into the planning frame using the current MoveIt robot state at each planning
+attempt; adaptive search offsets and remembered A/B endpoints are torso-relative.
+Measured held-box poses and achieved action results remain in the planning frame
+(default `base_link`). Body posture must remain fixed during each arm trajectory;
+this does not add continuous arm compensation while changing body posture.
+Saved previews reject a changed torso transform and require a fresh preview.
+
+Migration preserves configured numbers, which now describe different physical
+targets. Validate them with `plan_only: true` before execution. State-file version
+5 records the carry frame explicitly; older files retain held-box geometry and
+identity but discard remembered pelvis-relative carry endpoints.
 
 IK candidates are normalized and revalidated against the `dual_arm` bounds and
 planning scene before assignment. Only the 14 planning-group values are sent
@@ -1480,8 +1492,9 @@ MuJoCo weld/physics, not just acknowledge the request.
 
 ### Offline carry-pose verification
 
-Use `verify_carry_pose` to evaluate one profile-specific Carry A target against
-a failure snapshot without changing `box_profiles.yaml` or commanding hardware.
+Use `verify_carry_pose` to evaluate one torso-relative, profile-specific Carry A
+target against a failure snapshot without changing `box_profiles.yaml` or
+commanding hardware.
 The command starts fake ZMQ joint feedback and an isolated planning stack,
 publishes the captured `BoxState` directly, and sends only a plan-only Pick
 goal. Source the workspace first:
@@ -1503,7 +1516,10 @@ result as `exact_feasible`, `adaptive_fallback`, `infeasible`, `input_error`,
 or `runtime_error`. An adaptive fallback proves that the production planner
 found a nearby bounded pose, but it does **not** verify the requested target.
 Exact matching defaults to 1 mm and 1 degree and can be adjusted with
-`--position-tolerance` and `--orientation-tolerance-degrees`.
+`--position-tolerance` and `--orientation-tolerance-degrees`. Report schema version
+2 labels all pose frames: requested targets and `achieved_carry_torso_pose` are
+in `torso_link`; `achieved_carry_pose` retains the action result in its planning
+frame. Matching errors are computed in `torso_link`.
 
 The package also provides isolated automated regressions for the dummy and
 recorded cases. Both select `motion_planning_mode:=pose_to_pose` and exercise

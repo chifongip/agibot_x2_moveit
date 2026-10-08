@@ -124,10 +124,11 @@ def valid_pose(position, rotation):
 
 
 def validate_holding_record(text, object_id, profile_id):
-    """Validate the server's VERSION 4 grasp record without changing it."""
+    """Validate the server's VERSION 4/5 grasp record without changing it."""
     tokens = shlex.split(text)
-    if tokens[:4] != ["VERSION", "4", "STATE", "HOLDING"]:
-        raise ValueError("Place requires a VERSION 4 HOLDING state file")
+    if (len(tokens) < 4 or tokens[0] != "VERSION" or tokens[1] not in ("4", "5") or
+            tokens[2:4] != ["STATE", "HOLDING"]):
+        raise ValueError("Place requires a VERSION 4/5 HOLDING state file")
     cursor = 4
     for label in ("POSE", "LEFT_CONTACT", "RIGHT_CONTACT", "CARRY_A", "CARRY_B"):
         if cursor >= len(tokens) or tokens[cursor] != label:
@@ -146,6 +147,10 @@ def validate_holding_record(text, object_id, profile_id):
         if sum(value * value for value in values[3:]) < 1e-12:
             raise ValueError(f"invalid {label} quaternion")
         cursor += 7
+    if tokens[1] == "5":
+        if tokens[cursor:cursor + 2] != ["CARRY_FRAME", "torso_link"]:
+            raise ValueError("invalid carry frame in held-object geometry")
+        cursor += 2
     if tokens[cursor:] != ["INSTANCE_ID", object_id, "PROFILE_ID", profile_id]:
         raise ValueError("held-object instance/profile does not match the captured target")
     return text

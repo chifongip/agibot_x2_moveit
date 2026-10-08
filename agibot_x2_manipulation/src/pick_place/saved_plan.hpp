@@ -42,6 +42,8 @@ struct SavedPlan
   Eigen::Isometry3d box_to_left{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d box_to_right{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d pick_pose{Eigen::Isometry3d::Identity()};
+  Eigen::Isometry3d carry_torso_pose{Eigen::Isometry3d::Identity()};
+  std::optional<Eigen::Isometry3d> carry_frame;
   Eigen::Isometry3d carry_pose{Eigen::Isometry3d::Identity()};
   Eigen::Isometry3d place_pose{Eigen::Isometry3d::Identity()};
   // Empty frame denotes a table-derived request; explicit poses are resolved
@@ -59,6 +61,9 @@ bool validate_table_detection(
 bool validateSavedCheckpointState(
   const moveit::core::RobotState & measured, const planning_scene::PlanningScenePtr & scene,
   const PickPlaceConfig & config, std::string & error);
+
+bool validateSavedCarryFrame(
+  const SavedPlan & plan, const moveit::core::RobotState & measured, std::string & error);
 
 // Saved execution accepts configured start error without constructing motion.
 // CONTINUOUS retains legacy connectors; VERIFY_START never retimes the path.

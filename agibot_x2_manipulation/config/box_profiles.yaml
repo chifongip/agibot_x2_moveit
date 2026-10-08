@@ -4,6 +4,7 @@
     # localizer resolves AprilTag IDs to profile IDs; the server resolves the
     # profile ID to collision and grasp geometry at goal acceptance.
     box_profiles_tag_frame_prefix: tag
+    # Carry A/B are box-center poses [x,y,z,qx,qy,qz,qw] in torso_link.
     box_profiles:
       small_carton:
         tag_ids: [0]
@@ -12,7 +13,7 @@
         tag_to_box_center_pose: [0.03, 0.0, -0.16, 0.0, 0.0, 0.0, 1.0]
         pregrasp_distance: 0.08
         contact_height_offset: 0.1
-        # These migration baselines preserve the former legacy carry target.
+        # Existing numeric targets are retained and interpreted in torso_link.
         # Validate and calibrate this profile on hardware with plan_only before execution.
         carry_pose_a: [0.35, 0.0, 0.25, 0.0, 0.0, 0.0, 1.0]
         carry_pose_b: [0.25, 0.0, 0.05, 0.0, 0.0, 0.0, 1.0]
