@@ -9,7 +9,7 @@ box_localizer:
     tag_to_box_yaw: 0.0
     # Additional [x, y, z] correction from the centered top-tag model, in tag coordinates [m].
     tag_to_box_offset: [0.04, 0.0, 0.1]
-    stable_sample_count: 2
+    stable_sample_count: 3
     maximum_pose_age: 2.5
     maximum_position_spread: 0.005
     maximum_angular_spread: 0.0523598776  # 3 degrees
@@ -55,7 +55,7 @@ pick_place_server:
     ik_timeout: 0.05
     # Coordinated dual-arm search. These are shared grasp hypotheses, not
     # independent per-hand pose tolerances.
-    grasp_position_tolerance: 0.05  # 5 cm
+    grasp_position_tolerance: 0.1
     grasp_orientation_tolerance: 0.0872664626  # 5 degrees
     pregrasp_distance_tolerance: 0.020
     alternate_face_alignment_tolerance: 0.261799388  # 15 degrees from best face pair
@@ -83,7 +83,7 @@ pick_place_server:
     closed_chain_validation_orientation_step: 0.0174533
     closed_chain_contact_position_error: 0.1
     closed_chain_contact_orientation_error: 0.1745329252  # 10 degrees
-    carry_search_timeout: 8.0
+    carry_search_timeout: 30.0
     maximum_carry_candidates: 96
     carry_search_x_range: 0.05
     carry_search_y_range: 0.05
@@ -109,7 +109,7 @@ pick_place_server:
     table_tag_to_tabletop_center: [0.0, -0.55, 0.15]
     # [x, z] in the tabletop plane relative to the calibrated center. The z
     # value preserves the former tag-relative target at z=0.20 m.
-    table_tag_place_offset: [0.0, 0.05]
+    table_tag_place_offset: [0.0, 0.1]
     table_tag_to_box_yaw: 0.0
     table_collision_enabled: true
     table_collision_id: work_table
@@ -119,7 +119,7 @@ pick_place_server:
     table_tag_detections_topic: /front_center_rectify/detections
     table_tag_id: 9
     table_tag_minimum_decision_margin: 20.0
-    table_tag_stable_sample_count: 2
+    table_tag_stable_sample_count: 3
     table_tag_maximum_position_spread: 0.005
     table_tag_maximum_angular_spread: 0.0523598776  # 3 degrees
     table_tag_maximum_sample_gap: 2.5  # s; reset after a detector outage
@@ -172,7 +172,7 @@ pick_place_server:
     execution_settle_timeout: 10.0
     # Also accepts saved-plan start error per joint without adding alignment
     # or modifying the saved waypoint positions.
-    execution_joint_tolerance: 0.1
+    execution_joint_tolerance: 0.2
     execution_velocity_tolerance: 0.05
     execution_settle_samples: 3
     # Independent RoboJuDo locomanipulation posture control. The startup launch
