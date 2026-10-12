@@ -9,11 +9,18 @@
 #include <set>
 #include <sstream>
 #include <limits>
+#include <memory>
+#include <random>
 
 namespace agibot_x2_manipulation
 {
 namespace
 {
+constexpr int kRecoveryRefinements = 3;
+constexpr int kRecoveryBeamWidth = 4;
+constexpr int kRecoverySeedAttempts = 4;
+constexpr int kRecoveryExtraIKCallsPerPass = 128;
+
 Eigen::Isometry3d interpolate(const Eigen::Isometry3d & a, const Eigen::Isometry3d & b, double t)
 {
   Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
@@ -341,7 +348,8 @@ bool planCartesianMotion(
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
   moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end,
   std::string & error, const CancelFunction & canceled, PlanningDeadline deadline,
-  double minimum_joint_margin)
+  double minimum_joint_margin, const CartesianRecoveryPolicy & recovery,
+  const CartesianIKSolver & solver)
 {
   const auto interrupted = [&]() {return canceled() || std::chrono::steady_clock::now() >= deadline;};
   moveit::core::RobotState state(start);
@@ -351,6 +359,7 @@ bool planCartesianMotion(
   if (!std::isfinite(config.cartesian_step) || config.cartesian_step <= 0.0 ||
     !std::isfinite(config.closed_chain_orientation_step) || config.closed_chain_orientation_step <= 0.0 ||
     !std::isfinite(config.max_joint_step) || config.max_joint_step <= 0.0 ||
+    !std::isfinite(config.closed_chain_ik_timeout) || config.closed_chain_ik_timeout <= 0.0 ||
     !state.getRobotModel()->getLinkModel(config.left_tcp) ||
     !state.getRobotModel()->getLinkModel(config.right_tcp))
   {error = "invalid Cartesian sampling configuration or tip links"; return false;}
@@ -372,71 +381,249 @@ bool planCartesianMotion(
   const int steps = std::max(1, static_cast<int>(count));
   robot_trajectory::RobotTrajectory path(start.getRobotModel(), config.planning_group);
   path.addSuffixWayPoint(state, 0.0);
-  const std::vector<double> left_limits(left->getVariableCount(), config.max_joint_step);
-  const std::vector<double> right_limits(right->getVariableCount(), config.max_joint_step);
-  for (int sample = 1; sample <= steps; ++sample) {
-    if (interrupted()) {error = "Cartesian planning canceled or deadline reached"; return false;}
-    const double t = static_cast<double>(sample) / steps;
-    const auto expected_left = interpolate(from.left, target.left, t);
-    const auto expected_right = interpolate(from.right, target.right, t);
-    moveit::core::RobotState candidate(state);
-    const auto available = [&]() {
-        return std::min(config.closed_chain_ik_timeout,
-          std::chrono::duration<double>(deadline - std::chrono::steady_clock::now()).count() * 0.5);
-      };
-    if (available() <= 0.0 || !candidate.setFromIK(left, expected_left, config.left_tcp,
-        left_limits, available()) || interrupted() || available() <= 0.0 ||
-      !candidate.setFromIK(right, expected_right, config.right_tcp, right_limits, available()))
-    {error = "Cartesian dual-arm IK failed at sample " + std::to_string(sample); return false;}
-    candidate.update();
-    if (!candidate.satisfiesBounds(group) || !endpointReached(
-        candidate.getGlobalLinkTransform(config.left_tcp), candidate.getGlobalLinkTransform(config.right_tcp),
-        expected_left, expected_right, config.planning_position_limit(),
-        config.planning_orientation_limit()))
-    {error = "Cartesian waypoint violates bounds or pose accuracy"; return false;}
-    for (const auto * joint : group->getActiveJointModels()) {
-      if (joint->distance(state.getJointPositions(joint), candidate.getJointPositions(joint)) > config.max_joint_step)
-      {error = "Cartesian waypoint violates joint continuity"; return false;}
+  const auto finish = [&](robot_trajectory::RobotTrajectory & path) {
+    // Preserve IK waypoints instead of fitting/resampling a different path that
+    // can bend the TCP path or cross a nearby joint bound after valid IK.
+    trajectory_processing::IterativeParabolicTimeParameterization timing;
+    if (!timing.computeTimeStamps(path, config.velocity_scaling, config.acceleration_scaling))
+    {error = "Cartesian timing failed"; return false;}
+    if (!validateCartesianTrajectory(path, scene, config, from, target, error, interrupted,
+        minimum_joint_margin))
+    {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        error = "Cartesian validation deadline reached: " + error;
+        return false;
+      }
+      if (canceled()) {error = "Cartesian validation canceled: " + error; return false;}
+      if (error.find("joint position bounds") == std::string::npos) {return false;}
+      const auto original_error = error;
+      CartesianRepairInfo repair;
+      if (!repairCartesianTrajectory(path, scene, config, from, target, error, interrupted,
+          minimum_joint_margin, &repair))
+      {error = "Cartesian overshoot timing fallback failed: " + error; return false;}
+      std::ostringstream affected_joints, affected_intervals;
+      for (const auto & name : repair.joints) {affected_joints << name << ' ';}
+      for (const auto interval : repair.intervals) {affected_intervals << interval << ' ';}
+      RCLCPP_INFO(rclcpp::get_logger("cartesian_motion"),
+        "Cartesian spline repair strategy=%s original_duration=%.6fs final_duration=%.6fs "
+        "affected_joints=[%s] affected_intervals=[%s]; reason=%s; fallback=%s",
+        repair.strategy.c_str(), repair.original_duration, repair.final_duration,
+        affected_joints.str().c_str(), affected_intervals.str().c_str(),
+        original_error.c_str(), repair.fallback_reason.c_str());
     }
+    const auto final = hands(path.getLastWayPoint(), config);
+    if (!endpointReached(final.left, final.right, target.left, target.right,
+        config.planning_position_limit(), config.planning_orientation_limit()))
+    {error = "Cartesian timed endpoint differs from target"; return false;}
+    if (recovery.endpoint_scene &&
+      recovery.endpoint_scene->isStateColliding(path.getLastWayPoint(), config.planning_group))
+    {error = "retreat endpoint has not cleared the placed box"; return false;}
+    if (interrupted()) {error = "Cartesian planning canceled or deadline reached"; return false;}
+    path.getRobotTrajectoryMsg(output);
+    end = path.getLastWayPoint();
+    error.clear();
+    return true;
+  };
+
+  struct SearchStats
+  {
+    int ik_calls{0}, left_failures{0}, right_failures{0};
+    int bounds{0}, continuity{0}, pose{0}, collision{0}, margin{0};
+  } stats;
+  const auto statistics = [&]() {
+      std::ostringstream stream;
+      stream << "ik_calls=" << stats.ik_calls << "; left_ik=" << stats.left_failures <<
+        "; right_ik=" << stats.right_failures << "; bounds=" << stats.bounds <<
+        "; continuity=" << stats.continuity << "; pose=" << stats.pose <<
+        "; collision=" << stats.collision << "; margin=" << stats.margin;
+      return stream.str();
+    };
+  const auto stop_reason = [&]() -> std::string {
+      if (canceled()) {return "Cartesian planning canceled";}
+      if (std::chrono::steady_clock::now() >= deadline) {return "Cartesian planning deadline exhausted";}
+      return {};
+    };
+  // Limits passed to IK are centered on its seed. A perturbed seed needs a
+  // wider search envelope; admission below always uses the real predecessor.
+  const auto solve_pair = [&](moveit::core::RobotState & candidate,
+      const moveit::core::RobotState & previous, double t, int sample, int sample_count,
+      int * calls, int call_limit) {
+      const auto expected = HandPosePair{
+        interpolate(from.left, target.left, t), interpolate(from.right, target.right, t)};
+      for (const auto & arm : {
+          std::make_pair(left, std::make_pair(config.left_tcp, expected.left)),
+          std::make_pair(right, std::make_pair(config.right_tcp, expected.right))})
+      {
+        const auto stopped = stop_reason();
+        if (!stopped.empty()) {error = stopped; return false;}
+        if (calls && *calls >= call_limit)
+        {error = "Cartesian recovery IK call budget exhausted"; return false;}
+        const double timeout = std::min(config.closed_chain_ik_timeout,
+          std::chrono::duration<double>(deadline - std::chrono::steady_clock::now()).count() * 0.5);
+        if (timeout <= 0.0) {error = "Cartesian planning deadline exhausted"; return false;}
+        std::vector<double> limits;
+        for (const auto & name : arm.first->getVariableNames()) {
+          limits.push_back(config.max_joint_step + std::abs(
+            candidate.getVariablePosition(name) - previous.getVariablePosition(name)));
+        }
+        ++stats.ik_calls;
+        if (calls) {++*calls;}
+        const bool solved = solver ? solver(candidate, arm.first, arm.second.second, arm.second.first,
+          limits, timeout) : candidate.setFromIK(arm.first, arm.second.second, arm.second.first, limits, timeout);
+        const auto stopped_after = stop_reason();
+        if (!stopped_after.empty()) {error = stopped_after; return false;}
+        if (!solved) {
+          const bool is_left = arm.first == left;
+          ++(is_left ? stats.left_failures : stats.right_failures);
+          std::ostringstream detail;
+          detail << "Cartesian dual-arm IK failed at sample " << sample << "/" << sample_count <<
+            "; arm=" << (is_left ? "left" : "right") << "; progress=" << t <<
+            "; timeout=" << timeout << "; target_xyz=[" << arm.second.second.translation().transpose() <<
+            "]; target_xyzw=[" << Eigen::Quaterniond(arm.second.second.linear()).coeffs().transpose() << "]";
+          error = detail.str();
+          return false;
+        }
+      }
+      candidate.update();
+      return true;
+    };
+  const auto admit = [&](const moveit::core::RobotState & candidate,
+      const moveit::core::RobotState & previous, double t, bool check_scene) {
+      const auto & variables = group->getVariableNames();
+      if (!std::all_of(variables.begin(), variables.end(), [&](const std::string & name) {
+          return std::isfinite(candidate.getVariablePosition(name));
+        }) || !candidate.satisfiesBounds(group))
+      {
+        ++stats.bounds; error = "Cartesian waypoint violates bounds"; return false;
+      }
+      if (!endpointReached(candidate.getGlobalLinkTransform(config.left_tcp),
+          candidate.getGlobalLinkTransform(config.right_tcp), interpolate(from.left, target.left, t),
+          interpolate(from.right, target.right, t), config.planning_position_limit(),
+          config.planning_orientation_limit()))
+      {++stats.pose; error = "Cartesian waypoint violates pose accuracy"; return false;}
+      for (const auto * joint : group->getActiveJointModels()) {
+        if (joint->distance(previous.getJointPositions(joint), candidate.getJointPositions(joint)) >
+          config.max_joint_step)
+        {++stats.continuity; error = "Cartesian waypoint violates joint continuity"; return false;}
+      }
+      if (check_scene) {
+        if (minimum_joint_margin > 0.0 &&
+          candidate.getMinDistanceToPositionBounds(group).first + 1e-12 < minimum_joint_margin)
+        {++stats.margin; error = "Cartesian waypoint violates minimum joint margin"; return false;}
+        if (scene->isStateColliding(candidate, config.planning_group))
+        {++stats.collision; error = "Cartesian waypoint is in collision"; return false;}
+      }
+      return true;
+    };
+  bool ik_failed = false;
+  for (int sample = 1; sample <= steps; ++sample) {
+    if (interrupted()) {error = stop_reason(); return false;}
+    const double t = static_cast<double>(sample) / steps;
+    moveit::core::RobotState candidate(state);
+    if (!solve_pair(candidate, state, t, sample, steps, nullptr, 0)) {ik_failed = true; break;}
+    if (!admit(candidate, state, t, false)) {return false;}
     path.addSuffixWayPoint(candidate, 0.0);
     state = candidate;
   }
-  // Preserve IK waypoints instead of fitting/resampling a different path that
-  // can bend the TCP path or cross a nearby joint bound after valid IK.
-  trajectory_processing::IterativeParabolicTimeParameterization timing;
-  if (!timing.computeTimeStamps(path, config.velocity_scaling, config.acceleration_scaling))
-  {error = "Cartesian timing failed"; return false;}
-  if (!validateCartesianTrajectory(path, scene, config, from, target, error, interrupted,
-      minimum_joint_margin))
+  if (!ik_failed) {return finish(path);}
+  if (!config.cartesian_ik_recovery_enabled || interrupted()) {return false;}
+  const auto original_error = error;
+  // Every node is a virtual waypoint. Keep parent links so alternatives at
+  // earlier waypoints remain available without ever moving the measured start.
+  struct Node
   {
-    if (std::chrono::steady_clock::now() >= deadline) {
-      error = "Cartesian validation deadline reached: " + error;
-      return false;
+    moveit::core::RobotState state;
+    std::shared_ptr<const Node> parent;
+    double cost;
+  };
+  using NodePtr = std::shared_ptr<const Node>;
+  const auto root = std::make_shared<Node>(Node{path.getFirstWayPoint(), nullptr, 0.0});
+  for (int refinement = 0; refinement <= kRecoveryRefinements && !interrupted(); ++refinement) {
+    const int refined_steps = steps * (1 << refinement);
+    if (refined_steps > 10000) {error = "Cartesian recovery exceeds waypoint budget"; break;}
+    // Cover a complete traversal for each retained branch, plus bounded extra
+    // exploration. A fixed total budget would disable long paths and refinements.
+    const int call_limit = 2 * refined_steps * kRecoveryBeamWidth + kRecoveryExtraIKCallsPerPass;
+    int calls = 0;
+    int retained = 0;
+    std::vector<NodePtr> beam{root};
+    std::mt19937 random(0x583252U + refinement);
+    for (int sample = 1; sample <= refined_steps && !beam.empty() && !interrupted(); ++sample) {
+      const int remaining = refined_steps - sample + 1;
+      // Reserve enough calls to reach the endpoint; do not spend the entire
+      // budget exploring early branches of a long Cartesian motion.
+      const int width = std::min(kRecoveryBeamWidth, (call_limit - calls) / (2 * remaining));
+      if (width == 0) {error = "Cartesian recovery IK call budget exhausted"; beam.clear(); break;}
+      if (beam.size() > static_cast<std::size_t>(width)) {beam.resize(width);}
+      const int attempts = std::clamp(
+        (call_limit - calls) / (2 * remaining * static_cast<int>(beam.size())),
+        1, kRecoverySeedAttempts);
+      std::vector<NodePtr> next;
+      const double t = static_cast<double>(sample) / refined_steps;
+      for (const auto & previous : beam) {
+        for (int attempt = 0; attempt < attempts && !interrupted(); ++attempt) {
+          moveit::core::RobotState candidate(previous->state);
+          if (attempt > 0) {
+            for (const auto * arm : {left, right}) {
+              for (const auto & name : arm->getVariableNames()) {
+                const auto & bounds = candidate.getRobotModel()->getVariableBounds(name);
+                const double offset = (2.0 * static_cast<double>(random()) / std::mt19937::max() - 1.0) *
+                  config.max_joint_step;
+                double value = previous->state.getVariablePosition(name) + offset;
+                if (bounds.position_bounded_) {value = std::clamp(value, bounds.min_position_, bounds.max_position_);}
+                candidate.setVariablePosition(name, value);
+              }
+            }
+            candidate.update();
+          }
+          if (!solve_pair(candidate, previous->state, t, sample, refined_steps, &calls, call_limit) ||
+            !admit(candidate, previous->state, t, true)) {continue;}
+          const double cost = previous->cost + candidate.distance(previous->state, group);
+          auto duplicate = std::find_if(next.begin(), next.end(), [&](const NodePtr & node) {
+              return candidate.distance(node->state, group) < 1e-6;
+            });
+          auto node = std::make_shared<Node>(Node{candidate, previous, cost});
+          if (duplicate == next.end()) {next.push_back(node);}
+          else if (cost < (*duplicate)->cost) {*duplicate = node;}
+        }
+      }
+      std::stable_sort(next.begin(), next.end(), [](const NodePtr & a, const NodePtr & b) {return a->cost < b->cost;});
+      if (next.size() > static_cast<std::size_t>(kRecoveryBeamWidth)) {next.resize(kRecoveryBeamWidth);}
+      beam = std::move(next);
+      retained = static_cast<int>(beam.size());
     }
-    if (canceled()) {error = "Cartesian validation canceled: " + error; return false;}
-    if (error.find("joint position bounds") == std::string::npos) {return false;}
-    const auto original_error = error;
-    CartesianRepairInfo repair;
-    if (!repairCartesianTrajectory(path, scene, config, from, target, error, interrupted,
-        minimum_joint_margin, &repair))
-    {error = "Cartesian overshoot timing fallback failed: " + error; return false;}
-    std::ostringstream affected_joints, affected_intervals;
-    for (const auto & name : repair.joints) {affected_joints << name << ' ';}
-    for (const auto interval : repair.intervals) {affected_intervals << interval << ' ';}
-    RCLCPP_INFO(rclcpp::get_logger("cartesian_motion"),
-      "Cartesian spline repair strategy=%s original_duration=%.6fs final_duration=%.6fs "
-      "affected_joints=[%s] affected_intervals=[%s]; reason=%s; fallback=%s",
-      repair.strategy.c_str(), repair.original_duration, repair.final_duration,
-      affected_joints.str().c_str(), affected_intervals.str().c_str(),
-      original_error.c_str(), repair.fallback_reason.c_str());
+    if (!interrupted()) {
+      for (const auto & terminal : beam) {
+        std::vector<NodePtr> reverse;
+        for (auto node = terminal; node; node = node->parent) {reverse.push_back(node);}
+        robot_trajectory::RobotTrajectory candidate(start.getRobotModel(), config.planning_group);
+        for (auto node = reverse.rbegin(); node != reverse.rend(); ++node) {candidate.addSuffixWayPoint((*node)->state, 0.0);}
+        if (finish(candidate)) {
+          const auto detail = "segment=" + recovery.segment + "; refinement=" + std::to_string(refinement) +
+            "; steps=" + std::to_string(refined_steps) + "; branches=" + std::to_string(retained) +
+            "; " + statistics() + "; original: " + original_error;
+          RCLCPP_INFO(rclcpp::get_logger("cartesian_motion"),
+            "Cartesian IK recovery accepted; segment=%s: %s", recovery.segment.c_str(), detail.c_str());
+          if (recovery.report) {recovery.report(true, detail);}
+          return true;
+        }
+        if (interrupted()) {break;}
+      }
+    }
+    const auto detail = "segment=" + recovery.segment + "; refinement=" + std::to_string(refinement) +
+      "; steps=" + std::to_string(refined_steps) + "; pass_calls=" + std::to_string(calls) +
+      "; pass_call_limit=" + std::to_string(call_limit) +
+      "; branches=" + std::to_string(retained) + "; " + statistics() + "; last: " + error;
+    RCLCPP_INFO(rclcpp::get_logger("cartesian_motion"), "Cartesian IK recovery pass; segment=%s: %s",
+      recovery.segment.c_str(), detail.c_str());
+    if (recovery.report) {recovery.report(false, detail);}
   }
-  const auto final = hands(path.getLastWayPoint(), config);
-  if (!endpointReached(final.left, final.right, target.left, target.right,
-      config.planning_position_limit(), config.planning_orientation_limit()))
-  {error = "Cartesian timed endpoint differs from target"; return false;}
-  path.getRobotTrajectoryMsg(output);
-  end = path.getLastWayPoint();
-  error.clear();
-  return true;
+  const auto stopped = stop_reason();
+  std::ostringstream summary;
+  summary << (stopped.empty() ? "no Cartesian solution found within limits" : stopped) <<
+    "; original: " << original_error << "; last: " << error << "; " << statistics();
+  error = summary.str();
+  return false;
+
 }
 }  // namespace agibot_x2_manipulation

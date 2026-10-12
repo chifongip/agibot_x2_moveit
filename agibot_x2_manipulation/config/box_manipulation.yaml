@@ -34,6 +34,8 @@ pick_place_server:
     contact_height_offset: 0.0
     lift_height: 0.08
     cartesian_step: 0.01
+    # Bounded IK recovery along the requested path for all shared Cartesian motions.
+    cartesian_ik_recovery_enabled: true
     # Generated Cartesian trajectory accuracy (m / rad).
     planning_position_tolerance: 0.02
     planning_orientation_tolerance: 0.0872664626  # 5 degrees

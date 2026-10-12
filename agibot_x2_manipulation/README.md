@@ -1046,6 +1046,40 @@ orientation. A pick route that lifts after lateral translation separates its
 rotation from that lift. General carry transitions retain joint-space planning.
 Cartesian failures cannot fall back to an unrestricted joint-space segment.
 
+All shared Cartesian movements in `pose_to_pose` mode (approach, pick lift,
+lift after translation, place descent, and retreat) first try the usual
+continuous-seed IK path. If IK fails, `cartesian_ik_recovery_enabled` (default `true`) enables a
+bounded search along the same paired TCP lines and orientations. It retries the
+original resolution, then divides translation and angular spacing by 2, 4, and
+8, retaining up to four alternative joint branches with up to four seed trials
+per predecessor. Each resolution pass allows two arm IK calls per waypoint for
+each of the four retained branches, plus 128 calls for extra exploration; the
+remaining budget reduces branch width and seed trials to reserve calls for the
+endpoint. The existing planning deadline and 10,000-waypoint ceiling still apply.
+Set this parameter to `false` before starting the server to retain single-path IK.
+The shared planner reads this flag directly, including during plan-only work
+and Cartesian rebuilding after Continue or saved-plan invalidation. Recovery
+is triggered by IK failure, not collision rejection or timing failure.
+No pose tolerance, continuity limit, endpoint, or contact permission is relaxed.
+Approach uses its existing box-contact allowances; lift and descent retain the
+attached box geometry. Only retreat uses the strict endpoint scene. Designated hand/wrist contact with the released box is allowed at the start and
+during withdrawal under the existing retreat contact scene. The endpoint must
+be collision-free under the strict scene before returning to Prepare/Ready.
+The search is virtual: no partial path is executed. Complete candidates still
+undergo timing, controller-spline, bounds, collision, and Cartesian checks.
+Logs identify the failed arm, TCP target, progress, timeout, refinement, and
+search rejection counts; planning traces record `cartesian_ik_recovery` events
+with the actual segment name. `cartesian_segment` events include
+`ik_recovery_enabled` so the active configuration can be checked.
+Exhaustion pauses execution through the existing task
+policy; it reports that no solution was found within the search limits, rather
+than declaring the straight path impossible. Continue replans from fresh
+stationary feedback while retaining completed physical checkpoints. The separate
+`closed_chain` search and general joint-space carry planning remain unchanged.
+There is no free-space OMPL fallback or added rigid-grasp constraint. Existing
+launch overrides must use the new parameter name; there is no retreat-only flag.
+See [Cartesian IK recovery validation](test/cartesian_ik_recovery_validation.md).
+
 `cartesian_step` (0.01 m) controls the paired waypoint spacing.
 `planning_position_tolerance` (0.02 m) and
 `planning_orientation_tolerance` (0.0872664626 rad, 5 degrees) bound

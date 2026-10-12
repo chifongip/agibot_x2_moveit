@@ -35,6 +35,8 @@ class TestCartesianWorkflow(fixture.TestDummyWorkflow):
                      if r["event"] == "cartesian_segment" and r["success"]}
         self.assertTrue({"approach", "pick_lift", "place_descent", "retreat"} <= cartesian,
                         cartesian)
+        self.assertTrue(all(r["fields"]["ik_recovery_enabled"] == "true"
+                            for r in records if r["event"] == "cartesian_segment"))
         self.assertFalse({"pregrasp", "direct", "carry_translation", "to_prepare", "ready"}
                          & cartesian)
         self.assertTrue(any(r["event"] == "pregrasp_direct_joint_route" for r in records))

@@ -117,6 +117,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.contact_height_offset = parameter<double>(node, "contact_height_offset", 0.0);
   config.lift_height = parameter<double>(node, "lift_height", 0.05);
   config.cartesian_step = parameter<double>(node, "cartesian_step", 0.01);
+  config.cartesian_ik_recovery_enabled = parameter<bool>(
+    node, "cartesian_ik_recovery_enabled", true);
   config.cartesian_path_position_tolerance = parameter<double>(
     node, "cartesian_path_position_tolerance", 0.02);
   config.cartesian_path_orientation_tolerance = parameter<double>(

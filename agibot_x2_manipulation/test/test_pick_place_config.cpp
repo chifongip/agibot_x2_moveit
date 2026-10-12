@@ -42,6 +42,13 @@ TEST_F(PickPlaceConfigTest, EnablesOptionalPickTargetReplanning)
   EXPECT_TRUE(loadPickPlaceConfig(server).pick_replan_on_target_movement);
 }
 
+TEST_F(PickPlaceConfigTest, CanDisableCartesianIKRecovery)
+{
+  auto server = node("cartesian_recovery_disabled");
+  server->declare_parameter("cartesian_ik_recovery_enabled", false);
+  EXPECT_FALSE(loadPickPlaceConfig(server).cartesian_ik_recovery_enabled);
+}
+
 TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
 {
   const auto config = loadPickPlaceConfig(node("defaults"));
@@ -57,6 +64,7 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_EQ(config.reset_named_target, "ready");
   EXPECT_DOUBLE_EQ(config.tag_reacquisition_timeout, config.table_tag_stability_timeout);
   EXPECT_FALSE(config.pick_replan_on_target_movement);
+  EXPECT_TRUE(config.cartesian_ik_recovery_enabled);
   EXPECT_FALSE(config.allow_execution);
   EXPECT_TRUE(config.visible_boxes_as_obstacles);
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, config.reset_state_timeout);

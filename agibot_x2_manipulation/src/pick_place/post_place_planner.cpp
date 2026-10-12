@@ -944,10 +944,18 @@ bool PostPlacePlanner::plan(
       if (direct_pose_to_pose) {
         retreat.name = "retreat";
         const bool planned = planCartesianMotion(start, retreat_target, release, config_,
-          retreat.trajectory, retreat_end, error, canceled, deadline);
+          retreat.trajectory, retreat_end, error, canceled, deadline, 0.0,
+          {strict,
+            [this](bool success, const std::string & detail) {
+              if (trace_.enabled()) {
+                trace_.write(node_->now().nanoseconds(), "cartesian_ik_recovery", success, detail,
+                  {{"segment", "retreat"}});
+              }
+            }, "retreat"});
         if (trace_.enabled()) {
           trace_.write(node_->now().nanoseconds(), "cartesian_segment", planned, error,
-            {{"segment", "retreat"}});
+            {{"segment", "retreat"},
+              {"ik_recovery_enabled", config_.cartesian_ik_recovery_enabled ? "true" : "false"}});
         }
         if (!planned) {continue;}
         if (!validState(retreat_end, strict, retreat_end.getJointModelGroup(config_.planning_group), error)) {
@@ -1060,10 +1068,18 @@ bool PostPlacePlanner::planRetreat(
   retreat.name = "retreat";
   retreat.retreat = true;
   const bool planned = planCartesianMotion(start, target, release, config_, retreat.trajectory,
-    end, error, canceled, deadline);
+    end, error, canceled, deadline, 0.0,
+    {strict,
+      [this](bool success, const std::string & detail) {
+        if (trace_.enabled()) {
+          trace_.write(node_->now().nanoseconds(), "cartesian_ik_recovery", success, detail,
+            {{"segment", "retreat"}});
+        }
+      }, "retreat"});
   if (trace_.enabled()) {
     trace_.write(node_->now().nanoseconds(), "cartesian_segment", planned, error,
-      {{"segment", "retreat"}});
+      {{"segment", "retreat"},
+        {"ik_recovery_enabled", config_.cartesian_ik_recovery_enabled ? "true" : "false"}});
   }
   if (!planned) {return false;}
   if (!validState(end, strict, group, error)) {

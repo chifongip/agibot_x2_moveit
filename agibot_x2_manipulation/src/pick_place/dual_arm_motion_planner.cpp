@@ -674,8 +674,12 @@ public:
         const auto cartesian_started = std::chrono::steady_clock::now();
         const bool planned = planCartesianMotion(state, {grasp.left_contact, grasp.right_contact},
           scene, config_, message, end, error, canceled, std::min(deadline, phase_deadline_),
-          minimum_joint_margin);
+          minimum_joint_margin,
+          {nullptr, [this, segment = controls[index].segment](bool success, const std::string & detail) {
+              writeTrace("cartesian_ik_recovery", success, detail, {{"segment", segment}});
+            }, controls[index].segment});
         writeTrace("cartesian_segment", planned, error, {{"segment", controls[index].segment},
+          {"ik_recovery_enabled", config_.cartesian_ik_recovery_enabled ? "true" : "false"},
           {"elapsed_seconds", std::to_string(std::chrono::duration<double>(
             std::chrono::steady_clock::now() - cartesian_started).count())}});
         if (!planned) {return false;}
@@ -1157,11 +1161,22 @@ public:
   {
     if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       const auto scene = retreat_scene ? retreat_scene : graspContactScene(planning_scene_.snapshot(), config_);
+      const std::string segment = retreat_scene ? "retreat" : "approach";
+      planning_scene::PlanningScenePtr endpoint_scene;
+      if (retreat_scene) {
+        endpoint_scene = planning_scene::PlanningScene::clone(retreat_scene);
+        endpoint_scene->getAllowedCollisionMatrixNonConst().setEntry(config_.box_id, false);
+        endpoint_scene->getAllowedCollisionMatrixNonConst().setDefaultEntry(config_.box_id, false);
+      }
       const auto cartesian_started = std::chrono::steady_clock::now();
       const bool planned = planCartesianMotion(start, {target.left_contact, target.right_contact},
-        scene, config_, output, end_state, error, canceled, std::min(outer_deadline, phase_deadline_));
+        scene, config_, output, end_state, error, canceled, std::min(outer_deadline, phase_deadline_),
+        0.0, {endpoint_scene, [this, segment](bool success, const std::string & detail) {
+            writeTrace("cartesian_ik_recovery", success, detail, {{"segment", segment}});
+          }, segment});
       writeTrace("cartesian_segment", planned, error,
-        {{"segment", retreat_scene ? "retreat" : "approach"},
+        {{"segment", segment},
+          {"ik_recovery_enabled", config_.cartesian_ik_recovery_enabled ? "true" : "false"},
           {"elapsed_seconds", std::to_string(std::chrono::duration<double>(
             std::chrono::steady_clock::now() - cartesian_started).count())}});
       return planned;

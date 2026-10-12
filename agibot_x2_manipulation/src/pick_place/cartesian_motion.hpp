@@ -47,12 +47,26 @@ bool repairCartesianTrajectory(
   const CancelFunction & interrupted, double minimum_joint_margin = 0.0,
   CartesianRepairInfo * info = nullptr);
 
+struct CartesianRecoveryPolicy
+{
+  // Retreat must finish clear of the released box, even when its start permits contact.
+  planning_scene::PlanningSceneConstPtr endpoint_scene;
+  std::function<void (bool, const std::string &)> report{};
+  std::string segment{"cartesian"};
+};
+
+// Internal solver seam for deterministic search tests; production uses RobotState IK.
+using CartesianIKSolver = std::function<bool (
+    moveit::core::RobotState &, const moveit::core::JointModelGroup *,
+    const Eigen::Isometry3d &, const std::string &, const std::vector<double> &, double)>;
+
 bool planCartesianMotion(
   const moveit::core::RobotState & start, const HandPosePair & target,
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
   moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end,
   std::string & error, const CancelFunction & canceled, PlanningDeadline deadline,
-  double minimum_joint_margin = 0.0);
+  double minimum_joint_margin = 0.0, const CartesianRecoveryPolicy & recovery = {},
+  const CartesianIKSolver & solver = {});
 
 bool isCartesianPickSegment(const std::string & segment);
 

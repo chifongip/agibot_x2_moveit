@@ -61,6 +61,7 @@ struct PickPlaceConfig
   double detection_orientation_limit(double legacy) const
   {return detection_orientation_tolerance.value_or(legacy);}
   double cartesian_step{0.0};
+  bool cartesian_ik_recovery_enabled{true};
   double cartesian_path_position_tolerance{0.02};
   double cartesian_path_orientation_tolerance{0.0872664626};
   double max_pose_age{0.0};

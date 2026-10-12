@@ -31,7 +31,10 @@ def generate_test_description():
     profiles = yaml.safe_load((Path(__file__).parent / "config" /
                                "box_profiles_simulation.yaml").read_text())
     profiles["pick_place_server"] = {"ros__parameters": {
-        "simulate_ideal_attachment": True, "execution_position_tolerance": 0.02}}
+        "simulate_ideal_attachment": True, "execution_position_tolerance": 0.02,
+        # Keep the carry preview reachable after the 8 cm lateral displacement.
+        # This fixture tests contact-aware recovery rather than maximum lift reach.
+        "lift_height": 0.04}}
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as params:
         yaml.safe_dump(profiles, params)
     return fixture.fixture.make_test_description(params.name, extra_arguments={
