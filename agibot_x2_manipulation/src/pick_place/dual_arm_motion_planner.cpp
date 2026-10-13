@@ -2,6 +2,7 @@
 #include "agibot_x2_manipulation/planning_budget.hpp"
 #include "pick_place/dual_arm_motion_planner.hpp"
 #include "pick_place/endpoint_reached.hpp"
+#include "pick_place/endpoint_precheck_diagnostics.hpp"
 #include "pick_place/cartesian_motion.hpp"
 #include "pick_place/pose_segment_cache.hpp"
 #include "pick_place/planning_trace_logger.hpp"
@@ -159,8 +160,10 @@ public:
     moveit::core::RobotState & state, const Eigen::Isometry3d & left_pose,
     const Eigen::Isometry3d & right_pose, bool require_continuity = false,
     double timeout = -1.0, PlanningDeadline deadline = PlanningDeadline::max(),
-    const CancelFunction & canceled = []() {return false;}) const
+    const CancelFunction & canceled = []() {return false;},
+    DualArmIKFailure * failure = nullptr) const
   {
+    if (failure) {*failure = DualArmIKFailure::NONE;}
     const auto * left_group = state.getJointModelGroup(config_.left_group_name);
     const auto * right_group = state.getJointModelGroup(config_.right_group_name);
     const std::vector<double> left_consistency(
@@ -176,7 +179,14 @@ public:
         return std::chrono::duration<double>(std::min(deadline, phase_deadline_) -
                std::chrono::steady_clock::now()).count();
       };
-    if (canceled() || available() <= 0.0) {return false;}
+    if (canceled()) {
+      if (failure) {*failure = DualArmIKFailure::CANCELED;}
+      return false;
+    }
+    if (available() <= 0.0) {
+      if (failure) {*failure = DualArmIKFailure::DEADLINE;}
+      return false;
+    }
     const double requested_timeout = timeout > 0.0 ? timeout : config_.ik_timeout;
     const double solve_timeout = std::min(requested_timeout, available() * 0.5);
     state.update();
@@ -184,10 +194,18 @@ public:
       state.setFromIK(left_group, left_pose, config_.left_tcp, left_consistency, solve_timeout) :
       state.setFromIK(left_group, left_pose, config_.left_tcp, solve_timeout);
     if (!left_solved) {
+      if (failure) {*failure = DualArmIKFailure::LEFT_ARM;}
       return false;
     }
     state.update();
-    if (canceled() || available() <= 0.0) {return false;}
+    if (canceled()) {
+      if (failure) {*failure = DualArmIKFailure::CANCELED;}
+      return false;
+    }
+    if (available() <= 0.0) {
+      if (failure) {*failure = DualArmIKFailure::DEADLINE;}
+      return false;
+    }
     const double right_timeout = std::min(requested_timeout, available());
     const bool right_solved = require_continuity ?
       state.setFromIK(
@@ -195,6 +213,7 @@ public:
       right_timeout) :
       state.setFromIK(right_group, right_pose, config_.right_tcp, right_timeout);
     if (!right_solved) {
+      if (failure) {*failure = DualArmIKFailure::RIGHT_ARM;}
       return false;
     }
     state.update();
@@ -2352,39 +2371,106 @@ public:
       std::size_t order;
     };
     std::vector<Endpoint> endpoints;
+    EndpointPrecheckDiagnostics diagnostics;
+    struct RejectedEndpoint
+    {
+      Eigen::Isometry3d pose;
+      std::vector<double> positions;
+      bool collision;
+    };
+    std::vector<RejectedEndpoint> rejected_endpoints;
+    const auto precheck_started = std::chrono::steady_clock::now();
     const auto precheck_deadline = std::min(
-      deadline, std::chrono::steady_clock::now() +
+      deadline, precheck_started +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(config_.carry_search_timeout * 0.15)));
+    const auto candidates = placePoseCandidates(requested_pose);
+    diagnostics.candidates = candidates.size();
+    std::string precheck_error;
+    // Defer contact collection, formatting, and file I/O until the precheck
+    // fails. In particular, successful route planning must not lose budget to
+    // diagnostic collision checks or synchronous trace writes.
+    const auto collect_precheck_details = [&]() {
+      moveit::core::RobotState rejected(start);
+      for (const auto & sample : rejected_endpoints) {
+        rejected.setVariablePositions(sample.positions.data());
+        rejected.update();
+        if (sample.collision) {
+          std::string pairs;
+          if (ignore_box) {
+            planning_scene_.collisionFreeWithBox(rejected, sample.pose, true, &pairs);
+          } else {
+            planning_scene_.collisionFree(rejected, true, false, &pairs);
+          }
+          diagnostics.rejectCollision(pairs);
+        } else {
+          diagnostics.rejectBounds(rejected, dual_group);
+        }
+      }
+    };
+    const auto trace_precheck = [&]() {
+      writeTrace("adaptive_place_endpoint_precheck", !endpoints.empty() && precheck_error.empty(),
+        precheck_error.empty() ? diagnostics.summary() : precheck_error,
+        {{"requested_place_pose", formatPose(requested_pose)},
+          {"planning_frame", config_.planning_frame},
+          {"candidate_count", std::to_string(diagnostics.candidates)},
+          {"evaluated", std::to_string(diagnostics.evaluated)},
+          {"accepted", std::to_string(diagnostics.accepted)},
+          {"ik_rejected", std::to_string(diagnostics.ik_rejected)},
+          {"left_ik_rejected", std::to_string(diagnostics.left_ik_rejected)},
+          {"right_ik_rejected", std::to_string(diagnostics.right_ik_rejected)},
+          {"ik_interrupted", std::to_string(diagnostics.ik_interrupted)},
+          {"bounds_rejected", std::to_string(diagnostics.bounds_rejected)},
+          {"collision_rejected", std::to_string(diagnostics.collision_rejected)},
+          {"stop_reason", diagnostics.stop_reason}});
+    };
     std::size_t endpoint_order = 0;
-    for (const auto & pose : placePoseCandidates(requested_pose)) {
+    for (const auto & pose : candidates) {
       if (canceled()) {
-        error = "adaptive place endpoint precheck canceled";
+        diagnostics.stop_reason = std::chrono::steady_clock::now() >= phase_deadline_ ?
+          "phase_deadline" : "canceled";
+        collect_precheck_details();
+        error = "adaptive place endpoint precheck canceled; " + diagnostics.summary();
+        precheck_error = error;
+        trace_precheck();
         return false;
       }
       const auto now = std::chrono::steady_clock::now();
       if (now >= precheck_deadline || now >= deadline) {
+        diagnostics.stop_reason = now >= deadline ? "search_deadline" : "precheck_deadline";
         break;
       }
+      ++diagnostics.evaluated;
       const auto grasp = graspFromBoxToTcp(
         pose, box_to_left_contact, box_to_right_contact, 0.0);
       moveit::core::RobotState endpoint(start);
       const double remaining = std::chrono::duration<double>(precheck_deadline - now).count();
+      DualArmIKFailure ik_failure;
       if (!setFromDualArmIK(
           endpoint, grasp.left_contact, grasp.right_contact, false,
-          std::max(1e-4, std::min(0.02, remaining * 0.5))))
+          std::max(1e-4, std::min(0.02, remaining * 0.5)),
+          PlanningDeadline::max(), []() {return false;}, &ik_failure))
       {
+        diagnostics.rejectIK(ik_failure);
         ++endpoint_order;
         continue;
       }
       endpoint.update();
-      if (!endpoint.satisfiesBounds(dual_group) ||
-        !(ignore_box ? planning_scene_.collisionFreeWithBox(endpoint, pose, true) :
-        planning_scene_.collisionFree(endpoint, true, false)))
-      {
+      if (!endpoint.satisfiesBounds(dual_group)) {
+        rejected_endpoints.push_back({pose, std::vector<double>(endpoint.getVariablePositions(),
+          endpoint.getVariablePositions() + endpoint.getVariableCount()), false});
         ++endpoint_order;
         continue;
       }
+      if (!(ignore_box ? planning_scene_.collisionFreeWithBox(endpoint, pose, true) :
+        planning_scene_.collisionFree(endpoint, true, false)))
+      {
+        rejected_endpoints.push_back({pose, std::vector<double>(endpoint.getVariablePositions(),
+          endpoint.getVariablePositions() + endpoint.getVariableCount()), true});
+        ++endpoint_order;
+        continue;
+      }
+      ++diagnostics.accepted;
       endpoints.push_back(
         {
           pose,
@@ -2401,9 +2487,12 @@ public:
         return score_a < score_b || (score_a == score_b && a.order < b.order);
       });
     if (endpoints.empty()) {
+      collect_precheck_details();
       error = "no place endpoint passed IK, bounds, and collision precheck; "
         "requested_place_pose(frame=" + config_.planning_frame + ")=" +
-        formatPose(requested_pose);
+        formatPose(requested_pose) + "; " + diagnostics.summary();
+      precheck_error = error;
+      trace_precheck();
       return false;
     }
 

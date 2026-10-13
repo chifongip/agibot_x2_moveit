@@ -1699,6 +1699,21 @@ absolute path; it takes precedence over `planning_log_directory`. The trace
 may contain measured poses and joint-planning diagnostics; treat it as robot
 operational data and do not commit it.
 
+`adaptive_place_endpoint_precheck` records failed or interrupted prechecks,
+including the number of generated, evaluated, and accepted placement candidates, rejection counts for each IK arm, joint
+bounds, and collisions, and the reason the precheck stopped. If no endpoint
+passes, the action/status failure message retains the requested pose and adds
+the same summary, example offending joint values and limits, and detected
+collision pairs. Counts identify the first failed check for each candidate;
+an IK rejection means the solver found no solution within its allotted time,
+not proof that the target is unreachable. `IK_interrupted` counts solves that
+could not proceed because of cancellation or a phase deadline. A deadline
+stop can leave candidates unevaluated. Existing planning budgets and candidate
+acceptance rules are unchanged. The timed precheck keeps the original boolean
+collision checks. Contact collection and diagnostic trace writes run only after
+precheck failure or cancellation, using the saved rejected joint configurations;
+contact pairs reflect the scene at diagnostic collection time.
+
 `pose_search_summary` records elapsed time, dual-arm IK calls/time, and MoveGroup
 OMPL calls/time. `direct_joint_route`, `pregrasp_direct_joint_route`,
 `pose_prefix_reuse`, and `execution_plan_reuse` record accepted/rejected shortcuts

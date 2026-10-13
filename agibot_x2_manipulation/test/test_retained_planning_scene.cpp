@@ -157,6 +157,44 @@ TEST_F(RetainedPlanningSceneTest, ExplicitRemovalClearsRetainedBoxEvenWhenAbsent
   EXPECT_FALSE(manager_->snapshot()->getWorld()->hasObject("grasp_box"));
 }
 
+TEST_F(RetainedPlanningSceneTest, DiagnosticContactsPreserveCollisionDecisionsAndScene)
+{
+  moveit::core::RobotState state(robot_);
+  state.setToDefaultValues();
+  state.update();
+  auto target = Eigen::Isometry3d::Identity();
+  target.translation().x() = 5.0;
+  std::string error;
+  for (const bool blocked : {false, true}) {
+    liveObject("external_blocker", blocked ? 0.0 : 3.0);
+    ASSERT_TRUE(manager_->synchronize(error)) << error;
+    std::string pairs;
+    const bool free = manager_->collisionFree(state, true, false);
+    EXPECT_EQ(free, !blocked);
+    EXPECT_EQ(manager_->collisionFree(state, true, false, &pairs), free);
+    if (blocked) {
+      EXPECT_NE(pairs.find("external_blocker"), std::string::npos);
+      EXPECT_NE(pairs.find("hand"), std::string::npos);
+    } else {
+      EXPECT_TRUE(pairs.empty());
+    }
+    pairs.clear();
+    const bool free_with_box = manager_->collisionFreeWithBox(state, target, true);
+    EXPECT_EQ(free_with_box, !blocked);
+    EXPECT_EQ(manager_->collisionFreeWithBox(state, target, true, &pairs), free_with_box);
+    if (blocked) {EXPECT_NE(pairs.find("external_blocker"), std::string::npos);}
+    else {EXPECT_TRUE(pairs.empty());}
+    EXPECT_DOUBLE_EQ(state.getVariablePosition("slide"), 0.0);
+    // The diagnostic virtual-box query must not insert a world object or
+    // modify the allowed-collision policy used by subsequent planning.
+    const auto scene = manager_->snapshot();
+    EXPECT_FALSE(scene->getWorld()->hasObject(config_.box_id));
+    collision_detection::AllowedCollision::Type allowed;
+    EXPECT_FALSE(scene->getAllowedCollisionMatrix().getEntry(config_.box_id, "hand", allowed));
+    EXPECT_EQ(manager_->collisionFree(state, true, false), free);
+  }
+}
+
 TEST_F(RetainedPlanningSceneTest, AttachmentAndReleaseUpdateTheRetainedManipulatedObject)
 {
   liveObject("grasp_box", 0.3);
