@@ -2227,7 +2227,10 @@ public:
       error = "place time parameterization canceled";
       return false;
     }
-    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE && !validated_segment_timing) {
+    // Appending separately timed segments can change the shared boundary's
+    // derivatives. Check the complete controller spline, even when each segment
+    // passed validation independently, before accepting a placement candidate.
+    if (config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE) {
       auto scene = route_scene;
       auto reference = trajectory.getFirstWayPoint();
       if (!copySceneAttachments(reference, scene->getCurrentState())) {
@@ -2243,6 +2246,15 @@ public:
         };
       if (!validateTimedReturnTrajectory(checked, scene, config_.return_validation_joint_step,
           error, interrupted, true, 0.0, {}, nullptr, config_.controller_spline_bounds_tolerance)) {return false;}
+      for (const auto & range : cartesian_segments_) {
+        robot_trajectory::RobotTrajectory suffix(start.getRobotModel(), move_group_.getName());
+        for (std::size_t index = range.first; index <= range.last; ++index) {
+          suffix.addSuffixWayPoint(checked.getWayPoint(index),
+            index == range.first ? 0.0 : checked.getWayPointDurationFromPrevious(index));
+        }
+        if (!validateCartesianTrajectory(suffix, scene, config_, range.from, range.to,
+            error, interrupted)) {return false;}
+      }
     }
     trajectory.getRobotTrajectoryMsg(output);
     end_state = state;
@@ -2283,7 +2295,9 @@ public:
     std::vector<Eigen::Isometry3d> result;
     result.reserve(scored.size());
     for (const auto & item : scored) {
-      result.push_back(item.pose);
+      if (std::none_of(result.begin(), result.end(), [&](const Eigen::Isometry3d & existing) {
+          return existing.isApprox(item.pose, 1e-9);
+        })) {result.push_back(item.pose);}
     }
     return result;
   }
@@ -2295,7 +2309,7 @@ public:
     const Eigen::Isometry3d & box_to_right_contact,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     Eigen::Isometry3d & selected_pose, std::string & error,
-    const CancelFunction & canceled, const PlaceContinuation & continuation)
+    const CancelFunction & canceled, const PlaceContinuation & continuation, PlaceSearchScope scope)
   {
     PoseSegmentCache local_cache;
     auto * previous_cache = segment_cache_;
@@ -2345,7 +2359,11 @@ public:
           planned = buildPlaceRoute(start, from_pose, requested_pose, from_pick,
             CarryRoute::DIRECT, ignore_box, box_to_left_contact, box_to_right_contact,
             trajectory, end, fast_error, fast_deadline, fast_canceled, &endpoint);
-          if (planned && continuation) planned = continuation(end, requested_pose, fast_error, fast_deadline);
+          if (planned && continuation) {
+            planned = continuation(end, requested_pose, fast_error, fast_deadline) && !fast_canceled();
+            writeTrace("place_continuation", planned, fast_error,
+              {{"place_pose", formatPose(requested_pose)}, {"route", "direct_fast"}});
+          }
         }
       } catch (const std::exception & exception) {fast_error = exception.what();}
       writeTrace("adaptive_place_fast_path", planned, fast_error,
@@ -2384,7 +2402,8 @@ public:
       deadline, precheck_started +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(config_.carry_search_timeout * 0.15)));
-    const auto candidates = placePoseCandidates(requested_pose);
+    const auto candidates = scope == PlaceSearchScope::FIXED_POSE ?
+      std::vector<Eigen::Isometry3d>{requested_pose} : placePoseCandidates(requested_pose);
     diagnostics.candidates = candidates.size();
     std::string precheck_error;
     // Defer contact collection, formatting, and file I/O until the precheck
@@ -2502,11 +2521,11 @@ public:
       CarryRoute::LOW_XY_THEN_LIFT, CarryRoute::DOGLEG_NEGATIVE_Y,
       CarryRoute::DOGLEG_POSITIVE_Y};
     std::string last_error = "no place route evaluated";
-    // Try alternate route geometry for the best endpoint before spending the
-    // entire budget on small endpoint corrections. A failed route receives a
-    // bounded slice, while every solver still observes the common hard deadline.
-    for (const auto & endpoint : endpoints) {
-      for (const auto route : routes) {
+    // Sweep placement endpoints before retrying route geometry, so an endpoint
+    // with no feasible retreat does not consume all search time on other routes.
+    for (const auto route : routes) {
+      for (std::size_t endpoint_index = 0; endpoint_index < endpoints.size(); ++endpoint_index) {
+        const auto & endpoint = endpoints[endpoint_index];
         if (canceled()) {
           error = "adaptive place search canceled";
           return false;
@@ -2538,9 +2557,32 @@ public:
             last_error = candidate_error;
             continue;
           }
-          if (continuation && !continuation(candidate_end, endpoint.pose, candidate_error, deadline)) {
-            last_error = "post-place continuation failed: " + candidate_error;
-            continue;
+          if (continuation) {
+            const auto continuation_started = std::chrono::steady_clock::now();
+            const double continuation_budget = placeContinuationTimeout(
+              std::chrono::duration<double>(deadline - continuation_started).count(),
+              config_.return_planning_time_per_attempt, config_.return_planning_timeout,
+              config_.prepare_named_target.empty() ? 2U : 3U,
+              endpoint_index + 1U < endpoints.size());
+            const auto continuation_deadline = std::min(deadline, continuation_started +
+              std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(continuation_budget)));
+            bool feasible = continuation(
+              candidate_end, endpoint.pose, candidate_error, continuation_deadline);
+            if (std::chrono::steady_clock::now() >= continuation_deadline) {
+              candidate_error = "post-place continuation deadline exhausted: " + candidate_error;
+              feasible = false;
+            }
+            writeTrace("place_continuation", feasible, candidate_error,
+              {{"place_pose", formatPose(endpoint.pose)},
+                {"route", carryRouteName(route)},
+                {"scope", scope == PlaceSearchScope::FIXED_POSE ? "fixed_pose" : "adaptive"},
+                {"budget_seconds", std::to_string(continuation_budget)}});
+            if (canceled()) {error = "adaptive place search canceled"; return false;}
+            if (!feasible || std::chrono::steady_clock::now() >= deadline) {
+              last_error = "post-place continuation failed: " + candidate_error;
+              continue;
+            }
           }
           output = std::move(trajectory);
           end_state = candidate_end;
@@ -3334,12 +3376,12 @@ bool DualArmMotionPlanner::planAdaptivePlace(
   const Eigen::Isometry3d & box_to_right_contact,
   moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
   Eigen::Isometry3d & selected_pose, std::string & error,
-  const CancelFunction & canceled, const PlaceContinuation & continuation)
+  const CancelFunction & canceled, const PlaceContinuation & continuation, PlaceSearchScope scope)
 {
   return impl_->planAdaptivePlace(
     start, from_pose, requested_pose, from_pick, ignore_box,
     box_to_left_contact, box_to_right_contact, output, end_state,
-    selected_pose, error, canceled, continuation);
+    selected_pose, error, canceled, continuation, scope);
 }
 
 bool DualArmMotionPlanner::planPickPath(

@@ -85,6 +85,14 @@ bool prepareSavedMotion(
   SavedAlignmentInfo * alignment_info = nullptr,
   SavedMotionPreparation preparation = SavedMotionPreparation::CONTINUOUS);
 
+// Validate the stored empty-arm suffix before physical release. The supplied
+// scene is a virtual released-box snapshot; no motion or planning is performed.
+bool validateSavedReleaseRemainder(
+  const SavedPlan & plan, std::size_t release_index,
+  const moveit::core::RobotState & measured,
+  const planning_scene::PlanningScenePtr & released_scene, std::string & error,
+  const CancelFunction & canceled);
+
 class SavedPlanStore
 {
 public:

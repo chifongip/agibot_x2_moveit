@@ -40,4 +40,20 @@ double endpointRouteTimeout(
   return std::min(remaining_budget, 2.0 + endpoint_timeout * endpoint_count);
 }
 
+double placeContinuationTimeout(
+  double remaining_budget, double time_per_attempt, double return_timeout,
+  std::size_t return_stage_count, bool has_alternative)
+{
+  if (!std::isfinite(remaining_budget) || remaining_budget <= 0.0 ||
+    !std::isfinite(return_timeout) || return_timeout <= 0.0) {return 0.0;}
+  const double candidate_limit = endpointRouteTimeout(
+    remaining_budget, time_per_attempt, return_stage_count);
+  if (candidate_limit <= 0.0) {return 0.0;}
+  const double limit = std::min(return_timeout, remaining_budget);
+  // A sole or final endpoint must be allowed the configured return retries,
+  // Cartesian recovery, and validation time. Reserve short slices only while
+  // there are other placement poses to try.
+  return has_alternative ? std::min({limit, candidate_limit, 0.5 * remaining_budget}) : limit;
+}
+
 }  // namespace agibot_x2_manipulation

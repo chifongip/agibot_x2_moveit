@@ -853,6 +853,35 @@ ros2 action send_goal /place_box agibot_x2_manipulation_msgs/action/Place \
   --feedback
 ```
 
+Both ordinary and plan-only Place require a feasible complete sequence:
+Place → release → retreat → Prepare (when configured) → Ready. The same check
+applies to the Place portion of ordinary PickPlace. Adaptive planning rejects a
+placement whose retreat or return fails and tries other placements inside the
+configured position/yaw tolerances before retrying alternate route geometries.
+Candidate continuation checks have bounded time slices under the existing
+phase deadline; one failed check leaves time for another placement when available.
+The sole or last remaining placement can use the full remaining return budget,
+up to `return_planning_timeout`, including the configured return retries.
+
+Immediately before ordinary release, the server checks retreat and return again
+from stationary measured feedback in a virtual released-box scene. If correction
+is required, it replans toward the already selected placement and rechecks the
+complete exit. These release retries keep that pose fixed. Failed retries pause
+with the box held; Continue refreshes feedback and retries the unfinished phase.
+If an exit check exhausts the phase deadline, correction remains pending so
+Continue attempts it with a fresh budget before checking the measured exit again.
+No physical detach is dispatched until the checks succeed. Existing contact,
+collision, joint, and Cartesian limits still apply.
+
+Before a saved release, the stored retreat/return suffix is revalidated against
+measured feedback and the virtual released-box scene. This uses the existing
+saved-motion checks and permitted timing slowdown, without new IK/OMPL search
+or modifications to stored waypoints. Explicit Continue retains its existing
+remaining-plan rebuild behavior. Post-release motion remains subject to fresh
+validation and checkpoint-based recovery. Preflight reduces the risk of getting
+stuck after release; it cannot guarantee success after scene or physical changes.
+See [Place preflight validation](test/place_preflight_validation.md).
+
 `/move_carry_pose` uses `MoveCarryPose`: `target_pose: 0` is Carry A and
 `target_pose: 1` is Carry B. It is accepted only while the server is
 `HOLDING`; it retains the current attached-box contact transforms and plans an
@@ -1819,8 +1848,10 @@ Continue refreshes the selected Pick target before attachment regardless of the
 automatic movement toggle, and refreshes managed surrounding boxes/tables.
 Attached geometry remains driven by robot feedback; released geometry retains
 the achieved placement pose. A table-derived placement target is recalculated
-from the refreshed table before release. Explicit placement requests keep their
-initially resolved planning-frame pose. Saved execution discards dependent
+from the refreshed table during adaptive placement planning. Once ordinary
+Place has executed its selected placement, release correction retains that
+selected pose. Explicit placement requests keep their initially resolved
+planning-frame pose. Saved execution discards dependent
 remaining trajectories and preserves completed physical checkpoints. Before
 attachment or release, retries check fresh stationary feedback and both hand
 contacts using the configured

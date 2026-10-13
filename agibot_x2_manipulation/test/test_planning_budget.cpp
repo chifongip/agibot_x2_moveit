@@ -75,5 +75,36 @@ TEST(PlanningBudget, EndpointRouteIncludesEveryPlanAndSceneRoundTrips)
   EXPECT_DOUBLE_EQ(endpointRouteTimeout(30.0, 2.0, 0U), 0.0);
 }
 
+TEST(PlanningBudget, PlaceContinuationReservesTimeForAnotherPlacement)
+{
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 2.0, 30.0, 3U, true), 8.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(10.0, 2.0, 30.0, 3U, true), 5.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(10.0, 2.0, 30.0, 3U, false), 10.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 2.0, 4.0, 3U, true), 4.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 2.0, 30.0, 2U, true), 6.0);
+}
+
+TEST(PlanningBudget, LastPlacementCanUseTheFullReturnBudget)
+{
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 2.0, 30.0, 3U, false), 30.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(20.0, 2.0, 30.0, 3U, false), 20.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(60.0, 2.0, 30.0, 3U, false), 30.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 2.0, 12.0, 2U, false), 12.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 0.0, 30.0, 3U, false), 0.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 2.0, 30.0, 0U, false), 0.0);
+}
+
+TEST(PlanningBudget, PlaceContinuationRejectsInvalidOrExpiredBudgets)
+{
+  for (double remaining : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::quiet_NaN()})
+  {
+    EXPECT_DOUBLE_EQ(placeContinuationTimeout(remaining, 2.0, 30.0, 3U, true), 0.0);
+  }
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 0.0, 30.0, 3U, true), 0.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 2.0, 0.0, 3U, true), 0.0);
+  EXPECT_DOUBLE_EQ(placeContinuationTimeout(30.0, 2.0, 30.0, 0U, true), 0.0);
+}
+
 }  // namespace
 }  // namespace agibot_x2_manipulation

@@ -18,6 +18,7 @@
 #include "pick_place/planning_scene_manager.hpp"
 #include "pick_place/post_place_planner.hpp"
 #include "pick_place/post_place_progress.hpp"
+#include "pick_place/release_checkpoint.hpp"
 #include "pick_place/trajectory_executor.hpp"
 
 #include <agibot_x2_manipulation_msgs/action/move_carry_pose.hpp>
@@ -2333,6 +2334,9 @@ private:
               const Eigen::Isometry3d measured_grasp = pose.inverse() * current->getGlobalLinkTransform(config_.left_tcp);
               if (!planning_scene_.attachBox(failure, &measured_grasp)) {return false;}
             } else {
+              if (!validateSavedReleaseRemainder(*plan, index, *current,
+                  planning_scene_.releasedBoxSnapshot(pose), failure, interrupted)) {return false;}
+              if (interrupted()) {failure = "saved release canceled before dispatch"; return false;}
               if (!attachment_.detach(failure, &dispatched)) {
                 if (dispatched) {taskCheckpoint("release_uncertain", "uncertain");}
                 return false;
@@ -3016,7 +3020,11 @@ private:
         PostPlacePlan part;
         if (canceled() || std::chrono::steady_clock::now() >= deadline ||
           !planPostPlaceStage(current, pose, left, right, scene, stage, part, error,
-          canceled, deadline, distance)) {feasible = false; break;}
+          canceled, deadline, distance)) {
+          error = postPlaceStageName(stage) + ": " + error;
+          feasible = false;
+          break;
+        }
         for (const auto & segment : part.segments) {
           robot_trajectory::RobotTrajectory trajectory(current.getRobotModel(), config_.planning_group);
           trajectory.setRobotTrajectoryMsg(current, segment.trajectory);
@@ -3089,19 +3097,24 @@ private:
     const Eigen::Isometry3d & left, const Eigen::Isometry3d & right,
     const CancelFunction & canceled, PostPlacePlan * saved = nullptr)
   {
-    const auto deadline = std::chrono::steady_clock::now() +
-      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-      std::chrono::duration<double>(config_.return_planning_timeout));
-    return [this, left, right, canceled, deadline, saved](
+    return [this, left, right, canceled, saved](
       const moveit::core::RobotState & release_state, const Eigen::Isometry3d & pose,
       std::string & error, PlanningDeadline attempt_deadline) {
+        const auto deadline = std::min({attempt_deadline, phase_deadline_,
+          std::chrono::steady_clock::now() +
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(config_.return_planning_timeout))});
         PostPlacePlan plan;
-        const CancelFunction attempt_canceled = [canceled, attempt_deadline]() {
-            return canceled() || std::chrono::steady_clock::now() >= attempt_deadline;
+        const CancelFunction attempt_canceled = [canceled, deadline]() {
+            return canceled() || std::chrono::steady_clock::now() >= deadline;
           };
-        const bool feasible = planPostPlaceSequence(release_state, pose, left, right,
+        bool feasible = planPostPlaceSequence(release_state, pose, left, right,
           planning_scene_.releasedBoxSnapshot(pose), true, plan, error, attempt_canceled,
-          std::min({deadline, phase_deadline_, attempt_deadline}));
+          deadline);
+        if (feasible && attempt_canceled()) {
+          error = "post-place preflight canceled or deadline exhausted";
+          feasible = false;
+        }
         if (!feasible) {
           RCLCPP_WARN(node_->get_logger(), "Post-place preflight rejected placement: %s", error.c_str());
         }
@@ -3166,12 +3179,15 @@ private:
     moveit_msgs::msg::RobotTrajectory transport;
     PostPlacePlan saved_return;
     Eigen::Isometry3d selected_place_pose = place_pose;
+    PlaceSearchScope place_scope = PlaceSearchScope::ADAPTIVE;
     const auto place_attempt =
         [&](const CancelFunction & planning_canceled, std::string & failure) {
           if (!plan_only && !refreshMotionState(failure, planning_canceled, true)) {return false;}
           if (place_scene_revision != detection_scene_revision_) {
-            if (!refreshPlacementTarget(place_message, failure, planning_canceled)) {return false;}
-            place_pose = toEigen(place_message.pose);
+            if (place_scope == PlaceSearchScope::ADAPTIVE) {
+              if (!refreshPlacementTarget(place_message, failure, planning_canceled)) {return false;}
+              place_pose = toEigen(place_message.pose);
+            }
             selected_place_pose = place_pose;
             place_scene_revision = detection_scene_revision_;
           }
@@ -3185,13 +3201,14 @@ private:
               planning_start.getJointModelGroup(config_.planning_group), config_.place_start_state_bounds_tolerance))
           {failure = "saved place start exceeds configured position bounds tolerance"; return false;}
           moveit::core::RobotState place_end(planning_start);
-          const PlaceContinuation return_preflight = plan_only ?
+          saved_return.segments.clear();
+          const PlaceContinuation return_preflight =
             postPlaceContinuation(held_box_to_left_contact_, held_box_to_right_contact_,
-              planning_canceled, &saved_return) : PlaceContinuation{};
+              planning_canceled, &saved_return);
           if (!motion_planner_.planAdaptivePlace(planning_start, toEigen(held_pose_.pose), place_pose,
               false, false, held_box_to_left_contact_, held_box_to_right_contact_,
               transport, place_end, selected_place_pose, failure, planning_canceled,
-              return_preflight)) {return false;}
+              return_preflight, place_scope)) {return false;}
           if (!plan_only && !trajectory_executor_.execute(transport, canceled)) {
             motion_planner_.updateHeldPoseFromRobot();
             failure = trajectory_executor_.error("place execution failed");
@@ -3217,42 +3234,49 @@ private:
       return outcome(false, kRecoveryRequired, "place canceled; object remains held", held_pose_);
     }
 
+    // Initial search may select an allowed offset. Corrections at the physical
+    // release checkpoint retain that accepted pose, just as Pick retains its grasp.
+    place_scope = PlaceSearchScope::FIXED_POSE;
     feedback("detaching", 0.70F, place_message);
     bool detach_dispatched = false;
+    ReleaseCheckpoint release_checkpoint;
     if (!runPhase("release", false, feedback, 0.70F, place_message, canceled, error,
         [&](const CancelFunction & planning_canceled, std::string & failure) {
           if (planning_canceled()) {failure = "release canceled"; return false;}
-          if (!refreshMotionState(failure, planning_canceled, true) ||
-            !validateRetainedScene(failure, planning_canceled) || !synchronizeTableCollisionScene(failure, planning_canceled))
-          {return false;}
-          auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
-          if (!measured) {failure = "release state unavailable"; return false;}
-          const auto contact = motion_planner_.graspFromBoxToTcp(
-            place_pose, held_box_to_left_contact_, held_box_to_right_contact_, 0.0);
-          if (place_scene_revision != detection_scene_revision_ ||
-            !check_pose_tolerance(measured->getGlobalLinkTransform(config_.left_tcp),
-              measured->getGlobalLinkTransform(config_.right_tcp),
-              contact.left_contact, contact.right_contact,
-              config_.execution_position_limit(config_.closed_chain_contact_position_error),
-              config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
-              "execution contact", failure))
-          {
-            if (!place_attempt(planning_canceled, failure)) {return false;}
-            place_pose = selected_place_pose;
-            place_message = stampedPose(place_pose);
-            held_pose_ = place_message;
-            measured = move_group_.getCurrentState(config_.reset_state_timeout);
-            const auto updated_contact = motion_planner_.graspFromBoxToTcp(
-              place_pose, held_box_to_left_contact_, held_box_to_right_contact_, 0.0);
-            if (!measured || !check_pose_tolerance(
-                measured->getGlobalLinkTransform(config_.left_tcp),
-                measured->getGlobalLinkTransform(config_.right_tcp),
-                updated_contact.left_contact, updated_contact.right_contact,
-                config_.execution_position_limit(config_.closed_chain_contact_position_error),
-                config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
-                "execution contact", failure))
-            {failure = "release contact has not converged: " + failure; return false;}
-          }
+          const auto release_preflight = postPlaceContinuation(
+            held_box_to_left_contact_, held_box_to_right_contact_, planning_canceled);
+          const auto check_release = [&](std::string & check_error) {
+              if (!refreshMotionState(check_error, planning_canceled, true) ||
+                !validateRetainedScene(check_error, planning_canceled) ||
+                !synchronizeTableCollisionScene(check_error, planning_canceled)) {return false;}
+              auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
+              if (!measured) {check_error = "release state unavailable"; return false;}
+              const auto contact = motion_planner_.graspFromBoxToTcp(
+                place_pose, held_box_to_left_contact_, held_box_to_right_contact_, 0.0);
+              if (!check_pose_tolerance(measured->getGlobalLinkTransform(config_.left_tcp),
+                  measured->getGlobalLinkTransform(config_.right_tcp),
+                  contact.left_contact, contact.right_contact,
+                  config_.execution_position_limit(config_.closed_chain_contact_position_error),
+                  config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
+                  "execution contact", check_error)) {return false;}
+              const bool feasible = release_preflight(
+                *measured, place_pose, check_error, phase_deadline_);
+              RCLCPP_INFO(node_->get_logger(), "Measured pre-release continuation %s: %s",
+                feasible ? "accepted" : "rejected", check_error.c_str());
+              return feasible;
+            };
+          const auto correct_release = [&](std::string & correction_error) {
+              if (!place_attempt(planning_canceled, correction_error)) {return false;}
+              place_pose = selected_place_pose;
+              place_message = stampedPose(place_pose);
+              held_pose_ = place_message;
+              // Mark completed motion before a fresh feedback/exit check can
+              // consume the deadline. Continue need only recheck that state.
+              return true;
+            };
+          if (!release_checkpoint.validate(check_release, correct_release,
+              planning_canceled, failure)) {return false;}
+          if (planning_canceled()) {failure = "release canceled before dispatch"; return false;}
           return attachment_.detach(failure, &detach_dispatched);
         }, [&]() {return detach_dispatched;})) {
       if (detach_dispatched) {taskCheckpoint("release_uncertain", "uncertain");}

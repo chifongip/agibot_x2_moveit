@@ -250,6 +250,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_post_place_planner pick_place_core)
   ament_target_dependencies(test_post_place_planner moveit_core moveit_ros_planning rclcpp)
   ament_add_gtest(test_post_place_progress test/test_post_place_progress.cpp)
+  ament_add_gtest(test_release_checkpoint test/test_release_checkpoint.cpp)
+  target_include_directories(test_release_checkpoint PRIVATE src include)
   ament_add_gtest(test_cartesian_motion test/test_cartesian_motion.cpp)
   target_include_directories(test_cartesian_motion PRIVATE src include)
   target_link_libraries(test_cartesian_motion pick_place_core)
@@ -294,6 +296,19 @@ if(BUILD_TESTING)
   add_launch_test(test/test_retreat_continue.launch.py TIMEOUT 300)
   set_tests_properties(test_test_retreat_continue.launch.py PROPERTIES
     ENVIRONMENT "ROS_DOMAIN_ID=197" RUN_SERIAL TRUE)
+  ament_add_gtest_executable(test_place_preflight_planner test/test_place_preflight_planner.cpp
+    SKIP_LINKING_MAIN_LIBRARIES)
+  target_include_directories(test_place_preflight_planner PRIVATE src include)
+  target_link_libraries(test_place_preflight_planner pick_place_core)
+  ament_target_dependencies(test_place_preflight_planner moveit_core moveit_ros_planning
+    moveit_ros_planning_interface rclcpp)
+  install(TARGETS test_place_preflight_planner RUNTIME DESTINATION lib/${PROJECT_NAME})
+  add_launch_test(test/test_place_preflight_planner.launch.py TIMEOUT 180)
+  set_tests_properties(test_test_place_preflight_planner.launch.py PROPERTIES
+    ENVIRONMENT "ROS_DOMAIN_ID=188" RUN_SERIAL TRUE)
+  add_launch_test(test/test_place_preflight.launch.py TIMEOUT 360)
+  set_tests_properties(test_test_place_preflight.launch.py PROPERTIES
+    ENVIRONMENT "ROS_DOMAIN_ID=189" RUN_SERIAL TRUE)
   add_launch_test(test/test_continue_actions.launch.py TIMEOUT 420)
   add_launch_test(test/test_saved_continue_detection.launch.py TIMEOUT 420)
   add_launch_test(test/test_cartesian_recovery.launch.py TIMEOUT 600)

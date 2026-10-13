@@ -341,7 +341,7 @@ def test_completed_retreat_is_not_rejected_when_only_its_search_deadline_expires
     assert "error, interrupted" not in retreat_source
 
 
-def test_execution_planning_does_not_reject_completed_routes_for_deadline_or_preflight_policy():
+def test_completed_routes_are_validated_and_place_requires_continuation_preflight():
     planner_source = (
         Path(__file__).parents[1]
         / "src"
@@ -365,7 +365,8 @@ def test_execution_planning_does_not_reject_completed_routes_for_deadline_or_pre
         assert message not in planner_source
     assert "!response.trajectory_ || canceled())" in post_place_source
     assert "deadline - now) /" not in server_source
-    assert "const PlaceContinuation return_preflight = plan_only ?" in server_source
+    assert "const PlaceContinuation return_preflight = plan_only ?" not in server_source
+    assert "const PlaceContinuation return_preflight =\n            postPlaceContinuation(" in server_source
     assert "runPick(false, goal->get_goal()->instance_id, pick_feedback, canceled);" in server_source
 
 

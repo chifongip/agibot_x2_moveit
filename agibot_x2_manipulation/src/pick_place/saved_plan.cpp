@@ -540,4 +540,38 @@ bool prepareSavedMotion(
     "; fallback: " + last_failure;
   return false;
 }
+bool validateSavedReleaseRemainder(
+  const SavedPlan & plan, std::size_t release_index,
+  const moveit::core::RobotState & measured,
+  const planning_scene::PlanningScenePtr & released_scene, std::string & error,
+  const CancelFunction & canceled)
+{
+  if (!released_scene || release_index >= plan.steps.size() ||
+    plan.steps[release_index].kind != SavedStepKind::RELEASE ||
+    release_index + 1U >= plan.steps.size())
+  {error = "saved release continuation is missing"; return false;}
+  auto scene = planning_scene::PlanningScene::clone(released_scene);
+  scene->getCurrentStateNonConst().clearAttachedBody(plan.config.box_id);
+  moveit::core::RobotState current(measured);
+  current.clearAttachedBody(plan.config.box_id);
+  bool first = true;
+  for (std::size_t index = release_index + 1U; index < plan.steps.size(); ++index) {
+    if (canceled()) {error = "saved release continuation canceled or deadline exhausted"; return false;}
+    const auto & step = plan.steps[index];
+    if (step.kind != SavedStepKind::MOTION || step.held || (first && !step.retreat))
+    {error = "saved release continuation has an invalid step: " + step.name; return false;}
+    moveit_msgs::msg::RobotTrajectory trajectory;
+    double alignment = 0.0;
+    if (!prepareSavedMotion(step, plan, current, scene, trajectory, alignment, error,
+        canceled, nullptr, SavedMotionPreparation::SEPARATE))
+    {error = "saved release continuation " + step.name + ": " + error; return false;}
+    const auto & joints = trajectory.joint_trajectory;
+    current.setVariablePositions(joints.joint_names, joints.points.back().positions);
+    current.update();
+    first = false;
+  }
+  if (canceled()) {error = "saved release continuation canceled or deadline exhausted"; return false;}
+  error.clear();
+  return true;
+}
 }  // namespace agibot_x2_manipulation

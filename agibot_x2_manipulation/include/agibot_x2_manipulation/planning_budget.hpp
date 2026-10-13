@@ -13,6 +13,10 @@ double adaptiveRetryTimeout(
 double endpointRouteTimeout(
   double remaining_budget, double endpoint_timeout, std::size_t endpoint_count);
 
+double placeContinuationTimeout(
+  double remaining_budget, double time_per_attempt, double return_timeout,
+  std::size_t return_stage_count, bool has_alternative);
+
 // Nested attempts shorten a deadline without canceling the enclosing search.
 class ScopedPlanningDeadline
 {

@@ -1,6 +1,7 @@
 #include "pick_place/saved_plan.hpp"
 #include <gtest/gtest.h>
 #include <joint_trajectory_controller/trajectory.hpp>
+#include <geometric_shapes/shapes.h>
 #include <srdfdom/model.h>
 #include <urdf_parser/urdf_parser.h>
 
@@ -46,6 +47,144 @@ struct Fixture
       step.trajectory.joint_trajectory.points.begin() + 1, point);
   }
 };
+void releasePlan(Fixture & f)
+{
+  f.plan.config.box_id = "released_box";
+  f.plan.config.left_tcp = f.plan.config.right_tcp = "tip";
+  SavedStep release;
+  release.kind = SavedStepKind::RELEASE;
+  release.name = "release";
+  release.start = f.step.start;
+  auto retreat = f.step;
+  retreat.name = "retreat";
+  retreat.retreat = true;
+  auto ready = f.step;
+  ready.name = "ready";
+  ready.start = std::make_shared<moveit::core::RobotState>(*f.step.start);
+  ready.start->setVariablePosition("j", 0.2);
+  ready.start->update();
+  ready.trajectory.joint_trajectory.points[0].positions = {0.2};
+  ready.trajectory.joint_trajectory.points[1].positions = {0.4};
+  f.plan.steps = {release, retreat, ready};
+}
+
+void releaseObstacle(Fixture & f, const std::string & id, double x)
+{
+  moveit_msgs::msg::CollisionObject object;
+  object.header.frame_id = "base"; object.id = id; object.operation = object.ADD;
+  shape_msgs::msg::SolidPrimitive shape;
+  shape.type = shape.BOX; shape.dimensions = {0.02, 0.02, 0.02};
+  geometry_msgs::msg::Pose pose;
+  pose.orientation.w = 1.0; pose.position.x = x;
+  object.primitives = {shape}; object.primitive_poses = {pose};
+  ASSERT_TRUE(f.scene->processCollisionObjectMsg(object));
+}
+
+TEST(SavedPlan, ReleaseValidatesCompleteSuffixAndPreservesContactPolicy)
+{
+  Fixture f;
+  releasePlan(f);
+  releaseObstacle(f, f.plan.config.box_id, 0.0);
+  const auto original = f.plan.steps;
+  ASSERT_TRUE(f.scene->isStateColliding(*f.step.start, "arm"));
+  std::string error;
+  ASSERT_TRUE(validateSavedReleaseRemainder(f.plan, 0, *f.step.start, f.scene,
+      error, [] {return false;})) << error;
+  EXPECT_EQ(f.plan.steps[1].trajectory, original[1].trajectory);
+  EXPECT_EQ(f.plan.steps[2].trajectory, original[2].trajectory);
+  EXPECT_TRUE(f.scene->isStateColliding(*f.step.start, "arm"));
+}
+
+TEST(SavedPlan, ReleaseRejectsCollisionInLaterReturnStep)
+{
+  Fixture f;
+  releasePlan(f);
+  releaseObstacle(f, "return_obstacle", 0.3);
+  std::string error;
+  EXPECT_FALSE(validateSavedReleaseRemainder(f.plan, 0, *f.step.start, f.scene,
+      error, [] {return false;}));
+  EXPECT_NE(error.find("ready"), std::string::npos) << error;
+  EXPECT_NE(error.find("collision"), std::string::npos) << error;
+}
+
+TEST(SavedPlan, ReleaseAllowsTheSameTimingAdjustmentAsSavedExecution)
+{
+  Fixture f;
+  releasePlan(f);
+  f.plan.config.velocity_scaling = 0.05;
+  const auto original = f.plan.steps[1].trajectory;
+  std::string error;
+  EXPECT_TRUE(validateSavedReleaseRemainder(f.plan, 0, *f.step.start, f.scene,
+      error, [] {return false;})) << error;
+  EXPECT_EQ(f.plan.steps[1].trajectory, original);
+}
+
+TEST(SavedPlan, ReleaseOnlyRemovesTheAttachmentFromVirtualFeedback)
+{
+  Fixture f;
+  releasePlan(f);
+  auto measured = *f.step.start;
+  measured.attachBody(f.plan.config.box_id, Eigen::Isometry3d::Identity(),
+    {std::make_shared<shapes::Box>(0.01, 0.01, 0.01)},
+    {Eigen::Isometry3d::Identity()}, std::set<std::string>{"tip"}, "tip");
+  measured.update();
+  ASSERT_TRUE(measured.hasAttachedBody(f.plan.config.box_id));
+  std::string error;
+  EXPECT_TRUE(validateSavedReleaseRemainder(f.plan, 0, measured, f.scene,
+      error, [] {return false;})) << error;
+  EXPECT_TRUE(measured.hasAttachedBody(f.plan.config.box_id));
+}
+
+TEST(SavedPlan, ReleaseRejectsRetreatEndpointStillInBoxContact)
+{
+  Fixture f;
+  releasePlan(f);
+  releaseObstacle(f, f.plan.config.box_id, 0.2);
+  std::string error;
+  EXPECT_FALSE(validateSavedReleaseRemainder(f.plan, 0, *f.step.start, f.scene,
+      error, [] {return false;}));
+  EXPECT_NE(error.find("endpoint is still in contact"), std::string::npos) << error;
+}
+
+TEST(SavedPlan, ReleaseRejectsMeasuredStartMismatch)
+{
+  Fixture f;
+  releasePlan(f);
+  auto measured = *f.step.start;
+  measured.setVariablePosition("j", 0.1); measured.update();
+  std::string error;
+  EXPECT_FALSE(validateSavedReleaseRemainder(f.plan, 0, measured, f.scene,
+      error, [] {return false;}));
+  EXPECT_NE(error.find("start mismatch"), std::string::npos) << error;
+}
+
+TEST(SavedPlan, ReleaseHonorsCancellationWithoutChangingStoredMotion)
+{
+  Fixture f;
+  releasePlan(f);
+  const auto original = f.plan.steps[1].trajectory;
+  std::string error;
+  EXPECT_FALSE(validateSavedReleaseRemainder(f.plan, 0, *f.step.start, f.scene,
+      error, [] {return true;}));
+  EXPECT_NE(error.find("canceled"), std::string::npos) << error;
+  EXPECT_EQ(f.plan.steps[1].trajectory, original);
+}
+
+TEST(SavedPlan, ReleaseRejectsIncompleteOrNonMotionSuffix)
+{
+  Fixture f;
+  releasePlan(f);
+  std::string error;
+  EXPECT_FALSE(validateSavedReleaseRemainder(f.plan, 1, *f.step.start, f.scene,
+      error, [] {return false;}));
+  f.plan.steps[2].kind = SavedStepKind::ATTACH;
+  EXPECT_FALSE(validateSavedReleaseRemainder(f.plan, 0, *f.step.start, f.scene,
+      error, [] {return false;}));
+  f.plan.steps.resize(1);
+  EXPECT_FALSE(validateSavedReleaseRemainder(f.plan, 0, *f.step.start, f.scene,
+      error, [] {return false;}));
+}
+
 TEST(SavedPlan, CheckpointUsesConfiguredMeasuredBoundsTolerance)
 {
   Fixture f;

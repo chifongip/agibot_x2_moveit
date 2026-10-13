@@ -62,6 +62,7 @@ using ContinuationFunction = std::function<bool (
       const moveit::core::RobotState &, const PlannedGrasp &, std::string &, PlanningDeadline)>;
 using PlaceContinuation = std::function<bool (
       const moveit::core::RobotState &, const Eigen::Isometry3d &, std::string &, PlanningDeadline)>;
+enum class PlaceSearchScope {ADAPTIVE, FIXED_POSE};
 
 class DualArmMotionPlanner
 {
@@ -137,7 +138,8 @@ public:
     const Eigen::Isometry3d & box_to_right_contact,
     moveit_msgs::msg::RobotTrajectory & output, moveit::core::RobotState & end_state,
     Eigen::Isometry3d & selected_pose, std::string & error,
-    const CancelFunction & canceled, const PlaceContinuation & continuation = {});
+    const CancelFunction & canceled, const PlaceContinuation & continuation = {},
+    PlaceSearchScope scope = PlaceSearchScope::ADAPTIVE);
   bool planPickPath(
     const geometry_msgs::msg::PoseStamped & box_message, const Eigen::Isometry3d & pick_pose,
     moveit::planning_interface::MoveGroupInterface::Plan & pregrasp_plan,

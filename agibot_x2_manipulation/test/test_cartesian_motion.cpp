@@ -118,6 +118,38 @@ struct RepairFixture
   }
 };
 
+TEST(CartesianMotion, IndividuallyValidSegmentsCanFailAfterTheirSharedDerivativeChanges)
+{
+  RepairFixture f;
+  f.config.return_validation_joint_step = 0.01;
+  auto a = f.message;
+  a.joint_trajectory.points.resize(2);
+  a.joint_trajectory.points[0].positions = {1.8, 0.0};
+  a.joint_trajectory.points[0].velocities = {0.0, 0.1};
+  a.joint_trajectory.points[1].positions = {1.999, 0.1};
+  a.joint_trajectory.points[1].velocities = {0.1, 0.1};
+  auto b = a;
+  b.joint_trajectory.points[0].positions = {1.999, 0.1};
+  b.joint_trajectory.points[0].velocities = {0.0, 0.1};
+  b.joint_trajectory.points[1].positions = {1.999, 0.2};
+  b.joint_trajectory.points[1].velocities = {0.0, 0.1};
+  moveit::core::RobotState start(f.model);
+  start.setToDefaultValues(); start.update();
+  robot_trajectory::RobotTrajectory first(f.model, "arm"), second(f.model, "arm");
+  first.setRobotTrajectoryMsg(start, a);
+  second.setRobotTrajectoryMsg(first.getLastWayPoint(), b);
+  std::string error;
+  const auto valid = [&](const auto & path) {
+      return validateTimedReturnTrajectory(path, f.scene, 0.01, error,
+        [] {return false;}, true);
+    };
+  ASSERT_TRUE(valid(first)) << error;
+  ASSERT_TRUE(valid(second)) << error;
+  first.append(second, second.getWayPointDurationFromPrevious(1), 1);
+  EXPECT_FALSE(valid(first));
+  EXPECT_NE(error.find("joint position bounds"), std::string::npos) << error;
+}
+
 TEST(CartesianMotion, LocalDerivativeRepairPreservesTimingAndUnrelatedMotion)
 {
   RepairFixture f; std::string error; CartesianRepairInfo info;
