@@ -240,6 +240,8 @@ public:
     RCLCPP_INFO(
       node_->get_logger(), "Pick/place motion planning mode: %s",
       motionPlanningModeName(config_.motion_planning_mode));
+    RCLCPP_INFO(node_->get_logger(), "Additional Place release preflight: %s",
+      config_.place_release_preflight_enabled ? "enabled" : "disabled");
     const auto model = move_group_.getRobotModel();
     if (!model->hasJointModelGroup(move_group_.getName()) ||
       !model->hasJointModelGroup(config_.left_group_name) ||
@@ -2334,8 +2336,12 @@ private:
               const Eigen::Isometry3d measured_grasp = pose.inverse() * current->getGlobalLinkTransform(config_.left_tcp);
               if (!planning_scene_.attachBox(failure, &measured_grasp)) {return false;}
             } else {
-              if (!validateSavedReleaseRemainder(*plan, index, *current,
+              if (config_.place_release_preflight_enabled &&
+                !validateSavedReleaseRemainder(*plan, index, *current,
                   planning_scene_.releasedBoxSnapshot(pose), failure, interrupted)) {return false;}
+              if (!config_.place_release_preflight_enabled) {
+                RCLCPP_INFO(node_->get_logger(), "Skipping additional saved Place release preflight");
+              }
               if (interrupted()) {failure = "saved release canceled before dispatch"; return false;}
               if (!attachment_.detach(failure, &dispatched)) {
                 if (dispatched) {taskCheckpoint("release_uncertain", "uncertain");}
@@ -3245,12 +3251,16 @@ private:
           if (planning_canceled()) {failure = "release canceled"; return false;}
           const auto release_preflight = postPlaceContinuation(
             held_box_to_left_contact_, held_box_to_right_contact_, planning_canceled);
+          std::shared_ptr<moveit::core::RobotState> measured;
+          const auto refresh_release = [&](std::string & refresh_error) {
+              if (!refreshMotionState(refresh_error, planning_canceled, true) ||
+                !validateRetainedScene(refresh_error, planning_canceled) ||
+                !synchronizeTableCollisionScene(refresh_error, planning_canceled)) {return false;}
+              measured = move_group_.getCurrentState(config_.reset_state_timeout);
+              if (!measured) {refresh_error = "release state unavailable"; return false;}
+              return true;
+            };
           const auto check_release = [&](std::string & check_error) {
-              if (!refreshMotionState(check_error, planning_canceled, true) ||
-                !validateRetainedScene(check_error, planning_canceled) ||
-                !synchronizeTableCollisionScene(check_error, planning_canceled)) {return false;}
-              auto measured = move_group_.getCurrentState(config_.reset_state_timeout);
-              if (!measured) {check_error = "release state unavailable"; return false;}
               const auto contact = motion_planner_.graspFromBoxToTcp(
                 place_pose, held_box_to_left_contact_, held_box_to_right_contact_, 0.0);
               if (!check_pose_tolerance(measured->getGlobalLinkTransform(config_.left_tcp),
@@ -3259,6 +3269,10 @@ private:
                   config_.execution_position_limit(config_.closed_chain_contact_position_error),
                   config_.execution_orientation_limit(config_.closed_chain_contact_orientation_error),
                   "execution contact", check_error)) {return false;}
+              if (!config_.place_release_preflight_enabled) {
+                RCLCPP_INFO(node_->get_logger(), "Skipping additional Place release preflight");
+                return true;
+              }
               const bool feasible = release_preflight(
                 *measured, place_pose, check_error, phase_deadline_);
               RCLCPP_INFO(node_->get_logger(), "Measured pre-release continuation %s: %s",
@@ -3274,8 +3288,12 @@ private:
               // consume the deadline. Continue need only recheck that state.
               return true;
             };
-          if (!release_checkpoint.validate(check_release, correct_release,
+          if (!release_checkpoint.validate(refresh_release, check_release, correct_release,
               planning_canceled, failure)) {return false;}
+          // Match Pick's physical attachment checkpoint: contact correction
+          // does not bypass measured bounds and current-scene collision checks.
+          if (!measured || !validateSavedCheckpointState(*measured,
+              planning_scene_.snapshot(), config_, failure)) {return false;}
           if (planning_canceled()) {failure = "release canceled before dispatch"; return false;}
           return attachment_.detach(failure, &detach_dispatched);
         }, [&]() {return detach_dispatched;})) {

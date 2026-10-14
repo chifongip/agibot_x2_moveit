@@ -2,6 +2,7 @@
 
 import os
 import uuid
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -13,6 +14,8 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     manipulation_share = get_package_share_directory("agibot_x2_manipulation")
+    with open(os.path.join(manipulation_share, "config", "box_manipulation.yaml"), encoding="utf-8") as stream:
+        server_params = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
     zmq_endpoint = LaunchConfiguration("zmq_endpoint")
     fake_zmq_endpoint = LaunchConfiguration("fake_zmq_endpoint")
     posture_zmq_enabled = LaunchConfiguration("posture_zmq_enabled")
@@ -58,6 +61,11 @@ def generate_launch_description():
             DeclareLaunchArgument("phase_retry_attempts", default_value="3"),
             DeclareLaunchArgument("phase_retry_timeout", default_value="30.0"),
             DeclareLaunchArgument("phase_retry_delay", default_value="0.5"),
+            DeclareLaunchArgument(
+                "place_release_preflight_enabled",
+                default_value=str(server_params.get("place_release_preflight_enabled", False)).lower(),
+                choices=["true", "false"],
+            ),
             DeclareLaunchArgument(
                 "allow_execution",
                 default_value="true",
@@ -118,6 +126,7 @@ def generate_launch_description():
                     "phase_retry_attempts": LaunchConfiguration("phase_retry_attempts"),
                     "phase_retry_timeout": LaunchConfiguration("phase_retry_timeout"),
                     "phase_retry_delay": LaunchConfiguration("phase_retry_delay"),
+                    "place_release_preflight_enabled": LaunchConfiguration("place_release_preflight_enabled"),
                     "manipulation_state_file": manipulation_state_file,
                 }.items(),
             ),

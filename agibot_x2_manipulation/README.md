@@ -863,23 +863,29 @@ phase deadline; one failed check leaves time for another placement when availabl
 The sole or last remaining placement can use the full remaining return budget,
 up to `return_planning_timeout`, including the configured return retries.
 
-Immediately before ordinary release, the server checks retreat and return again
-from stationary measured feedback in a virtual released-box scene. If correction
-is required, it replans toward the already selected placement and rechecks the
-complete exit. These release retries keep that pose fixed. Failed retries pause
-with the box held; Continue refreshes feedback and retries the unfinished phase.
-If an exit check exhausts the phase deadline, correction remains pending so
-Continue attempts it with a fresh budget before checking the measured exit again.
-No physical detach is dispatched until the checks succeed. Existing contact,
-collision, joint, and Cartesian limits still apply.
+By default, ordinary Place follows Pick's checkpoint behavior: before physical
+release it checks stationary measured feedback, held geometry, both hand contacts,
+and current bounds/collisions. Contact correction retains the selected placement
+pose and is rechecked before release. After release, retreat and return are planned
+from measured feedback with the existing stage checkpoints and Continue behavior.
 
-Before a saved release, the stored retreat/return suffix is revalidated against
-measured feedback and the virtual released-box scene. This uses the existing
-saved-motion checks and permitted timing slowdown, without new IK/OMPL search
-or modifications to stored waypoints. Explicit Continue retains its existing
-remaining-plan rebuild behavior. Post-release motion remains subject to fresh
-validation and checkpoint-based recovery. Preflight reduces the risk of getting
-stuck after release; it cannot guarantee success after scene or physical changes.
+`place_release_preflight_enabled` is a startup boolean, default `false`, available
+in `box_manipulation.yaml` and as a launch argument in the main and recorded
+simulation launches. Set `place_release_preflight_enabled:=true` to additionally
+check the complete retreat/Prepare/Ready sequence immediately before release
+from measured feedback in a virtual released-box scene. Exit failures then also
+trigger fixed-pose correction. A timeout retains pending correction for Continue;
+completed correction motion is rechecked without repeating it. The toggle never
+disables the initial complete-path planning or measured contact/collision checks.
+
+Saved plans retain this setting with their configuration. When enabled, saved
+release additionally validates the stored retreat/return suffix, including the
+existing permitted timing slowdown, without new IK/OMPL search or stored-waypoint
+changes. With either setting, saved checkpoints and individual motions remain
+validated. Explicit Continue retains its remaining-plan rebuild behavior.
+Both settings can still pause on contact, collision, subsequent planning, or
+execution failures, just as Pick can. Initial feasibility cannot guarantee
+success after scene or physical changes.
 See [Place preflight validation](test/place_preflight_validation.md).
 
 `/move_carry_pose` uses `MoveCarryPose`: `target_pose: 0` is Carry A and

@@ -11,12 +11,18 @@ even when its individual segments passed separately. Joining segments can
 change the derivative at their shared waypoint; independent segment checks do
 not establish validity of the final concatenated spline.
 
-Before ordinary detach, stationary measured feedback must admit retreat,
-optional Prepare, and Ready. Corrections keep the selected placement fixed.
-Failure remains in the existing release retry/Continue flow while the box stays
-attached. Saved release validates its stored suffix in a virtual released-box
-scene using existing saved-motion timing and collision rules, without new IK or
-OMPL search. Physical release is not repeated after its checkpoint.
+With `place_release_preflight_enabled: true`, stationary measured feedback must
+admit retreat, optional Prepare, and Ready before ordinary detach. Corrections
+keep the selected placement fixed. Saved release validates its stored suffix in
+a virtual released-box scene using existing saved-motion timing and collision
+rules, without new IK or OMPL search. Physical release is not repeated after its
+checkpoint.
+
+The startup setting defaults to `false`, aligning Place with Pick: initial
+complete-path planning remains required, and measured contact, bounds, and
+collisions are checked before release. Contact corrections keep the selected
+pose. The repeated full exit check is skipped for ordinary and saved release;
+post-release planning and individual motion validation remain active.
 
 An exit-check timeout retains pending correction across retries and Continue.
 A successful correction still requires measured contact and full exit validation;
@@ -24,9 +30,10 @@ if correction finishes at the deadline, the fresh attempt checks the measured
 exit before release. The sole or last placement endpoint can use the complete
 remaining return budget instead of the short slice reserved for alternatives.
 
-No action schema, public parameter, tuned calibration, collision allowance, or
-Cartesian accuracy limit changed. The reported hardware retreat failure needs
-its own captured-state replay before claiming that particular posture is fixed.
+The startup toggle is the only new public parameter. No action schema, tuned
+calibration, collision allowance, or Cartesian accuracy limit changed. The
+reported hardware retreat failure needs its own captured-state replay before
+claiming that particular posture is fixed.
 
 ## Deterministic coverage
 
@@ -35,6 +42,8 @@ its own captured-state replay before claiming that particular posture is fixed.
 - Release-checkpoint tests exercise the actual retry controller through an exit
   timeout, Continue, correction, and measured revalidation before release. They
   also cover failed corrections, cancellation, and correction deadline expiry.
+  Feedback/held-state failures request no new correction, and a feedback failure
+  after successful correction does not cause the completed motion to repeat.
 - Saved-release tests validate the complete suffix, permitted initial contact,
   strict retreat endpoint, later return collisions, measured-start mismatch,
   cancellation, malformed suffixes, and preservation of attachments and stored
@@ -53,6 +62,16 @@ its own captured-state replay before claiming that particular posture is fixed.
   Ready obstacle during placement controller feedback, after initial preflight.
   Ordinary and saved execution pause before release with the box attached.
   Removing the obstruction and continuing completes with one physical release.
+- `test_place_release_without_preflight.launch.py` runs the shared fixture with
+  the toggle disabled. A blocked initial complete path still prevents placement
+  motion. A Ready obstacle inserted after planning allows release and pauses only
+  the later return stage; Continue completes without a second release. Both
+  ordinary and saved execution verify the actual node parameter value.
+  A further external obstacle at the measured hand blocks release with the toggle
+  disabled; removing it and continuing completes without new placement planning.
+
+The earlier result sections below describe runs before the toggle was added,
+when the additional pre-release check was unconditional.
 
 ## Commands
 
@@ -168,3 +187,55 @@ python3 src/agibot_x2_moveit/agibot_x2_manipulation/scripts/time_saved_simulatio
   --output-dir capture_task_snapshot/simulation_results/place_deadline_fix_saved_01 \
   --workflow both --exercise-carry --saved-plan --mode pose_to_pose --domain-id 211 --port-base 39261
 ```
+
+## Optional release check and Pick-like default
+
+The focused package build passed with `place_release_preflight_enabled: false`
+as the default. Ten C++ suites passed (171 cases); configuration/launch tests
+passed 49 cases and capture/replay harness tests passed 42 cases. The startup
+setting is read-only after loading and remains part of saved-plan configuration.
+
+Final fake-feedback integration results:
+
+- Existing Place Continue: passed in 44.06 seconds.
+- Enabled release preflight: passed in 96.01 seconds. Both ordinary and saved
+  execution retain the box when the complete return is blocked.
+- Disabled release preflight: passed in 109.28 seconds when run alone with
+  unchanged parameters. Both ordinary and saved execution release before a
+  blocked later return; Continue finishes without releasing twice. An external
+  obstacle at the measured hand still prevents release, and clearing it requires
+  no unnecessary placement correction.
+
+One concurrent disabled-check run exhausted the initial placement-planning
+budget before executing placement and failed the test's progress assertion.
+The isolated rerun above passed. An earlier collision-probe assertion expected
+the later checkpoint validator, although the existing held-state validator
+correctly rejected the collision first; the assertion now accepts either
+collision diagnostic while retaining phase and physical-release checks.
+
+```bash
+ROS_DOMAIN_ID=190 ROS_LOG_DIR=/tmp/x2-place-toggle-final-integration ctest \
+  --test-dir build/agibot_x2_manipulation --output-on-failure \
+  -R '^test_test_(place_preflight|place_release_without_preflight|place_continue).launch.py$'
+ROS_LOG_DIR=/tmp/x2-place-toggle-disabled-isolated ctest \
+  --test-dir build/agibot_x2_manipulation --output-on-failure \
+  -R '^test_test_place_release_without_preflight.launch.py$'
+```
+
+All 12 captured scenarios passed again against the final rebuilt checkpoint
+code, using ROS domains 212/213 and local ZMQ ports 39301–39306/39321–39326.
+They cover both box profiles, ordinary and saved Pick/combined PickPlace/Place,
+and Carry A/B transitions. Every server log confirmed the additional release
+check disabled, while all 20 initial placement continuation checks succeeded.
+Saved execution completed 14 actions and correctly rejected 28 invalid/consumed
+IDs. All 78 Cartesian trace events confirmed recovery enabled; these captures
+did not trigger numerical IK recovery.
+
+Final artifacts are under `capture_task_snapshot/simulation_results/`:
+`place_pick_alignment_simulation_summary_02.{md,json}`,
+`place_pick_alignment_inputs_02/manifest.json`, and the
+`place_pick_alignment_{ordinary,saved}_02/` results directories. Grey-box inputs
+use the authorized derived tag transforms. Original captures, replay inputs,
+runtime configuration, source, and tested build checksums matched after replay.
+The new configuration key is the only addition to tuned parameter files; all
+pre-existing tuning was preserved. No hardware motion was performed.

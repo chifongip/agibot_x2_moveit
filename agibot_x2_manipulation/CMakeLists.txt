@@ -309,6 +309,9 @@ if(BUILD_TESTING)
   add_launch_test(test/test_place_preflight.launch.py TIMEOUT 360)
   set_tests_properties(test_test_place_preflight.launch.py PROPERTIES
     ENVIRONMENT "ROS_DOMAIN_ID=189" RUN_SERIAL TRUE)
+  add_launch_test(test/test_place_release_without_preflight.launch.py TIMEOUT 360)
+  set_tests_properties(test_test_place_release_without_preflight.launch.py PROPERTIES
+    ENVIRONMENT "ROS_DOMAIN_ID=187" RUN_SERIAL TRUE)
   add_launch_test(test/test_continue_actions.launch.py TIMEOUT 420)
   add_launch_test(test/test_saved_continue_detection.launch.py TIMEOUT 420)
   add_launch_test(test/test_cartesian_recovery.launch.py TIMEOUT 600)

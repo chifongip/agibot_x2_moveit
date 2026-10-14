@@ -49,6 +49,20 @@ TEST_F(PickPlaceConfigTest, CanDisableCartesianIKRecovery)
   EXPECT_FALSE(loadPickPlaceConfig(server).cartesian_ik_recovery_enabled);
 }
 
+TEST_F(PickPlaceConfigTest, CanEnablePlaceReleasePreflight)
+{
+  auto server = node("place_release_preflight_enabled");
+  server->declare_parameter("place_release_preflight_enabled", true);
+  EXPECT_TRUE(loadPickPlaceConfig(server).place_release_preflight_enabled);
+}
+
+TEST_F(PickPlaceConfigTest, PlaceReleasePreflightIsStartupConfiguration)
+{
+  auto server = node("place_release_preflight_read_only");
+  EXPECT_FALSE(loadPickPlaceConfig(server).place_release_preflight_enabled);
+  EXPECT_TRUE(server->describe_parameter("place_release_preflight_enabled").read_only);
+}
+
 TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
 {
   const auto config = loadPickPlaceConfig(node("defaults"));
@@ -65,6 +79,7 @@ TEST_F(PickPlaceConfigTest, LoadsStableDefaults)
   EXPECT_DOUBLE_EQ(config.tag_reacquisition_timeout, config.table_tag_stability_timeout);
   EXPECT_FALSE(config.pick_replan_on_target_movement);
   EXPECT_TRUE(config.cartesian_ik_recovery_enabled);
+  EXPECT_FALSE(config.place_release_preflight_enabled);
   EXPECT_FALSE(config.allow_execution);
   EXPECT_TRUE(config.visible_boxes_as_obstacles);
   EXPECT_DOUBLE_EQ(config.execution_settle_timeout, config.reset_state_timeout);

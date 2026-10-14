@@ -53,34 +53,68 @@ POSTURE_SERVICE_FILE = (
 )
 
 
-def load_launch_module():
-    spec = importlib.util.spec_from_file_location("box_pick_place_launch", LAUNCH_FILE)
+def load_launch_module(path=LAUNCH_FILE):
+    spec = importlib.util.spec_from_file_location("manipulation_launch", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_pick_replan_launch_default_respects_yaml(monkeypatch, enabled):
-    module = load_launch_module()
+@pytest.mark.parametrize("parameter,path", [
+    ("pick_replan_on_target_movement", LAUNCH_FILE),
+    ("place_release_preflight_enabled", LAUNCH_FILE),
+    ("place_release_preflight_enabled", RECORDED_LAUNCH_FILE),
+    ("place_release_preflight_enabled", LAUNCH_FILE.with_name("recorded_task_snapshot.launch.py")),
+])
+def test_launch_boolean_default_respects_yaml(monkeypatch, enabled, parameter, path):
+    module = load_launch_module(path)
     original_load = module.yaml.safe_load
 
     def configured_load(stream):
         data = original_load(stream)
         if isinstance(data, dict) and "pick_place_server" in data:
-            data["pick_place_server"]["ros__parameters"]["pick_replan_on_target_movement"] = enabled
+            data["pick_place_server"]["ros__parameters"][parameter] = enabled
         return data
 
     monkeypatch.setattr(module.yaml, "safe_load", configured_load)
     description = module.generate_launch_description()
     argument = next(action for action in description.entities
                     if isinstance(action, DeclareLaunchArgument) and
-                    action.name == "pick_replan_on_target_movement")
+                    action.name == parameter)
     context = LaunchContext()
     assert perform_substitutions(context, argument.default_value) == str(enabled).lower()
     context.launch_configurations[argument.name] = str(not enabled).lower()
     argument.execute(context)
     assert context.launch_configurations[argument.name] == str(not enabled).lower()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("path", [
+    RECORDED_LAUNCH_FILE,
+    LAUNCH_FILE.with_name("recorded_task_snapshot.launch.py"),
+])
+def test_recorded_launch_forwards_release_preflight_setting(path, enabled):
+    from launch.utilities import normalize_to_list_of_substitutions
+
+    description = load_launch_module(path).generate_launch_description()
+    parameter = "place_release_preflight_enabled"
+    context = LaunchContext()
+    context.launch_configurations[parameter] = str(enabled).lower()
+    forwarded = []
+    for action in description.entities:
+        if isinstance(action, IncludeLaunchDescription):
+            arguments = dict(action.launch_arguments)
+            if parameter in arguments:
+                forwarded.append(perform_substitutions(
+                    context, normalize_to_list_of_substitutions(arguments[parameter])))
+    assert forwarded == [str(enabled).lower()]
+
+
+def test_place_release_preflight_is_disabled_in_default_configuration():
+    with CONFIG_FILE.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)["pick_place_server"]["ros__parameters"]
+    assert config["place_release_preflight_enabled"] is False
 
 
 def test_launch_controls_perception_source_selection():

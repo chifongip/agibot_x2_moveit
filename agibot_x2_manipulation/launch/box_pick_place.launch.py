@@ -255,6 +255,12 @@ def generate_launch_description():
                 description="Explicit opt-in for any robot motion, including reset.",
             ),
             DeclareLaunchArgument(
+                "place_release_preflight_enabled",
+                default_value=str(server_params.get("place_release_preflight_enabled", False)).lower(),
+                choices=["true", "false"],
+                description="Repeat full retreat/return feasibility checking before Place release.",
+            ),
+            DeclareLaunchArgument(
                 "phase_retry_attempts", default_value=str(retry_defaults["phase_retry_attempts"]),
                 description="Total attempts per phase before pausing for Continue.",
             ),
@@ -550,6 +556,8 @@ def generate_launch_description():
                             LaunchConfiguration("disable_table_collision"), value_type=bool
                         ),
                         "motion_planning_mode": motion_planning_mode,
+                        "place_release_preflight_enabled": ParameterValue(
+                            LaunchConfiguration("place_release_preflight_enabled"), value_type=bool),
                         "phase_retry_attempts": ParameterValue(
                             LaunchConfiguration("phase_retry_attempts"), value_type=int),
                         "phase_retry_timeout": ParameterValue(

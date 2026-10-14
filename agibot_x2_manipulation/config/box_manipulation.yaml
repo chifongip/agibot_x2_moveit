@@ -146,6 +146,8 @@ pick_place_server:
     place_start_state_bounds_tolerance: 0.02  # rad, about 1.15 degrees
     initial_state: empty
     post_place_named_target: ready
+    # Optional repeated full exit check before release; initial full planning always runs.
+    place_release_preflight_enabled: false
     # Independent post-release OMPL search; calibration and held-box mode are unchanged.
     return_planning_timeout: 30.0
     # Empty-arm intermediate before Pick and between Place retreat and return.

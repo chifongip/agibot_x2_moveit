@@ -21,7 +21,7 @@ T parameter(const rclcpp::Node::SharedPtr & node, const std::string & name, cons
   descriptor.read_only = name == "table_tag_id" || name == "table_tag_frame" ||
     name == "table_tag_to_tabletop_center" || name == "table_dimensions" ||
     name == "table_tag_place_offset" || name == "table_tag_to_box_yaw" ||
-    name == "table_collision_id";
+    name == "table_collision_id" || name == "place_release_preflight_enabled";
   if (node->has_parameter(name)) {
     const auto value = node->get_parameter(name).get_value<T>();
     const auto existing = node->describe_parameter(name);
@@ -328,6 +328,8 @@ PickPlaceConfig loadPickPlaceConfig(const rclcpp::Node::SharedPtr & node)
   config.initial_state = parameter<std::string>(node, "initial_state", "empty");
   config.post_place_named_target = parameter<std::string>(node, "post_place_named_target", "ready");
   config.prepare_named_target = parameter<std::string>(node, "prepare_named_target", "prepare");
+  config.place_release_preflight_enabled = parameter<bool>(
+    node, "place_release_preflight_enabled", false);
   config.return_planning_timeout = parameter<double>(node, "return_planning_timeout", 30.0);
   config.return_planning_time_per_attempt = parameter<double>(
     node, "return_planning_time_per_attempt", 2.0);

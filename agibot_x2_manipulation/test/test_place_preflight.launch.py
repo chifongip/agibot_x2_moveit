@@ -18,6 +18,7 @@ from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene, GetPositionFK
 import pytest
 import rclpy
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rcl_interfaces.srv import GetParameters
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_srvs.srv import Trigger
@@ -33,6 +34,10 @@ trace = Path(f"/tmp/x2_place_preflight_{os.getpid()}.jsonl")
 
 @pytest.mark.launch_test
 def generate_test_description():
+    return make_test_description(True)
+
+
+def make_test_description(preflight_enabled):
     profiles = yaml.safe_load((Path(__file__).parent / "config" /
                                "box_profiles_simulation.yaml").read_text())
     profiles["pick_place_server"] = {"ros__parameters": {"simulate_ideal_attachment": True}}
@@ -40,10 +45,13 @@ def generate_test_description():
         yaml.safe_dump(profiles, params)
     return fixture.fixture.make_test_description(params.name, extra_arguments={
         "phase_retry_attempts": "1", "phase_retry_timeout": "20.0",
+        "place_release_preflight_enabled": str(preflight_enabled).lower(),
         "planning_log_file": str(trace)})
 
 
 class TestPlacePreflight(fixture.TestContinueActions):
+    preflight_enabled = True
+
     def test_continue_all_actions(self):
         rclpy.init()
         self.node = rclpy.create_node("place_preflight_test")
@@ -52,13 +60,15 @@ class TestPlacePreflight(fixture.TestContinueActions):
         self.resume_client = self.node.create_client(ContinueManipulation, "/continue_manipulation")
         read_scene = self.node.create_client(GetPlanningScene, "/get_planning_scene")
         fk = self.node.create_client(GetPositionFK, "/compute_fk")
-        for client in (self.scene, self.resume_client, read_scene, fk):
+        parameters = self.node.create_client(GetParameters, "/pick_place_server/get_parameters")
+        for client in (self.scene, self.resume_client, read_scene, fk, parameters):
             self.assertTrue(client.wait_for_service(timeout_sec=40.0))
         publisher = self.node.create_publisher(BoxStateArray, "/box_states", 10)
         joints, physical = {}, []
         active_task = [None]
         injection = [None]
         ready_pose = [None]
+        checkpoint_probe = [False]
 
         def publish():
             box = BoxState(instance_id="tag:0", profile_id="small_carton")
@@ -96,14 +106,36 @@ class TestPlacePreflight(fixture.TestContinueActions):
             latest = next((s for s in reversed(self.statuses)
                            if s.task_id == active_task[0]), None)
             if (latest is not None and latest.phase in ("place", "saved/place")
-                    and injection[0] is None and ready_pose[0] is not None):
+                    and not checkpoint_probe[0] and injection[0] is None
+                    and ready_pose[0] is not None):
                 injection[0] = blocker(True)
+
+        def status(message):
+            self.statuses.append(message)
+            if (checkpoint_probe[0] and message.task_id == active_task[0]
+                    and message.phase == "release" and message.status == "running"
+                    and injection[0] is None):
+                # The completed placement is stationary while the server waits
+                # for settled feedback. Put an external obstacle at that hand.
+                request = GetPositionFK.Request()
+                request.header.frame_id = "base_link"
+                request.fk_link_names = ["left_hand_pad_link"]
+                request.robot_state.joint_state.name = list(joints)
+                request.robot_state.joint_state.position = list(joints.values())
+                injection[0] = fk.call_async(request)
+
+                def add_obstacle(future):
+                    self.assertEqual(future.result().error_code.val, 1)
+                    ready_pose[0] = future.result().pose_stamped[0].pose
+                    injection[0] = blocker(True)
+
+                injection[0].add_done_callback(add_obstacle)
 
         qos = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
                          durability=DurabilityPolicy.TRANSIENT_LOCAL)
         subscriptions = [
             self.node.create_subscription(ManipulationTaskStatus, "/manipulation_task_status",
-                                          self.statuses.append, qos),
+                                          status, qos),
             self.node.create_subscription(JointState, "/joint_states",
                                           lambda m: joints.update(zip(m.name, m.position)), 10),
             self.node.create_subscription(FollowJointTrajectory_FeedbackMessage,
@@ -114,6 +146,10 @@ class TestPlacePreflight(fixture.TestContinueActions):
                     self.node.create_service(Trigger, "/mujoco_grasp/detach", release)]
         timer = self.node.create_timer(0.03, publish)
         try:
+            future = parameters.call_async(GetParameters.Request(
+                names=["place_release_preflight_enabled"]))
+            self.wait(future.done, 10.0)
+            self.assertEqual(future.result().values[0].bool_value, self.preflight_enabled)
             self.wait(lambda: bool(joints))
             srdf = Path(get_package_share_directory("agibot_x2_moveit_config")) / "config/x2_ultra.srdf"
             ready = ET.parse(srdf).find(".//group_state[@name='ready'][@group='dual_arm']")
@@ -168,15 +204,25 @@ class TestPlacePreflight(fixture.TestContinueActions):
                 self.assertTrue(injection[0].result().success)
                 self.wait(lambda: self.paused(task, previous_pause) is not None)
                 paused = self.paused(task, previous_pause)
-                self.assertEqual(paused.phase, "saved/release" if saved else "release")
+                if self.preflight_enabled:
+                    self.assertEqual(paused.phase, "saved/release" if saved else "release")
+                elif saved:
+                    self.assertTrue(paused.phase.startswith("saved/ready"), paused.phase)
+                else:
+                    self.assertEqual(paused.phase, "from_prepare_to_ready")
                 self.assertIn("pre_release_ready_blocker", paused.failure)
-                self.assertNotEqual(paused.object_disposition, "released")
-                self.assertEqual(physical, ["attach", "release"] * int(saved) + ["attach"])
+                if self.preflight_enabled:
+                    self.assertNotEqual(paused.object_disposition, "released")
+                    self.assertEqual(physical, ["attach", "release"] * int(saved) + ["attach"])
+                else:
+                    self.assertEqual(paused.object_disposition, "released")
+                    self.assertEqual(physical, ["attach", "release"] * (int(saved) + 1))
                 request = GetPlanningScene.Request()
                 request.components.components = PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS
                 future = read_scene.call_async(request)
                 self.wait(future.done, 10.0)
-                self.assertTrue(future.result().scene.robot_state.attached_collision_objects)
+                self.assertEqual(bool(future.result().scene.robot_state.attached_collision_objects),
+                                 self.preflight_enabled)
                 if saved:
                     searches = sum(r["event"] == "pose_search_summary" for r in
                                    map(json.loads, trace.read_text().splitlines()))
@@ -188,6 +234,33 @@ class TestPlacePreflight(fixture.TestContinueActions):
                 self.succeed(result)
                 self.assertEqual(physical, ["attach", "release"] * (int(saved) + 1))
                 active_task[0] = None
+
+            if not self.preflight_enabled:
+                _, result, _ = self.start(Pick, "/pick_box", Pick.Goal(instance_id="tag:0"))
+                self.succeed(result)
+                checkpoint_probe[0], injection[0] = True, None
+                _, result, task = self.start(Place, "/place_box", self.place_goal(Place))
+                active_task[0] = task
+                self.wait(lambda: self.paused(task) is not None)
+                paused = self.paused(task)
+                self.assertEqual(paused.phase, "release")
+                self.assertIn("collision", paused.failure)
+                self.assertIn("pre_release_ready_blocker", paused.failure)
+                self.assertEqual(physical, ["attach", "release"] * 2 + ["attach"])
+                self.assertNotEqual(paused.object_disposition, "released")
+                before_resume_searches = sum(r["event"] == "pose_search_summary" for r in
+                                            map(json.loads, trace.read_text().splitlines()))
+                checkpoint_probe[0] = False
+                future = blocker(False)
+                self.wait(future.done, 10.0)
+                self.assertTrue(future.result().success)
+                self.resume(task, paused.pause_id)
+                self.succeed(result)
+                self.assertEqual(physical, ["attach", "release"] * 3)
+                searches = sum(r["event"] == "pose_search_summary" for r in
+                               map(json.loads, trace.read_text().splitlines()))
+                self.assertEqual(searches, before_resume_searches,
+                                 "collision recovery performed unnecessary placement correction")
         finally:
             self.node.destroy_timer(timer)
             for service in services:
@@ -196,7 +269,7 @@ class TestPlacePreflight(fixture.TestContinueActions):
                 self.node.destroy_subscription(sub)
             for client in self.clients:
                 client.destroy()
-            for client in (self.scene, self.resume_client, read_scene, fk):
+            for client in (self.scene, self.resume_client, read_scene, fk, parameters):
                 self.node.destroy_client(client)
             self.node.destroy_publisher(publisher)
             self.node.destroy_node()

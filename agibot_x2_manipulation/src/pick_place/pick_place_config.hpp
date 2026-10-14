@@ -138,6 +138,7 @@ struct PickPlaceConfig
   std::string initial_state;
   std::string post_place_named_target;
   std::string prepare_named_target{"prepare"};
+  bool place_release_preflight_enabled{false};
   double return_planning_timeout{30.0};
   double return_planning_time_per_attempt{2.0};
   int return_planning_attempts{3};

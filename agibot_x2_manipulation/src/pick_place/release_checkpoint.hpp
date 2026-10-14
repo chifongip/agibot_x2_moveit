@@ -14,7 +14,7 @@ public:
   using Attempt = std::function<bool (std::string &)>;
   using Interrupted = std::function<bool ()>;
 
-  bool validate(const Attempt & check, const Attempt & correct,
+  bool validate(const Attempt & refresh, const Attempt & check, const Attempt & correct,
     const Interrupted & interrupted, std::string & error)
   {
     const auto stopped = [&]() {
@@ -22,7 +22,8 @@ public:
         if (error.empty()) {error = "release preflight canceled or deadline exhausted";}
         return true;
       };
-    if (stopped()) {return false;}
+    // Unavailable/invalid feedback must not request placement correction.
+    if (stopped() || !refresh(error) || stopped()) {return false;}
     if (!correction_pending_) {
       if (check(error)) {return !stopped();}
       correction_pending_ = true;
@@ -31,7 +32,7 @@ public:
     // start. The next retry or Continue will correct using its fresh budget.
     if (stopped() || !correct(error)) {return false;}
     correction_pending_ = false;
-    if (stopped()) {return false;}
+    if (stopped() || !refresh(error) || stopped()) {return false;}
     if (!check(error)) {
       correction_pending_ = true;
       return false;
