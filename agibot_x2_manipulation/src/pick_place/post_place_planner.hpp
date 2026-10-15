@@ -39,8 +39,16 @@ bool validateTimedReturnTrajectory(
 
 // Reuse a pre-attachment plan only after checking its complete measured start
 // and the controller spline against the current scene and grasp touch policy.
-// A changed commanded start is rebased to feedback and retimed before reuse.
+// Start discrepancies within execution_joint_tolerance preserve waypoints and timing.
 bool validateReusablePickTrajectory(
+  moveit_msgs::msg::RobotTrajectory & message,
+  const moveit::core::RobotState & planned_start, const moveit::core::RobotState & current,
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
+  std::string & error, const CancelFunction & interrupted);
+
+// Validate an empty-arm cached withdrawal, including Cartesian path and strict
+// released-box endpoint clearance. No IK search or trajectory changes.
+bool validateReusableRetreatTrajectory(
   moveit_msgs::msg::RobotTrajectory & message,
   const moveit::core::RobotState & planned_start, const moveit::core::RobotState & current,
   const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,

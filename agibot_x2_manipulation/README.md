@@ -866,8 +866,18 @@ up to `return_planning_timeout`, including the configured return retries.
 By default, ordinary Place follows Pick's checkpoint behavior: before physical
 release it checks stationary measured feedback, held geometry, both hand contacts,
 and current bounds/collisions. Contact correction retains the selected placement
-pose and is rechecked before release. After release, retreat and return are planned
-from measured feedback with the existing stage checkpoints and Continue behavior.
+pose and is rechecked before release. After release, `pose_to_pose` Retreat first
+tries the retreat from the latest successful placement preflight, including any
+placement correction. Reuse requires
+fresh stationary feedback, complete measured-start agreement within
+`execution_joint_tolerance`, and current-scene, controller-spline, Cartesian-path,
+and released-box endpoint-clearance validation. Accepted start discrepancies
+preserve the cached waypoints and timing, matching Approach. A rejected or consumed
+cache falls back to planning from measured feedback; cancellation stops the attempt.
+The cache is consumed on its first attempt, so retries and Continue replan.
+`closed_chain` Retreat and subsequent Prepare/Ready stages continue to plan from
+measured feedback. Logs report `Retreat preflight plan reused` or `replanned` and
+validation rejection details. Existing stage checkpoints and Continue behavior remain.
 
 `place_release_preflight_enabled` is a startup boolean, default `false`, available
 in `box_manipulation.yaml` and as a launch argument in the main and recorded

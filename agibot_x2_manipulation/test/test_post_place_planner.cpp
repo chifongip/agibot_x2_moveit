@@ -356,6 +356,132 @@ TEST(PostPlacePlanner, SceneCloneDoesNotRemoveLiveObstacles)
   EXPECT_FALSE(live->getAllowedCollisionMatrix().getEntry("placed_box", "hand", type));
 }
 
+class CachedRetreatTest : public ::testing::Test
+{
+protected:
+  moveit::core::RobotModelPtr robot = model();
+  planning_scene::PlanningScenePtr scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  PickPlaceConfig config;
+  moveit::core::RobotState start{robot};
+  moveit_msgs::msg::RobotTrajectory message;
+
+  void SetUp() override
+  {
+    config.planning_group = "arm";
+    config.left_tcp = config.right_tcp = "hand";
+    config.execution_joint_tolerance = 0.1;
+    start.setToDefaultValues();
+    start.setVariablePosition("slide", -0.2);
+    start.update();
+    auto end = start;
+    end.setVariablePosition("slide", 0.2);
+    end.update();
+    robot_trajectory::RobotTrajectory path(robot, "arm");
+    path.addSuffixWayPoint(start, 0.0);
+    path.addSuffixWayPoint(end, 2.0);
+    path.getRobotTrajectoryMsg(message);
+  }
+
+  bool validate(const moveit::core::RobotState & measured, std::string & error)
+  {
+    return validateReusableRetreatTrajectory(message, start, measured, scene, config,
+      error, []() {return false;});
+  }
+
+  void obstacle(const std::string & id, double x)
+  {
+    moveit_msgs::msg::CollisionObject object;
+    object.id = id;
+    object.header.frame_id = "base_link";
+    shape_msgs::msg::SolidPrimitive shape;
+    shape.type = shape.BOX;
+    shape.dimensions = {0.04, 0.1, 0.1};
+    object.primitives.push_back(shape);
+    geometry_msgs::msg::Pose pose;
+    pose.position.x = x;
+    pose.orientation.w = 1.0;
+    object.primitive_poses.push_back(pose);
+    object.operation = object.ADD;
+    ASSERT_TRUE(scene->processCollisionObjectMsg(object));
+  }
+};
+
+TEST_F(CachedRetreatTest, PreservesValidatedPathAndTimingWithinStartTolerance)
+{
+  const auto original = message;
+  std::string error;
+  ASSERT_TRUE(validate(start, error)) << error;
+  auto measured = start;
+  measured.setVariablePosition("slide", -0.19);
+  measured.update();
+  ASSERT_TRUE(validate(measured, error)) << error;
+  EXPECT_EQ(message, original);
+  measured.setVariablePosition("slide", -0.4);
+  measured.update();
+  EXPECT_FALSE(validate(measured, error));
+  EXPECT_EQ(message, original);
+}
+
+TEST_F(CachedRetreatTest, RejectsOffPathMeasuredHandsAndCancellation)
+{
+  std::string error;
+  config.execution_position_tolerance = 0.001;
+  auto measured = start;
+  measured.setVariablePosition("lift", 0.05);
+  measured.update();
+  EXPECT_FALSE(validate(measured, error));
+  EXPECT_FALSE(validateReusableRetreatTrajectory(message, start, start, scene, config,
+      error, []() {return true;}));
+}
+
+TEST_F(CachedRetreatTest, RejectsNewObstacleAndUnclearedEndpoint)
+{
+  std::string error;
+  obstacle("new_obstacle", 0.0);
+  EXPECT_FALSE(validate(start, error));
+  scene = std::make_shared<planning_scene::PlanningScene>(robot);
+  obstacle(config.box_id, 0.2);
+  // Even an allowed hand/box contact may not survive at the withdrawal endpoint.
+  scene->getAllowedCollisionMatrixNonConst().setEntry(config.box_id, "hand", true);
+  EXPECT_FALSE(validate(start, error));
+  EXPECT_NE(error.find("cleared the placed box"), std::string::npos) << error;
+}
+
+TEST_F(CachedRetreatTest, RejectsCartesianDetourAndInvalidBounds)
+{
+  auto middle = start;
+  middle.setVariablePosition("slide", 0.0);
+  middle.setVariablePosition("lift", 0.1);
+  middle.update();
+  auto end = start;
+  end.setVariablePosition("slide", 0.2);
+  end.update();
+  robot_trajectory::RobotTrajectory path(robot, "arm");
+  path.addSuffixWayPoint(start, 0.0);
+  path.addSuffixWayPoint(middle, 1.0);
+  path.addSuffixWayPoint(end, 1.0);
+  path.getRobotTrajectoryMsg(message);
+  std::string error;
+  EXPECT_FALSE(validate(start, error));
+  middle.setVariablePosition("slide", 1.1);
+  middle.update();
+  path.clear();
+  path.addSuffixWayPoint(start, 0.0);
+  path.addSuffixWayPoint(middle, 2.0);
+  path.getRobotTrajectoryMsg(message);
+  EXPECT_FALSE(validate(start, error));
+}
+
+TEST_F(CachedRetreatTest, RejectsAttachedObject)
+{
+  auto measured = start;
+  measured.attachBody("unexpected_box", Eigen::Isometry3d::Identity(),
+    {shapes::ShapeConstPtr(new shapes::Box(0.01, 0.01, 0.01))},
+    {Eigen::Isometry3d::Identity()}, std::set<std::string>{"hand"}, "hand");
+  std::string error;
+  EXPECT_FALSE(validate(measured, error));
+}
+
 TEST(PostPlacePlanner, CachedPickRequiresMatchingStartAndCompleteTrajectory)
 {
   auto robot = model();

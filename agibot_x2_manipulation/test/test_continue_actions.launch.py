@@ -112,7 +112,7 @@ class TestContinueActions(unittest.TestCase):
         goal.place_pose.pose.orientation.w = 1.0
         return goal
 
-    def test_continue_all_actions(self):
+    def test_continue_all_actions(self, proc_output):
         rclpy.init()
         self.node = rclpy.create_node("continue_actions_test")
         self.statuses, self.clients = [], []
@@ -281,6 +281,7 @@ class TestContinueActions(unittest.TestCase):
             self.set_block(False)
             self.resume(task_id, second_pause.pause_id)
             completed = self.succeed(result)
+            proc_output.assertWaitFor("Retreat preflight plan reused", timeout=10.0)
             self.assertAlmostEqual(completed.achieved_pose.pose.position.x, 0.35, delta=0.05)
             self.assertEqual(len(physical_calls), 4)
             assert_obstacle(2.6)

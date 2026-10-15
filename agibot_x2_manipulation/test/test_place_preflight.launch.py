@@ -52,7 +52,7 @@ def make_test_description(preflight_enabled):
 class TestPlacePreflight(fixture.TestContinueActions):
     preflight_enabled = True
 
-    def test_continue_all_actions(self):
+    def test_continue_all_actions(self, proc_output):
         rclpy.init()
         self.node = rclpy.create_node("place_preflight_test")
         self.statuses, self.clients = [], []
@@ -233,6 +233,8 @@ class TestPlacePreflight(fixture.TestContinueActions):
                 self.resume(task, paused.pause_id)
                 self.succeed(result)
                 self.assertEqual(physical, ["attach", "release"] * (int(saved) + 1))
+                if not saved:
+                    proc_output.assertWaitFor("Retreat preflight plan reused", timeout=10.0)
                 active_task[0] = None
 
             if not self.preflight_enabled:

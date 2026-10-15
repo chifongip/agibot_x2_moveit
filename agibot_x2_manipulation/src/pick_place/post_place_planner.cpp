@@ -480,6 +480,40 @@ bool validateReusablePickTrajectory(
   return validateReusableTrajectory(message, planned_start, current, scene, config, error, interrupted);
 }
 
+bool validateReusableRetreatTrajectory(
+  moveit_msgs::msg::RobotTrajectory & message,
+  const moveit::core::RobotState & planned_start, const moveit::core::RobotState & current,
+  const planning_scene::PlanningScenePtr & scene, const PickPlaceConfig & config,
+  std::string & error, const CancelFunction & interrupted)
+{
+  if (!validateReusableTrajectory(message, planned_start, current, scene, config,
+      error, interrupted)) {return false;}
+  robot_trajectory::RobotTrajectory trajectory(current.getRobotModel(), config.planning_group);
+  trajectory.setRobotTrajectoryMsg(current, message);
+  const auto & first = trajectory.getFirstWayPoint();
+  const auto & last = trajectory.getLastWayPoint();
+  const HandPosePair from{first.getGlobalLinkTransform(config.left_tcp),
+    first.getGlobalLinkTransform(config.right_tcp)};
+  const HandPosePair to{last.getGlobalLinkTransform(config.left_tcp),
+    last.getGlobalLinkTransform(config.right_tcp)};
+  const HandPosePair measured{current.getGlobalLinkTransform(config.left_tcp),
+    current.getGlobalLinkTransform(config.right_tcp)};
+  if (!validateCartesianState(measured, from, to,
+      config.execution_position_limit(config.cartesian_path_position_tolerance),
+      config.execution_orientation_limit(config.cartesian_path_orientation_tolerance), error) ||
+    !validateCartesianTrajectory(trajectory, retreatContactScene(scene, config),
+      config, from, to, error, interrupted)) {return false;}
+  auto endpoint = last;
+  auto strict = planning_scene::PlanningScene::clone(scene);
+  strict->getAllowedCollisionMatrixNonConst().setEntry(config.box_id, false);
+  strict->getAllowedCollisionMatrixNonConst().setDefaultEntry(config.box_id, false);
+  if (!validState(endpoint, strict, trajectory.getGroup(), error)) {
+    error = "cached retreat endpoint has not cleared the placed box: " + error;
+    return false;
+  }
+  return !interrupted();
+}
+
 bool copySceneAttachments(
   moveit::core::RobotState & target, const moveit::core::RobotState & scene_state)
 {

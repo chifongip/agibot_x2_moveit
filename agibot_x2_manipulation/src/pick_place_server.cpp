@@ -3184,6 +3184,7 @@ private:
     std::shared_ptr<moveit::core::RobotState> current;
     moveit_msgs::msg::RobotTrajectory transport;
     PostPlacePlan saved_return;
+    std::shared_ptr<moveit::core::RobotState> cached_retreat_start;
     Eigen::Isometry3d selected_place_pose = place_pose;
     PlaceSearchScope place_scope = PlaceSearchScope::ADAPTIVE;
     const auto place_attempt =
@@ -3215,6 +3216,9 @@ private:
               false, false, held_box_to_left_contact_, held_box_to_right_contact_,
               transport, place_end, selected_place_pose, failure, planning_canceled,
               return_preflight, place_scope)) {return false;}
+          cached_retreat_start = std::make_shared<moveit::core::RobotState>(place_end);
+          cached_retreat_start->clearAttachedBody(config_.box_id);
+          cached_retreat_start->update();
           if (!plan_only && !trajectory_executor_.execute(transport, canceled)) {
             motion_planner_.updateHeldPoseFromRobot();
             failure = trajectory_executor_.error("place execution failed");
@@ -3323,6 +3327,7 @@ private:
     }
 
     held_pose_ = geometry_msgs::msg::PoseStamped();
+    bool retreat_cache_available = true;
     PostPlaceProgress progress(config_.prepare_named_target);
     while (!progress.complete()) {
       const std::string phase = postPlaceStageName(progress.stage());
@@ -3337,6 +3342,21 @@ private:
               std::chrono::duration_cast<std::chrono::steady_clock::duration>(
               std::chrono::duration<double>(config_.return_planning_timeout)));
             if (!progress.replan([&](PostPlacePlan & candidate) {
+                if (progress.stage() == PostPlaceStage::RETREAT) {
+                  std::string cache_error;
+                  const bool available = std::exchange(retreat_cache_available, false);
+                  const bool reuse = config_.motion_planning_mode == MotionPlanningMode::POSE_TO_POSE &&
+                    available && cached_retreat_start && !saved_return.segments.empty() &&
+                    saved_return.segments.front().retreat && validateReusableRetreatTrajectory(
+                    saved_return.segments.front().trajectory, *cached_retreat_start, *current,
+                    planning_scene_.snapshot(), config_, cache_error, planning_canceled);
+                  RCLCPP_INFO(node_->get_logger(), "Retreat preflight plan %s: %s",
+                    reuse ? "reused" : "replanned", cache_error.c_str());
+                  if (reuse) {
+                    candidate.segments.push_back(saved_return.segments.front());
+                    return true;
+                  }
+                }
                 const std::vector<double> distances = progress.stage() == PostPlaceStage::RETREAT &&
                   config_.motion_planning_mode != MotionPlanningMode::POSE_TO_POSE ?
                   std::vector<double>{1.0, 1.5, 2.0} : std::vector<double>{1.0};
